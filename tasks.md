@@ -114,37 +114,37 @@
 # Phase 2: Benchmark and Eval Freeze
 
 ## 2.1 Static Eval
-- [ ] onboarding 問題を 30 問作る
+- [ ] onboarding 問題を 30 問作る（ingest 完了後に生成）
 - [ ] impact analysis 問題を 30 問作る
 - [ ] bug localization 問題を 30 問作る
 - [ ] change planning 問題を 30 問作る
-- [ ] 採点ルーブリックを付与する
+- [x] 採点ルーブリックを付与する（`evals/static_eval_schema.md`）
 
 ## 2.2 Multi-turn Session Eval
-- [ ] 6 ターン × 30 セッションを作る
-- [ ] 途中で話題が狭まるケースを入れる
-- [ ] 途中で話題が切り替わるケースを入れる
-- [ ] exact quote 要求ケースを入れる
-- [ ] diff / patch 要求ケースを入れる
+- [ ] 6 ターン × 30 セッションを作る（ingest 完了後に生成）
+- [x] 途中で話題が狭まるケースを入れる（schema: `topic_narrowing`）
+- [x] 途中で話題が切り替わるケースを入れる（schema: `topic_shift`）
+- [x] exact quote 要求ケースを入れる（schema: `exact_quote`）
+- [x] diff / patch 要求ケースを入れる（schema: `diff_or_patch`）
 
 ## 2.3 Stress Eval
-- [ ] 8 同時セッション用ケースを作る
-- [ ] session ごとの active memory 計測を入れる
-- [ ] fallback 発火の記録を入れる
+- [ ] 8 同時セッション用ケースを作る（ingest 完了後に生成）
+- [x] session ごとの active memory 計測を入れる（eval.yaml に定義済み）
+- [x] fallback 発火の記録を入れる（logger.py で記録済み）
 
 ## 2.4 Scoring
-- [ ] grader テンプレートを作る
-- [ ] correctness / grounding / usefulness を採点可能にする
-- [ ] wrong citation 判定ルールを作る
-- [ ] stale memory 判定ルールを作る
+- [x] grader テンプレートを作る（`evals/grader_template.py`、judge: qwen3.5:27b）
+- [x] correctness / grounding / usefulness を採点可能にする
+- [x] wrong citation 判定ルールを作る（`citation.py`）
+- [ ] stale memory 判定ルールを作る（Phase 7 で実装）
 
 ## 2.5 Freeze
-- [ ] Week 2 末で benchmark を freeze する
-- [ ] freeze 後の変更ルールを定義する
-- [ ] baseline スコアを保存する
+- [ ] Week 2 末で benchmark を freeze する（`bench/freeze_benchmark.py` 準備済み）
+- [x] freeze 後の変更ルールを定義する（`spec.md` §14.4）
+- [ ] baseline スコアを保存する（ingest → serve → run_all 後に実行）
 
 ### Exit Criteria
-- [ ] benchmark が再現可能
+- [ ] benchmark が再現可能（問題セット生成待ち）
 - [ ] baseline スコアが 1 回分保存されている
 - [ ] 以後の比較が benchmark 上で可能
 
