@@ -1,0 +1,38 @@
+{
+  "total_turns": 4,
+  "latency_total_ms": {
+    "count": 4,
+    "mean": 21137.42,
+    "p50": 20759.55,
+    "p90": 26179.39,
+    "min": 15219.98,
+    "max": 27810.58
+  },
+  "latency_retrieval_ms": {
+    "count": 4,
+    "mean": 1365.34,
+    "p50": 47.01,
+    "p90": 3751.68,
+    "min": 30.23,
+    "max": 5337.11
+  },
+  "latency_generation_ms": {
+    "count": 4,
+    "mean": 19765.45,
+    "p50": 20703.55,
+    "p90": 22424.11,
+    "min": 15188.44,
+    "max": 22466.25
+  },
+  "memory_peak_mb": {
+    "count": 4,
+    "mean": 36.95,
+    "p50": 18.99,
+    "p90": 69.34,
+    "min": 18.94,
+    "max": 90.9
+  },
+  "no_citation_count": 1,
+  "wrong_citation_count": 0,
+  "no_citation_rate": 0.25
+}

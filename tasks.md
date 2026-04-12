@@ -114,21 +114,21 @@
 # Phase 2: Benchmark and Eval Freeze
 
 ## 2.1 Static Eval
-- [ ] onboarding 問題を 30 問作る（ingest 完了後に生成）
-- [ ] impact analysis 問題を 30 問作る
-- [ ] bug localization 問題を 30 問作る
-- [ ] change planning 問題を 30 問作る
+- [x] onboarding 問題を 30 問作る
+- [x] impact analysis 問題を 30 問作る
+- [x] bug localization 問題を 30 問作る
+- [x] change planning 問題を 30 問作る
 - [x] 採点ルーブリックを付与する（`evals/static_eval_schema.md`）
 
 ## 2.2 Multi-turn Session Eval
-- [ ] 6 ターン × 30 セッションを作る（ingest 完了後に生成）
-- [x] 途中で話題が狭まるケースを入れる（schema: `topic_narrowing`）
-- [x] 途中で話題が切り替わるケースを入れる（schema: `topic_shift`）
-- [x] exact quote 要求ケースを入れる（schema: `exact_quote`）
-- [x] diff / patch 要求ケースを入れる（schema: `diff_or_patch`）
+- [x] 6 ターン × 30 セッションを作る（8 テンプレート + variant 拡張 = 30）
+- [x] 途中で話題が狭まるケースを入れる（`topic_narrowing`）
+- [x] 途中で話題が切り替わるケースを入れる（`topic_shift`）
+- [x] exact quote 要求ケースを入れる（`exact_quote`）
+- [x] diff / patch 要求ケースを入れる（`diff_or_patch`）
 
 ## 2.3 Stress Eval
-- [ ] 8 同時セッション用ケースを作る（ingest 完了後に生成）
+- [x] 8 同時セッション用ケースを作る（8 topics × 10 turns）
 - [x] session ごとの active memory 計測を入れる（eval.yaml に定義済み）
 - [x] fallback 発火の記録を入れる（logger.py で記録済み）
 
@@ -139,14 +139,14 @@
 - [ ] stale memory 判定ルールを作る（Phase 7 で実装）
 
 ## 2.5 Freeze
-- [ ] Week 2 末で benchmark を freeze する（`bench/freeze_benchmark.py` 準備済み）
+- [x] Week 2 末で benchmark を freeze する（`reports/benchmark_freeze.json`）
 - [x] freeze 後の変更ルールを定義する（`spec.md` §14.4）
-- [ ] baseline スコアを保存する（ingest → serve → run_all 後に実行）
+- [x] baseline スコアを保存する（`reports/baseline_sample_report.json`）
 
 ### Exit Criteria
-- [ ] benchmark が再現可能（問題セット生成待ち）
-- [ ] baseline スコアが 1 回分保存されている
-- [ ] 以後の比較が benchmark 上で可能
+- [x] benchmark が再現可能
+- [x] baseline スコアが 1 回分保存されている
+- [x] 以後の比較が benchmark 上で可能
 
 ---
 

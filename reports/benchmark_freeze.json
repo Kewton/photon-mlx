@@ -1,0 +1,10 @@
+{
+  "frozen_at": "2026-04-12T14:22:03Z",
+  "repo_commit": "eba8942c81dbf990d25fbae34e6601bdbc21e74b",
+  "note": "Week 2 freeze: 120 static + 30 multi-turn + 8 stress",
+  "eval_set_checksums": {
+    "multi_turn_eval.jsonl": "711ff5e2f6d0aefdaf109638ad140da46ff8e917843e5fb91b39d13636546f62",
+    "static_eval.jsonl": "011c987e4f719bdbf3d837d1819da6f0d779cfa59b6086ffcbda8d7280ca14a2",
+    "stress_eval.jsonl": "7c58ec38e1ea672f815d80ca473aedb0d26d36f97de40cae01e99dc78597d93b"
+  }
+}
