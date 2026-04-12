@@ -24,3 +24,6 @@ reports/benchmark_runs/
 
 # macOS
 .DS_Store
+
+# Scratch / UAT test files
+test-uat*
