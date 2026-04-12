@@ -188,28 +188,28 @@
 # Phase 4: torch_ref
 
 ## 4.1 Minimal LM
-- [ ] `torch_ref/` を作る
-- [ ] decoder-only minimal LM を作る
-- [ ] teacher forcing を実装する
-- [ ] greedy decode を実装する
-- [ ] cache 付き decode を実装する
+- [x] `torch_ref/` を作る
+- [x] decoder-only minimal LM を作る（LLaMA-style: RoPE, SwiGLU, GQA, RMSNorm）
+- [x] teacher forcing を実装する
+- [x] greedy decode を実装する
+- [ ] cache 付き decode を実装する（Phase 9 で必要に応じて追加）
 
 ## 4.2 Correctness Tests
-- [ ] mask テストを書く
-- [ ] shape テストを書く
-- [ ] 1 batch overfit テストを書く
-- [ ] seed 固定の再現テストを書く
-- [ ] logits の健全性確認をする
+- [x] mask テストを書く（causal mask upper triangular, prefix invariance）
+- [x] shape テストを書く（logits, labels, greedy decode）
+- [x] 1 batch overfit テストを書く（200 step で loss < 10% of initial）
+- [x] seed 固定の再現テストを書く
+- [x] logits の健全性確認をする（finite, non-constant）
 
 ## 4.3 Reference Harness
 - [ ] forward 比較用の入力セットを作る
-- [ ] PHOTON 実装の control に使えるようにする
-- [ ] common config 読み込みを実装する
+- [x] PHOTON 実装の control に使えるようにする（common PhotonConfig）
+- [x] common config 読み込みを実装する（`torch_ref/config.py`）
 
 ### Exit Criteria
-- [ ] minimal LM が安定して動く
-- [ ] basic correctness tests が通る
-- [ ] PHOTON 実装の比較対象として使える
+- [x] minimal LM が安定して動く（11/11 tests passed）
+- [x] basic correctness tests が通る
+- [x] PHOTON 実装の比較対象として使える
 
 ---
 
