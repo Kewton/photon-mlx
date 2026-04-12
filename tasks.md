@@ -104,10 +104,10 @@
 - [x] ログ保存を実装する（JSONL per run）
 
 ### Exit Criteria
-- [ ] baseline RepoRAG が 1 コマンドで起動する（ingest → index → serve の疎通確認待ち）
-- [ ] citation 付き回答が出る
-- [ ] 同一 session で follow-up できる
-- [ ] retrieval / answer / citation がログに残る
+- [x] baseline RepoRAG が 1 コマンドで起動する（CLI 疎通確認済み）
+- [x] citation 付き回答が出る（`[C:9]` で正しい chunk を引用）
+- [ ] 同一 session で follow-up できる（インタラクティブモードで確認予定）
+- [x] retrieval / answer / citation がログに残る（JSONL 確認済み）
 
 ---
 
