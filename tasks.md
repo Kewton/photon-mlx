@@ -66,45 +66,45 @@
 # Phase 1: Baseline RepoRAG
 
 ## 1.1 Repo ingestion
-- [ ] `scripts/ingest_repo.py` を作る
-- [ ] repo を commit hash 付きで取り込める
-- [ ] コード、README、docs、tests、configs を抽出する
-- [ ] chunking 戦略を定義する
-- [ ] chunk metadata を保存する
-- [ ] file path / symbol / section 情報を保持する
+- [x] `scripts/ingest_repo.py` を作る
+- [x] repo を commit hash 付きで取り込める
+- [x] コード、README、docs、tests、configs を抽出する
+- [x] chunking 戦略を定義する（Python: AST boundary、その他: plain）
+- [x] chunk metadata を保存する（SQLite）
+- [x] file path / symbol / section 情報を保持する
 
 ## 1.2 Indexing
-- [ ] lexical index を構築する
-- [ ] embedding index を構築する
-- [ ] symbol graph を構築する
-- [ ] dependency graph の最小版を作る
-- [ ] index build の再実行を idempotent にする
+- [x] lexical index を構築する（BM25Okapi）
+- [x] embedding index を構築する（sentence-transformers + numpy）
+- [x] symbol graph を構築する（AST call graph）
+- [ ] dependency graph の最小版を作る（symbol graph で代替中、必要なら拡張）
+- [x] index build の再実行を idempotent にする（INSERT OR REPLACE）
 
 ## 1.3 Retrieval
-- [ ] hybrid retrieval を実装する
-- [ ] lexical + embedding の重み付けを決める
-- [ ] symbol / graph expansion を追加する
-- [ ] chunk 近傍展開を入れる
-- [ ] cited chunk 優先ロジックを入れる
-- [ ] retrieval debug 出力を残す
+- [x] hybrid retrieval を実装する
+- [x] lexical + embedding の重み付けを決める（config で制御）
+- [x] symbol / graph expansion を追加する
+- [x] chunk 近傍展開を入れる
+- [x] cited chunk 優先ロジックを入れる
+- [x] retrieval debug 出力を残す（JSONL ログ）
 
 ## 1.4 Baseline answer generation
-- [ ] baseline instruct model を決める
-- [ ] answer prompt を定義する
-- [ ] citation 付き回答フォーマットを決める
-- [ ] answer-time local refresh を入れる
-- [ ] no-citation 断定を抑制する
-- [ ] simple session memory を入れる
+- [x] baseline instruct model を決める（Qwen2.5-Coder-14B-Instruct-4bit）
+- [x] answer prompt を定義する（`generation/prompt.py`）
+- [x] citation 付き回答フォーマットを決める（`[C:N]` 形式）
+- [ ] answer-time local refresh を入れる（`evidence_pack.py` に hook 追加予定）
+- [x] no-citation 断定を抑制する（system prompt で強制）
+- [x] simple session memory を入れる（`memory/session.py`）
 
 ## 1.5 Interface
-- [ ] CLI を作る
-- [ ] ローカル API を作る
-- [ ] session_id 指定を実装する
-- [ ] repo_id 指定を実装する
-- [ ] ログ保存を実装する
+- [x] CLI を作る（`baseline_reporag/cli.py`）
+- [x] ローカル API を作る（`baseline_reporag/server.py`、FastAPI）
+- [x] session_id 指定を実装する
+- [x] repo_id 指定を実装する
+- [x] ログ保存を実装する（JSONL per run）
 
 ### Exit Criteria
-- [ ] baseline RepoRAG が 1 コマンドで起動する
+- [ ] baseline RepoRAG が 1 コマンドで起動する（ingest → index → serve の疎通確認待ち）
 - [ ] citation 付き回答が出る
 - [ ] 同一 session で follow-up できる
 - [ ] retrieval / answer / citation がログに残る
