@@ -381,10 +381,10 @@
 # Phase 10: Demo, Report, Release Decision
 
 ## 10.1 Demo
-- [ ] CLI デモを整える
-- [ ] 対象 repo での代表質問を 5 本用意する（シナリオ確定済み、下記参照）
-- [ ] follow-up が速いことを見せるデモを作る
-- [ ] citation と fallback を見せるデモを作る
+- [x] CLI デモを整える（`demo/run_demo.py`）
+- [x] 対象 repo での代表質問を 5 本用意する（`demo/scenarios.py`、下記参照）
+- [x] follow-up が速いことを見せるデモを作る（demo-01, demo-02）
+- [x] citation と fallback を見せるデモを作る（demo-04: Safe RecGen）
 
 ### Demo シナリオ（fastapi/fastapi 対象）
 
@@ -561,27 +561,27 @@
 # Gate Checklist
 
 ## Gate 1
-- [ ] baseline RepoRAG が安定稼働
-- [ ] benchmark が再現可能
-- [ ] citation 付き回答が出る
-- [ ] logging がある
+- [x] baseline RepoRAG が安定稼働（CLI 疎通・follow-up 確認済み）
+- [x] benchmark が再現可能（harness + freeze script 準備済み）
+- [x] citation 付き回答が出る（`[C:N]` 形式で動作確認済み）
+- [x] logging がある（JSONL per run + latency breakdown）
 
 ## Gate 2
-- [ ] PHOTON forward が安定
-- [ ] tiny / small で学習が回る
-- [ ] drift 指標が取得できる
-- [ ] follow-up 改善の兆候がある
+- [x] PHOTON forward が安定（9/9 テスト通過）
+- [x] tiny / small で学習が回る（overfit テスト通過）
+- [x] drift 指標が取得できる（cosine_drift, token_agreement, logit_kl）
+- [ ] follow-up 改善の兆候がある（benchmark 実行後に判定）
 
 ## Gate 3
-- [ ] Safe RecGen が有効
-- [ ] 誤答率が改善
+- [x] Safe RecGen が有効（20/20 テスト通過）
+- [ ] 誤答率が改善（eval 実行後に判定）
 - [ ] レイテンシ改善が残る
 - [ ] stale memory が抑制される
 
 ## Gate 4
 - [ ] benchmark report 完成
 - [ ] failure cases 完成
-- [ ] demo 完成
+- [x] demo 完成（5 シナリオ + run_demo.py）
 - [ ] 次フェーズ意思決定完了
 
 ---
@@ -602,7 +602,7 @@
 # Open Questions
 
 - [ ] retrieval の control condition をどこまで固定するか
-- [ ] demo で見せるユースケースをどれに絞るか
+- [x] demo で見せるユースケースをどれに絞るか（5 本確定、`demo/scenarios.py`）
 
 ---
 
