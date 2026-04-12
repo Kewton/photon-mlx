@@ -435,58 +435,42 @@
 
 # Week-by-Week Plan
 
-## Week 1
-- [ ] repo skeleton を作る
-- [ ] spec / README / tasks を確定する
-- [ ] 対象 repo を 1 つ選ぶ
-- [ ] ingest 方針を決める
+## Week 1 — 実績
+- [x] repo skeleton を作る（Phase 0.2）
+- [x] spec / README / tasks を確定する（Phase 0.1, 0.3）
+- [x] 対象 repo を 1 つ選ぶ（fastapi/fastapi）
+- [x] ingest 方針を決める（code_aware chunking, SQLite store）
+- [x] baseline RepoRAG を実装する（Phase 1: 15 モジュール）
+- [x] CLI 疎通・follow-up 確認（Phase 1 Exit Criteria 全通過）
 
-## Week 2
-- [ ] baseline retrieval を動かす
-- [ ] citation 付き回答を出す
-- [ ] benchmark を freeze する
-- [ ] Gate 1 判定材料を集める
+## Week 2 — 実績
+- [x] benchmark を freeze する（120 static + 30 MT + 8 stress）
+- [x] Gate 1 判定 → 全項目クリア
+- [x] PHOTON 実装（Phase 4–8: torch_ref + forward + training + session + Safe RecGen）
+- [x] PHOTON tiny 学習テスト（79M params, loss 70.4% 低減）
+- [x] Mac 最適化ハーネス（Phase 9）
+- [x] Demo 5 シナリオ作成（Phase 10）
+- [x] baseline eval サンプル実行・初回レポート
+- [x] training corpus 生成（3.3M tokens）
 
-## Week 3
-- [ ] static eval を埋める
-- [ ] multi-turn eval を埋める
-- [ ] logging / profiling を入れる
-- [ ] baseline レポート 1 本目を出す
+## Week 3–4（予定）
+- [ ] Full 120 問 static eval
+- [ ] Multi-turn 30 session eval
+- [ ] Stress eval (8 concurrent)
+- [ ] PHOTON small 学習
+- [ ] Comparison matrix 完成
+- [ ] Gate 2 判定
 
-## Week 4
-- [ ] baseline を安定化する
-- [ ] Gate 1 を判定する
-- [ ] PHOTON 実装開始判断をする
+## Week 5–8（予定）
+- [ ] PHOTON-RAG end-to-end 統合
+- [ ] Baseline vs PHOTON 公平比較
+- [ ] Safe RecGen 発火率・誤答率測定
+- [ ] Gate 3 判定
 
-## Week 5
-- [ ] torch_ref minimal LM を作る
-- [ ] basic tests を通す
-- [ ] photon_mlx skeleton を作る
-
-## Week 6
-- [ ] chunker / encoder を実装する
-- [ ] converter / local decoder を実装する
-- [ ] tiny forward smoke test を通す
-
-## Week 7
-- [ ] teacher-forced path を作る
-- [ ] PHOTON module tests を増やす
-- [ ] tiny config を安定化する
-
-## Week 8
-- [ ] initial PHOTON eval を回す
-- [ ] drift metrics の計測を始める
-- [ ] failure cases を残す
-
-## Week 9
-- [ ] training loop を作る
-- [ ] tiny overfit を確認する
-- [ ] checkpoint 保存を入れる
-
-## Week 10
-- [ ] tiny val を通す
-- [ ] small config を 1 本回す
-- [ ] loss breakdown を確認する
+## Week 9–12（予定）
+- [ ] Gate 4 判定
+- [ ] Report 清書
+- [ ] 次フェーズ意思決定
 
 ## Week 11
 - [ ] session inference の入口を作る

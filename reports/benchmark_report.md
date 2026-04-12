@@ -9,62 +9,77 @@
 
 ---
 
-## Baseline Sample Results (4 questions)
+## Baseline Results (20 questions, onboarding category)
 
-| Metric | Value |
-|---|---|
-| Total turns | 4 |
-| Latency P50 | 20,760 ms |
-| Latency P90 | 26,179 ms |
-| Latency mean | 21,137 ms |
-| Retrieval P50 | 47 ms |
-| Generation P50 | 20,704 ms |
-| Memory peak (first turn) | 91.0 MB |
-| Memory peak (mean) | 37.0 MB |
-| No-citation rate | 25% (1/4) |
-| Wrong citation count | 0 |
+| Metric | 4q sample | 20q run |
+|---|---|---|
+| Latency P50 | 20,760 ms | **17,585 ms** |
+| Latency P90 | 26,179 ms | **26,585 ms** |
+| Latency mean | 21,137 ms | **19,162 ms** |
+| Retrieval P50 | 47 ms | **41 ms** |
+| Generation P50 | 20,704 ms | **17,544 ms** |
+| Memory peak (max) | 91.0 MB | **90.9 MB** |
+| Memory peak P50 | 19.0 MB | **19.0 MB** |
+| No-citation rate | 25% (1/4) | **35% (7/20)** |
+| Wrong citation count | 0 | **0** |
 
 ### Observations
 
-- **Generation dominates latency**: retrieval is <1% of total after warmup (P50 47ms vs 20.7s generation)
-- **First turn is slowest**: model loading + embedding model warmup adds ~6s
-- **No-citation rate is high** in the sample (1/4): the onboarding question about dependency injection got no citations. This is a known weakness for broad structural questions where the retrieval may not surface the right chunks.
-- **Wrong citation is 0**: when citations are produced, they point to valid chunks
+- **Generation dominates latency**: retrieval P50 is 41ms vs generation P50 17.5s (99.8% of total)
+- **No-citation rate 35%** is concerning — model answers correctly but omits `[C:N]` references in about 1/3 of cases
+- **Wrong citation remains 0**: when the model does cite, it points to valid chunks
+- **Latency range is wide**: 9.8s to 29.2s depending on answer length
+- **Memory is stable** after warmup: P50 ~19 MB per turn
 
 ### Latency Breakdown
 
 | Phase | P50 (ms) | % of total |
 |---|---|---|
-| Retrieval | 47 | 0.2% |
+| Retrieval | 41 | 0.2% |
 | Graph expansion | ~1 | 0.0% |
 | Evidence pack | ~0.3 | 0.0% |
-| Generation | 20,704 | 99.7% |
+| Generation | 17,544 | 99.8% |
 | Citation resolve | ~0.3 | 0.0% |
 
 ### Key Takeaways
 
-1. **PHOTON 最適化の主要ターゲットは generation フェーズ** — retrieval は既に十分高速
-2. **Follow-up ターンでの retrieval 高速化は確認済み** (6.2s → 47ms: embedding warmup 効果)
-3. **No-citation rate の改善** が品質上の最優先課題
-4. **Full 120 問の評価** で no_citation_rate と citation_precision を確定させる必要あり
+1. **PHOTON 最適化の主要ターゲットは generation フェーズ**
+2. **No-citation rate 35% の改善が最優先** — prompt engineering or post-processing
+3. **Wrong citation 0 は堅い** — citation の precision は高い
+4. **Follow-up ターンの retrieval は高速** (warmup 後 41ms)
 
 ---
 
-## Comparison Matrix (placeholder)
+## PHOTON Tiny Training Results
 
-| Variant | Latency P50 | Memory P50 | Citation Precision | Task Score |
+| Metric | Value |
+|---|---|
+| Parameters | 78,970,240 (~79M) |
+| Config | paper-conformal downscale |
+| Steps | 100 (quick test) |
+| Initial loss | 10.56 |
+| Final loss | 3.13 |
+| Reduction | 70.4% |
+| Val loss | 3.16 |
+| Training time | 23.4s |
+
+---
+
+## Comparison Matrix
+
+| Variant | Latency P50 | Memory P50 | No-cite rate | Wrong cite |
 |---|---|---|---|---|
-| Baseline-RAG | 20,760 ms | 19 MB | TBD | TBD |
-| Baseline-RAG + summary memory | - | - | - | - |
-| PHOTON-RAG | - | - | - | - |
-| PHOTON-RAG + Safe RecGen | - | - | - | - |
+| Baseline-RAG | 17,585 ms | 19 MB | 35% | 0% |
+| Baseline-RAG + summary memory | TBD | TBD | TBD | TBD |
+| PHOTON-RAG | TBD | TBD | TBD | TBD |
+| PHOTON-RAG + Safe RecGen | TBD | TBD | TBD | TBD |
 
 ---
 
 ## Next Steps
 
-1. Run full 120-question static eval
-2. Run 30-session multi-turn eval
-3. Run stress eval (8 concurrent sessions)
-4. Fill comparison matrix
-5. Gate 2 判定
+1. Full 120 問 static eval
+2. Multi-turn 30 session eval
+3. No-citation rate 改善（prompt 強化）
+4. PHOTON-RAG end-to-end 統合
+5. Comparison matrix 完成 → Gate 2 判定
