@@ -216,36 +216,36 @@
 # Phase 5: PHOTON Forward (MLX Main Track)
 
 ## 5.1 Core Modules
-- [ ] `photon_mlx/` を作る
-- [ ] chunker を実装する
-- [ ] hierarchical encoder を実装する
-- [ ] converter を実装する
-- [ ] local decoder を実装する
-- [ ] output head を実装する
+- [x] `photon_mlx/` を作る
+- [x] chunker を実装する（ConcatChunker + LinearChunker）
+- [x] hierarchical encoder を実装する（LLaMA-style blocks with RoPE）
+- [x] converter を実装する（linear + pos_embed + RMSNorm）
+- [x] local decoder を実装する（chunk-local causal attention）
+- [x] output head を実装する（RMSNorm + Linear）
 
 ## 5.2 Forward Graph
-- [ ] bottom-up pass を実装する
-- [ ] top-down pass を実装する
-- [ ] teacher-forced forward を実装する
-- [ ] hidden state を必要に応じて保存する
-- [ ] config から level 数を切り替えられるようにする
+- [x] bottom-up pass を実装する
+- [x] top-down pass を実装する（_decode_level: prefix + chunk processing）
+- [x] teacher-forced forward を実装する（cross-entropy loss）
+- [ ] hidden state を必要に応じて保存する（Phase 7 で対応）
+- [x] config から level 数を切り替えられるようにする（PhotonConfig.hierarchy.levels）
 
 ## 5.3 Testing
-- [ ] shape テストを書く
-- [ ] chunk boundary テストを書く
-- [ ] local attention 範囲テストを書く
-- [ ] tiny config で smoke test を通す
-- [ ] torch_ref と概念整合を確認する
+- [x] shape テストを書く（logits, labels, batch_size=1）
+- [x] chunk boundary テストを書く（min T=16, longer T=128）
+- [ ] local attention 範囲テストを書く（Phase 7 で drift 含めて追加）
+- [x] tiny config で smoke test を通す（logits finite, loss positive, loss decreases）
+- [ ] torch_ref と概念整合を確認する（forward 比較入力セット未作成）
 
 ## 5.4 Configs
-- [ ] `configs/photon_tiny.yaml` を作る
-- [ ] `configs/photon_small.yaml` を作る
-- [ ] loss / batch / context の最小設定を決める
+- [x] `configs/photon_tiny.yaml` を作る
+- [x] `configs/photon_small.yaml` を作る
+- [x] loss / batch / context の最小設定を決める
 
 ### Exit Criteria
-- [ ] PHOTON の forward が tiny で安定動作する
-- [ ] teacher-forced eval の入口がある
-- [ ] module 単位のテストが通る
+- [x] PHOTON の forward が tiny で安定動作する（9/9 tests passed）
+- [x] teacher-forced eval の入口がある（forward + loss 動作確認済み）
+- [x] module 単位のテストが通る
 
 ---
 
