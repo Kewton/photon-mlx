@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+from typing import Callable
+
 try:
+    import mlx.core as mx
     import mlx_lm
+    from mlx_lm.sample_utils import make_sampler
     _HAS_MLX = True
 except ImportError:
     _HAS_MLX = False
@@ -23,6 +27,7 @@ class Generator:
         self._top_p = top_p
         self._model = None
         self._tokenizer = None
+        self._sampler: Callable | None = None
 
     def _load(self) -> None:
         if self._model is not None:
@@ -30,6 +35,10 @@ class Generator:
         if not _HAS_MLX:
             raise ImportError("mlx_lm is required: pip install mlx-lm")
         self._model, self._tokenizer = mlx_lm.load(self._model_id)
+        self._sampler = make_sampler(
+            temp=self._temperature,
+            top_p=self._top_p,
+        )
 
     def generate(self, messages: list[dict]) -> str:
         self._load()
@@ -43,5 +52,5 @@ class Generator:
             self._tokenizer,
             prompt=prompt,
             max_tokens=self._max_new_tokens,
-            temp=self._temperature,
+            sampler=self._sampler,
         )
