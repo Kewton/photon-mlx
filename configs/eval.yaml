@@ -14,7 +14,7 @@ run:
 
 repo:
   repo_id: "fastapi_fastapi"
-  repo_commit: "SET_ME_TO_FIXED_SHA"
+  repo_commit: "eba8942c81dbf990d25fbae34e6601bdbc21e74b"
 
 variants:
   - id: "baseline_rag"
