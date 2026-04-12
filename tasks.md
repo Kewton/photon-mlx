@@ -153,35 +153,35 @@
 # Phase 3: Logging, Profiling, and Reporting
 
 ## 3.1 必須ログ
-- [ ] run_id を保存する
-- [ ] session_id / turn_id を保存する
-- [ ] repo_id / repo_commit を保存する
-- [ ] retrieval chunk IDs を保存する
-- [ ] evidence pack IDs を保存する
-- [ ] cited chunk IDs を保存する
-- [ ] fallback flag / reason を保存する
-- [ ] latency breakdown を保存する
-- [ ] memory peak を保存する
-- [ ] answer text と grader score を保存する
+- [x] run_id を保存する
+- [x] session_id / turn_id を保存する
+- [x] repo_id / repo_commit を保存する
+- [x] retrieval chunk IDs を保存する
+- [x] evidence pack IDs を保存する
+- [x] cited chunk IDs を保存する
+- [x] fallback flag / reason を保存する
+- [x] latency breakdown を保存する（`profiler.py` → `pipeline.py` → JSONL）
+- [x] memory peak を保存する（`tracemalloc` ベース）
+- [x] answer text と grader score を保存する（grader score は採点実行後に追加）
 
 ## 3.2 Profiling
-- [ ] retrieval time を測る
-- [ ] prefill time を測る
-- [ ] decode time を測る
-- [ ] end-to-end latency を測る
-- [ ] peak memory を測る
-- [ ] session あたりメモリを推定する
+- [x] retrieval time を測る（`TurnProfiler.phase("retrieval")`）
+- [ ] prefill time を測る（mlx_lm 内部分離は Phase 9 で対応）
+- [ ] decode time を測る（同上）
+- [x] end-to-end latency を測る
+- [x] peak memory を測る
+- [ ] session あたりメモリを推定する（stress eval 時に計測）
 
 ## 3.3 Reporting
-- [ ] `scripts/export_report.py` を作る
-- [ ] benchmark summary を出せるようにする
-- [ ] failure case を抽出できるようにする
+- [x] `scripts/export_report.py` を作る
+- [x] benchmark summary を出せるようにする（P50/P90/mean）
+- [ ] failure case を抽出できるようにする（grader 実行後に対応）
 - [ ] 比較グラフのひな形を作る
 
 ### Exit Criteria
-- [ ] benchmark run の結果が自動集計される
-- [ ] failure analysis の入口がある
-- [ ] baseline のレポートが出せる
+- [x] benchmark run の結果が自動集計される
+- [ ] failure analysis の入口がある（grader 実行後に対応）
+- [x] baseline のレポートが出せる
 
 ---
 
