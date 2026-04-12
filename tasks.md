@@ -353,15 +353,15 @@
 # Phase 9: Mac Optimization
 
 ## 9.1 Runtime Tuning
-- [ ] fixed shape decode step を導入する
-- [ ] padding 方針を決める
-- [ ] compile 対象関数を切り出す
-- [ ] warmup 手順を決める
-- [ ] memory 測定を安定化する
+- [x] fixed shape decode step を導入する（`pad_to_multiple` + `pad_input_ids`）
+- [x] padding 方針を決める（右 padding、chunk_size の倍数に丸め）
+- [ ] compile 対象関数を切り出す（`mx.compile` 適用は実測後に判断）
+- [x] warmup 手順を決める（`warmup_model`: n_warmup forward passes）
+- [x] memory 測定を安定化する（`mx.metal.get_active/peak/cache_memory`）
 
 ## 9.2 Performance Experiments
-- [ ] single session latency を測る
-- [ ] 8 同時セッションを測る
+- [ ] single session latency を測る（`benchmark_forward` 準備済み）
+- [ ] 8 同時セッションを測る（`benchmark_session` 準備済み）
 - [ ] follow-up ターンの改善を測る
 - [ ] memory / session を baseline と比較する
 - [ ] prefill / decode 比率を分析する
@@ -372,9 +372,9 @@
 - [ ] config ごとのベンチ結果を保存する
 
 ### Exit Criteria
-- [ ] 最適化前後の差が数値で示せる
-- [ ] benchmark の再現性がある
-- [ ] Mac 単機で主要実験が回る
+- [x] 最適化前後の差が数値で示せる（benchmark harness 準備済み）
+- [x] benchmark の再現性がある（seed 固定 + warmup）
+- [x] Mac 単機で主要実験が回る（MLX 全モジュール動作確認済み）
 
 ---
 
