@@ -319,33 +319,33 @@
 # Phase 8: Safe RecGen
 
 ## 8.1 Trigger Design
-- [ ] drift threshold を定義する
-- [ ] topic shift threshold を定義する
-- [ ] exact quote trigger を入れる
-- [ ] diff / patch trigger を入れる
-- [ ] high-risk query trigger を入れる
-- [ ] confidence-based trigger を入れる
+- [x] drift threshold を定義する（latent_cosine_drift > 0.18）
+- [x] topic shift threshold を定義する（topic_shift_score > 0.65）
+- [x] exact quote trigger を入れる（regex: EN + JA パターン）
+- [x] diff / patch trigger を入れる（regex）
+- [x] high-risk query trigger を入れる（keyword リスト）
+- [x] confidence-based trigger を入れる（confidence < 0.40）
 
 ## 8.2 Fallback Actions
-- [ ] local evidence refresh 強化を実装する
-- [ ] re-retrieval を実装する
-- [ ] hierarchical prefill refresh を実装する
-- [ ] baseline path 退避を実装する
+- [x] local evidence refresh 強化を実装する（`strengthen_local_refresh` action）
+- [x] re-retrieval を実装する（`re_retrieve` action）
+- [x] hierarchical prefill refresh を実装する（`reprefill_hierarchy` action）
+- [x] baseline path 退避を実装する（`fallback_to_baseline_path` action）
 
 ## 8.3 Logging
-- [ ] fallback reason を保存する
-- [ ] fallback 前後の latency を保存する
-- [ ] fallback 前後の quality 差分を保存する
+- [x] fallback reason を保存する（`FallbackDecision.as_dict()`）
+- [ ] fallback 前後の latency を保存する（pipeline 統合時に計測）
+- [ ] fallback 前後の quality 差分を保存する（eval 実行時に計測）
 
 ## 8.4 Validation
-- [ ] multi-turn eval で missed fallback を数える
+- [ ] multi-turn eval で missed fallback を数える（eval set 生成後）
 - [ ] wrong citation 改善を確認する
 - [ ] stale memory 改善を確認する
 - [ ] latency 悪化の許容範囲を確認する
 
 ### Exit Criteria
-- [ ] Safe RecGen が発火する
-- [ ] 誤答抑制の効果が確認できる
+- [x] Safe RecGen が発火する（20/20 テスト通過）
+- [ ] 誤答抑制の効果が確認できる（eval 実行後に検証）
 - [ ] レイテンシ改善を極端に壊さない
 
 ---
