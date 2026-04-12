@@ -1,0 +1,1 @@
+[PHOTON: Hierarchical Autoregressive Modeling for Lightspeed and Memory-Efficient Language Generation](https://arxiv.org/pdf/2512.20687)

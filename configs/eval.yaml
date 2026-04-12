@@ -1,0 +1,161 @@
+version: 1
+
+project:
+  name: "photon-reporag"
+  mode: "evaluation"
+
+run:
+  name_prefix: "eval"
+  seed: 42
+  shuffle: false
+  save_predictions: true
+  save_artifacts: true
+  output_dir: "./reports/benchmark_runs"
+
+repo:
+  repo_id: "fastapi_fastapi"
+  repo_commit: "SET_ME_TO_FIXED_SHA"
+
+variants:
+  - id: "baseline_rag"
+    label: "Baseline-RAG"
+    kind: "baseline"
+    config_path: "./configs/baseline.yaml"
+
+  - id: "baseline_rag_summary_memory"
+    label: "Baseline-RAG+SummaryMemory"
+    kind: "baseline"
+    config_path: "./configs/baseline.yaml"
+    override:
+      session_memory:
+        mode: "summary_pinned"
+        summary_max_tokens: 800
+
+  - id: "photon_rag"
+    label: "PHOTON-RAG"
+    kind: "photon"
+    config_path: "./configs/photon_small.yaml"
+    override:
+      inference:
+        safe_recgen_enabled: false
+      safe_recgen:
+        enabled: false
+
+  - id: "photon_rag_safe_recgen"
+    label: "PHOTON-RAG+SafeRecGen"
+    kind: "photon"
+    config_path: "./configs/photon_small.yaml"
+    override:
+      inference:
+        safe_recgen_enabled: true
+      safe_recgen:
+        enabled: true
+
+fairness:
+  fix_repo_snapshot: true
+  fix_generation_params: true
+  fix_retrieval_budget: true
+  fix_eval_order: true
+  warmup_before_measurement: true
+  warmup_requests: 3
+
+generation:
+  max_new_tokens: 768
+  temperature: 0.2
+  top_p: 0.9
+  do_sample: false
+  repetition_penalty: 1.05
+
+datasets:
+  static_eval:
+    enabled: true
+    path: "./data/eval_sets/static_eval.jsonl"
+    max_cases: 120
+
+  multi_turn_eval:
+    enabled: true
+    path: "./data/eval_sets/multi_turn_eval.jsonl"
+    max_sessions: 30
+    max_turns_per_session: 6
+
+  stress_eval:
+    enabled: true
+    path: "./data/eval_sets/stress_eval.jsonl"
+    concurrency_levels:
+      - 1
+      - 4
+      - 8
+    turns_per_session: 10
+    warmup_sessions: 2
+    cooldown_seconds: 3
+
+scoring:
+  rubric:
+    correctness:
+      min: 0
+      max: 2
+      weight: 0.4
+
+    grounding:
+      min: 0
+      max: 2
+      weight: 0.4
+
+    usefulness:
+      min: 0
+      max: 1
+      weight: 0.2
+
+  derived_metrics:
+    - "task_correctness"
+    - "citation_precision"
+    - "citation_recall"
+    - "session_consistency"
+    - "hallucination_rate"
+    - "wrong_citation_rate"
+    - "no_citation_assertion_rate"
+    - "stale_memory_rate"
+    - "fallback_recall"
+
+latency_metrics:
+  measure_p50: true
+  measure_p90: true
+  measure_end_to_end: true
+  measure_retrieval_time: true
+  measure_prefill_time: true
+  measure_decode_time: true
+  measure_tokens_per_second: true
+
+memory_metrics:
+  enabled: true
+  measure_peak_memory: true
+  measure_memory_per_active_session: true
+
+grader:
+  mode: "llm_assisted"    # rule_first | human_only | llm_assisted
+  llm_judge_enabled: true
+  llm_judge_model_id: "qwen3.5:27b"
+  require_human_review_for:
+    - "exact_quote"
+    - "patch"
+    - "security_review"
+
+reporting:
+  save_csv: true
+  save_json: true
+  save_markdown: true
+  save_failure_cases: true
+
+  plots:
+    - "latency_by_variant"
+    - "memory_by_variant"
+    - "task_score_by_variant"
+    - "citation_precision_by_variant"
+    - "fallback_reasons"
+
+acceptance:
+  followup_latency_improvement_vs_baseline_percent: 30
+  peak_memory_reduction_vs_baseline_percent: 40
+  citation_precision_floor: 0.90
+  task_score_drop_tolerance_points: 3
+  no_citation_assertion_rate_ceiling: 0.05
