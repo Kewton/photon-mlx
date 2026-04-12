@@ -50,16 +50,16 @@
 - [x] `requirements.txt` または依存管理を確定する
 
 ## 0.3 開発ルール
-- [ ] run_id 命名規則を決める
-- [ ] repo snapshot の固定ルールを決める
-- [ ] benchmark freeze のタイミングを Week 2 に固定する
-- [ ] grading rule を明文化する
-- [ ] failure case の記録テンプレートを作る
+- [x] run_id 命名規則を決める（`spec.md` §16.1 参照）
+- [x] repo snapshot の固定ルールを決める（`spec.md` §14.4 参照）
+- [x] benchmark freeze のタイミングを Week 2 に固定する（`spec.md` §18 参照）
+- [x] grading rule を明文化する（`spec.md` §15.4 参照）
+- [x] failure case の記録テンプレートを作る（`reports/failure_case_template.md`）
 
 ### Exit Criteria
-- [ ] 開発ルールが README / spec / tasks に反映されている
-- [ ] リポジトリ初期構成が作成済み
-- [ ] baseline 開発に入れる状態になっている
+- [x] 開発ルールが README / spec / tasks に反映されている
+- [x] リポジトリ初期構成が作成済み
+- [x] baseline 開発に入れる状態になっている
 
 ---
 
