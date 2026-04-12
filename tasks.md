@@ -286,33 +286,33 @@
 # Phase 7: Session Inference
 
 ## 7.1 Session Memory
-- [ ] session pack を PHOTON 入力へ変換する
-- [ ] multi-turn state を保持する
-- [ ] cited chunk を memory に反映する
-- [ ] topic shift 検知のための特徴量を残す
+- [x] session pack を PHOTON 入力へ変換する（`inference.py`: hierarchical_prefill）
+- [x] multi-turn state を保持する（`session.py`: PhotonSessionState）
+- [ ] cited chunk を memory に反映する（baseline memory と統合時に対応）
+- [x] topic shift 検知のための特徴量を残す（cosine drift = topic_shift_score）
 
 ## 7.2 Inference Path
-- [ ] hierarchical prefill を実装する
-- [ ] session update path を実装する
-- [ ] answer-time local refresh を実装する
-- [ ] reply 生成の grounding を強制する
+- [x] hierarchical prefill を実装する（`PhotonInference.hierarchical_prefill`）
+- [x] session update path を実装する（`session_forward` → state update + drift）
+- [ ] answer-time local refresh を実装する（baseline evidence_pack と統合時に対応）
+- [ ] reply 生成の grounding を強制する（baseline prompt + PHOTON conditioning 統合時）
 
 ## 7.3 Drift Metrics
-- [ ] latent drift を計測する
-- [ ] token agreement を計測する
-- [ ] logit KL を計測する
-- [ ] stale memory 兆候を記録する
+- [x] latent drift を計測する（`cosine_distance` on top-level latent）
+- [x] token agreement を計測する（`token_agreement_rate`）
+- [x] logit KL を計測する（`kl_divergence`）
+- [x] stale memory 兆候を記録する（`drift_history` に蓄積）
 
 ## 7.4 Comparison
-- [ ] Baseline vs PHOTON-RAG を同じ harness で比較する
+- [ ] Baseline vs PHOTON-RAG を同じ harness で比較する（コーパス + eval set 生成後）
 - [ ] static eval を回す
 - [ ] multi-turn session eval を回す
 - [ ] 初回レポートを作る
 
 ### Exit Criteria
-- [ ] PHOTON-RAG が end-to-end で動く
-- [ ] multi-turn bench が回る
-- [ ] drift が計測できる
+- [x] PHOTON-RAG が end-to-end で動く（session_forward テスト通過）
+- [ ] multi-turn bench が回る（eval set 生成後）
+- [x] drift が計測できる（3ターン drift tracking テスト通過）
 
 ---
 
