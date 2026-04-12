@@ -1,0 +1,26 @@
+# Environment
+.env
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Data (large / generated)
+data/raw/
+data/processed/
+data/indexes/
+
+# Checkpoints
+checkpoints/
+
+# Cache
+.cache/
+
+# Logs
+logs/
+
+# Reports (generated artifacts — committed manually after review)
+reports/benchmark_runs/
+
+# macOS
+.DS_Store

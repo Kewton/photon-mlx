@@ -42,12 +42,12 @@
 - [ ] 成功条件を `spec.md` に対して最終確認する
 
 ## 0.2 リポジトリ初期化
-- [ ] ディレクトリ構成を作る
-- [ ] `configs/` の初期 YAML を置く
-- [ ] `scripts/` に雛形を置く
-- [ ] `reports/` と `demo/` を作る
-- [ ] `.env.example` を作る
-- [ ] `requirements.txt` または依存管理を確定する
+- [x] ディレクトリ構成を作る
+- [x] `configs/` の初期 YAML を置く
+- [x] `scripts/` に雛形を置く
+- [x] `reports/` と `demo/` を作る
+- [x] `.env.example` を作る
+- [x] `requirements.txt` または依存管理を確定する
 
 ## 0.3 開発ルール
 - [ ] run_id 命名規則を決める

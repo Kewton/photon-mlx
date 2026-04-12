@@ -1,0 +1,24 @@
+# Core ML
+mlx
+mlx-lm
+
+# PyTorch reference (correctness checks)
+torch
+
+# Embeddings
+sentence-transformers
+
+# Lexical search
+rank-bm25
+
+# Data / config
+numpy
+pyyaml
+python-dotenv
+
+# Serving
+fastapi
+uvicorn[standard]
+
+# Evaluation / grading
+tqdm
