@@ -106,7 +106,7 @@
 ### Exit Criteria
 - [x] baseline RepoRAG が 1 コマンドで起動する（CLI 疎通確認済み）
 - [x] citation 付き回答が出る（`[C:9]` で正しい chunk を引用）
-- [ ] 同一 session で follow-up できる（インタラクティブモードで確認予定）
+- [x] 同一 session で follow-up できる（2ターン疎通確認済み）
 - [x] retrieval / answer / citation がログに残る（JSONL 確認済み）
 
 ---
