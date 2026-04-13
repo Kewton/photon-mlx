@@ -68,11 +68,10 @@ class TestBuildPipeline:
             "memory:\n  log_dir: null\n"
         )
         cfg = load_config(str(cfg_file))
-        with patch(
-            "baseline_reporag.photon_pipeline._build_baseline_deps"
-        ) as mock_deps, patch(
-            "baseline_reporag.photon_pipeline._build_photon_deps"
-        ) as mock_photon:
+        with (
+            patch("baseline_reporag.photon_pipeline._build_baseline_deps") as mock_deps,
+            patch("baseline_reporag.photon_pipeline._build_photon_deps") as mock_photon,
+        ):
             mock_deps.return_value = _make_mock_deps()
             mock_photon.return_value = _make_mock_photon_deps()
             pipeline = build_pipeline(cfg)
