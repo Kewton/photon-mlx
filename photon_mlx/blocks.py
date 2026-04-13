@@ -1,7 +1,6 @@
 """LLaMA-style transformer blocks in MLX (shared by encoder and decoder)."""
 from __future__ import annotations
 
-import math
 
 import mlx.core as mx
 import mlx.nn as nn

@@ -14,7 +14,6 @@ Architecture (2-level, chunk_sizes=[4,4]):
 """
 from __future__ import annotations
 
-import math
 from typing import Any
 
 import mlx.core as mx
