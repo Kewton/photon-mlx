@@ -12,6 +12,7 @@ Usage:
         --eval-set    data/eval_sets/static_eval.jsonl \
         --output      reports/grader_output.jsonl
 """
+
 from __future__ import annotations
 
 import argparse
@@ -95,6 +96,7 @@ def build_grader_messages(
 # Grader runner (stub – wire to LLM client when ready)
 # ---------------------------------------------------------------------------
 
+
 def grade_one(
     question: str,
     reference_answer: str,
@@ -123,23 +125,27 @@ def compute_aggregate(scores: list[dict]) -> dict:
     return {
         "n": n,
         "correctness_mean": sum(s["correctness"] for s in scores) / n,
-        "grounding_mean":   sum(s["grounding"]   for s in scores) / n,
-        "usefulness_mean":  sum(s["usefulness"]  for s in scores) / n,
-        "total_mean":       sum(
+        "grounding_mean": sum(s["grounding"] for s in scores) / n,
+        "usefulness_mean": sum(s["usefulness"] for s in scores) / n,
+        "total_mean": sum(
             s["correctness"] + s["grounding"] + s["usefulness"] for s in scores
-        ) / n,
-        "total_100":        sum(
+        )
+        / n,
+        "total_100": sum(
             s["correctness"] + s["grounding"] + s["usefulness"] for s in scores
-        ) / n / 5 * 100,
+        )
+        / n
+        / 5
+        * 100,
     }
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Grade RepoRAG predictions")
     parser.add_argument("--predictions", required=True)
-    parser.add_argument("--eval-set",    required=True)
-    parser.add_argument("--output",      required=True)
-    parser.add_argument("--model-id",    default="qwen3.5:27b")
+    parser.add_argument("--eval-set", required=True)
+    parser.add_argument("--output", required=True)
+    parser.add_argument("--model-id", default="qwen3.5:27b")
     args = parser.parse_args()
 
     eval_items = {

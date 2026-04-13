@@ -1,4 +1,5 @@
 """Tests for Mac optimization utilities."""
+
 from __future__ import annotations
 
 import sys
@@ -53,6 +54,7 @@ def _tiny_cfg() -> PhotonConfig:
 # Padding tests
 # ---------------------------------------------------------------
 
+
 class TestPadding:
     def test_pad_to_multiple_exact(self) -> None:
         assert pad_to_multiple(16, 16) == 16
@@ -84,6 +86,7 @@ class TestPadding:
 # Memory measurement
 # ---------------------------------------------------------------
 
+
 class TestMemory:
     def test_measure_memory_returns_report(self) -> None:
         report = measure_memory()
@@ -105,6 +108,7 @@ class TestMemory:
 # Warmup
 # ---------------------------------------------------------------
 
+
 class TestWarmup:
     def test_warmup_runs(self) -> None:
         mx.random.seed(42)
@@ -122,6 +126,7 @@ class TestWarmup:
 # ---------------------------------------------------------------
 # Benchmark
 # ---------------------------------------------------------------
+
 
 class TestBenchmark:
     def test_benchmark_forward(self) -> None:

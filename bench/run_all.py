@@ -4,6 +4,7 @@ run_all.py  –  Run all benchmark variants defined in eval.yaml.
 Usage:
     python bench/run_all.py --config configs/eval.yaml
 """
+
 from __future__ import annotations
 
 import argparse
@@ -15,6 +16,7 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 # Variant runner (stub – wire to each system's query interface when ready)
 # ---------------------------------------------------------------------------
+
 
 def run_variant(variant_cfg: dict, eval_cfg: dict) -> list[dict]:
     """
@@ -29,6 +31,7 @@ def run_variant(variant_cfg: dict, eval_cfg: dict) -> list[dict]:
 # ---------------------------------------------------------------------------
 # Report writer
 # ---------------------------------------------------------------------------
+
 
 def save_run_predictions(
     run_id: str,
@@ -48,6 +51,7 @@ def save_run_predictions(
 # Main
 # ---------------------------------------------------------------------------
 
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run all benchmark variants")
     parser.add_argument("--config", default="configs/eval.yaml")
@@ -55,6 +59,7 @@ def main() -> None:
     args = parser.parse_args()
 
     import yaml
+
     with open(args.config, encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
 

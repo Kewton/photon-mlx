@@ -7,6 +7,7 @@ Usage:
         --repo-id fastapi_fastapi \
         --commit <SHA>
 """
+
 from __future__ import annotations
 
 import argparse
@@ -26,7 +27,9 @@ def resolve_commit(repo_path: str, ref: str) -> str:
     if ref == "HEAD" or len(ref) < 40:
         result = subprocess.run(
             ["git", "-C", repo_path, "rev-parse", ref],
-            capture_output=True, text=True, check=True,
+            capture_output=True,
+            text=True,
+            check=True,
         )
         return result.stdout.strip()
     return ref

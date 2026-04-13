@@ -12,6 +12,7 @@ Architecture (2-level, chunk_sizes=[4,4]):
       → converter[0] → local_decoder (with prefix + token projections)
       → lm_head → logits
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -24,6 +25,7 @@ from .blocks import TransformerBlock, causal_mask, precompute_rope
 # ── sys.path for shared config ──────────────────────────────────
 import sys
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from torch_ref.config import PhotonConfig  # noqa: E402
 
@@ -32,8 +34,10 @@ from torch_ref.config import PhotonConfig  # noqa: E402
 # Sub-modules
 # ================================================================
 
+
 class ConcatChunker(nn.Module):
     """Level-1 chunker: concatenate C embeddings and project."""
+
     def __init__(self, chunk_size: int, in_dim: int, out_dim: int) -> None:
         super().__init__()
         self.chunk_size = chunk_size
@@ -47,6 +51,7 @@ class ConcatChunker(nn.Module):
 
 class LinearChunker(nn.Module):
     """Upper-level chunker: linear projection of concatenated reps."""
+
     def __init__(self, chunk_size: int, dim: int) -> None:
         super().__init__()
         self.chunk_size = chunk_size
@@ -60,6 +65,7 @@ class LinearChunker(nn.Module):
 
 class Converter(nn.Module):
     """Expand each higher-level rep into chunk_size sets of prefix_length vectors."""
+
     def __init__(self, dim: int, chunk_size: int, prefix_length: int) -> None:
         super().__init__()
         self.chunk_size = chunk_size
@@ -82,6 +88,7 @@ class Converter(nn.Module):
 # ================================================================
 # Full model
 # ================================================================
+
 
 def _make_block(cfg: PhotonConfig) -> TransformerBlock:
     m = cfg.model
@@ -114,24 +121,26 @@ class PhotonModel(nn.Module):
         self.encoders: list[list[TransformerBlock]] = []
         for lv in range(L):
             if lv == 0:
-                self.chunkers.append(
-                    ConcatChunker(CS[0], m.hidden_size, m.hidden_size))
+                self.chunkers.append(ConcatChunker(CS[0], m.hidden_size, m.hidden_size))
             else:
                 self.chunkers.append(LinearChunker(CS[lv], m.hidden_size))
             self.encoders.append(
-                [_make_block(cfg) for _ in range(h.encoder_layers_per_level[lv])])
+                [_make_block(cfg) for _ in range(h.encoder_layers_per_level[lv])]
+            )
 
         # ── Top-down ────────────────────────────────────────────
         self.decoders: list[list[TransformerBlock]] = []
         self.converters: list[Converter] = []
         for lv in range(L):
             self.decoders.append(
-                [_make_block(cfg) for _ in range(h.decoder_layers_per_level[lv])])
+                [_make_block(cfg) for _ in range(h.decoder_layers_per_level[lv])]
+            )
             self.converters.append(Converter(m.hidden_size, CS[lv], PL[lv]))
 
         # ── Local decoder (token level) ─────────────────────────
         self.local_decoder = [
-            _make_block(cfg) for _ in range(h.decoder_layers_per_level[0])]
+            _make_block(cfg) for _ in range(h.decoder_layers_per_level[0])
+        ]
 
         # ── Output ──────────────────────────────────────────────
         self.output_norm = nn.RMSNorm(m.hidden_size, eps=m.norm_eps)
@@ -140,17 +149,19 @@ class PhotonModel(nn.Module):
         # ── Pre-computed RoPE ───────────────────────────────────
         max_local = max(c * (p + 1) for c, p in zip(CS, PL))
         self._rope_cos, self._rope_sin = precompute_rope(
-            m.head_dim, m.max_position_embeddings, m.rope_theta)
+            m.head_dim, m.max_position_embeddings, m.rope_theta
+        )
         self._local_cos, self._local_sin = precompute_rope(
-            m.head_dim, max_local, m.rope_theta)
+            m.head_dim, max_local, m.rope_theta
+        )
 
     # ────────────────────────────────────────────────────────────
     # Decode one hierarchical level
     # ────────────────────────────────────────────────────────────
     def _decode_level(
         self,
-        h_above: mx.array,        # (B, N_high, D) — decoder output from above
-        enc_out: mx.array,         # (B, N_low, D)  — encoder output at this level
+        h_above: mx.array,  # (B, N_high, D) — decoder output from above
+        enc_out: mx.array,  # (B, N_low, D)  — encoder output at this level
         converter: Converter,
         blocks: list[TransformerBlock],
         chunk_size: int,
@@ -161,8 +172,8 @@ class PhotonModel(nn.Module):
         C = chunk_size
         N_low = N_high * C
 
-        prefix = converter(h_above)                    # (B, N_low, P, D)
-        enc_chunked = enc_out.reshape(B, N_high, C, D) # (B, N_high, C, D)
+        prefix = converter(h_above)  # (B, N_low, P, D)
+        enc_chunked = enc_out.reshape(B, N_high, C, D)  # (B, N_high, C, D)
         prefix_chunked = prefix.reshape(B, N_high, C, P, D)
 
         # Per-chunk: [P prefix vecs, 1 encoder vec] = P+1 positions
@@ -188,7 +199,7 @@ class PhotonModel(nn.Module):
             combined = block(combined, self._local_cos, self._local_sin, mask)
 
         # Extract encoder positions (last C): (B * N_high, C, D)
-        decoded = combined[:, C * P:, :]
+        decoded = combined[:, C * P :, :]
         return decoded.reshape(B, N_low, D)
 
     # ────────────────────────────────────────────────────────────
@@ -209,7 +220,7 @@ class PhotonModel(nn.Module):
         tok = self.token_proj(self.token_embed(input_ids))  # (B, T, D)
 
         # 2. Bottom-up
-        enc_outputs = [tok]   # index 0 = token projections
+        enc_outputs = [tok]  # index 0 = token projections
         x = tok
         for lv in range(L):
             x = self.chunkers[lv](x)
@@ -221,7 +232,7 @@ class PhotonModel(nn.Module):
 
         # 3. Top-down
         # 3a. Top-level decoder (no prefix)
-        h_dec = enc_outputs[L]          # (B, N_top, D)
+        h_dec = enc_outputs[L]  # (B, N_top, D)
         seq_len = h_dec.shape[1]
         mask = causal_mask(seq_len)
         for block in self.decoders[L - 1]:
@@ -247,7 +258,7 @@ class PhotonModel(nn.Module):
         )
 
         # 4. LM head
-        logits = self.lm_head(self.output_norm(h_dec))   # (B, T, V)
+        logits = self.lm_head(self.output_norm(h_dec))  # (B, T, V)
 
         # 5. Loss
         loss = None
@@ -265,4 +276,5 @@ class PhotonModel(nn.Module):
 
     def count_parameters(self) -> int:
         from mlx.utils import tree_flatten
+
         return sum(v.size for _, v in tree_flatten(self.parameters()))

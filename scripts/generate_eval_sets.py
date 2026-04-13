@@ -9,6 +9,7 @@ Produces:
 Usage:
     python scripts/generate_eval_sets.py --repo-id fastapi_fastapi
 """
+
 from __future__ import annotations
 
 import argparse
@@ -24,7 +25,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 # ================================================================
 
 ONBOARDING = [
-    {"q": "この repo の全体構成と主要ディレクトリの役割を教えてください。", "d": "easy"},
+    {
+        "q": "この repo の全体構成と主要ディレクトリの役割を教えてください。",
+        "d": "easy",
+    },
     {"q": "FastAPI のエントリポイントはどのファイルですか？", "d": "easy"},
     {"q": "FastAPI の依存性注入の仕組みを説明してください。", "d": "medium"},
     {"q": "Depends() はどのファイルで定義されていますか？", "d": "easy"},
@@ -38,12 +42,18 @@ ONBOARDING = [
     {"q": "例外ハンドリングはどのように実装されていますか？", "d": "medium"},
     {"q": "WebSocket サポートはどこにありますか？", "d": "medium"},
     {"q": "BackgroundTasks はどのように動作しますか？", "d": "medium"},
-    {"q": "FastAPI アプリケーションのライフサイクルイベントを説明してください。", "d": "medium"},
+    {
+        "q": "FastAPI アプリケーションのライフサイクルイベントを説明してください。",
+        "d": "medium",
+    },
     {"q": "テンプレートレスポンスの仕組みを教えてください。", "d": "easy"},
     {"q": "静的ファイルの配信はどのように設定しますか？", "d": "easy"},
     {"q": "CORS の設定方法を教えてください。", "d": "easy"},
     {"q": "FastAPI の内部で Starlette をどのように利用していますか？", "d": "hard"},
-    {"q": "パスパラメータとクエリパラメータの処理の違いを説明してください。", "d": "medium"},
+    {
+        "q": "パスパラメータとクエリパラメータの処理の違いを説明してください。",
+        "d": "medium",
+    },
     {"q": "レスポンスモデルの仕組みを説明してください。", "d": "medium"},
     {"q": "FastAPI のセキュリティユーティリティを一覧してください。", "d": "medium"},
     {"q": "OAuth2 の実装はどのファイルにありますか？", "d": "easy"},
@@ -90,12 +100,24 @@ IMPACT_ANALYSIS = [
 ]
 
 BUG_LOCALIZATION = [
-    {"q": "認証ミドルウェアで 401 が返る原因候補を 3 つ出してください。", "d": "medium"},
-    {"q": "POST リクエストで 422 Validation Error が出る場合の原因候補は？", "d": "medium"},
-    {"q": "依存性注入で循環参照が発生した場合、どこでエラーになりますか？", "d": "hard"},
+    {
+        "q": "認証ミドルウェアで 401 が返る原因候補を 3 つ出してください。",
+        "d": "medium",
+    },
+    {
+        "q": "POST リクエストで 422 Validation Error が出る場合の原因候補は？",
+        "d": "medium",
+    },
+    {
+        "q": "依存性注入で循環参照が発生した場合、どこでエラーになりますか？",
+        "d": "hard",
+    },
     {"q": "CORS エラーが発生する場合の設定ミスの候補を教えてください。", "d": "easy"},
     {"q": "WebSocket 接続が切断される原因候補を教えてください。", "d": "medium"},
-    {"q": "レスポンスモデルと実際の返り値が不一致の場合のエラー箇所は？", "d": "medium"},
+    {
+        "q": "レスポンスモデルと実際の返り値が不一致の場合のエラー箇所は？",
+        "d": "medium",
+    },
     {"q": "ファイルアップロードで 413 が返る場合の原因箇所は？", "d": "medium"},
     {"q": "OpenAPI ドキュメントが生成されない場合の原因候補は？", "d": "medium"},
     {"q": "ミドルウェアでリクエストボディが消費される問題の原因は？", "d": "hard"},
@@ -123,7 +145,10 @@ BUG_LOCALIZATION = [
 ]
 
 CHANGE_PLANNING = [
-    {"q": "認可ロジックを middleware に移す案と decorator に残す案を比較してください。", "d": "hard"},
+    {
+        "q": "認可ロジックを middleware に移す案と decorator に残す案を比較してください。",
+        "d": "hard",
+    },
     {"q": "依存性注入を property-based に変更する場合の設計案は？", "d": "hard"},
     {"q": "OpenAPI 3.1 から 3.2 への対応に必要な変更を計画してください。", "d": "hard"},
     {"q": "レスポンスキャッシュを追加する最小の変更案は？", "d": "medium"},
@@ -132,7 +157,10 @@ CHANGE_PLANNING = [
     {"q": "グローバルエラーハンドリングを改善する設計案は？", "d": "medium"},
     {"q": "APIのバージョニングを導入する最小の変更は？", "d": "medium"},
     {"q": "非同期データベース接続プールを組み込む設計案は？", "d": "medium"},
-    {"q": "テストカバレッジを向上させるための優先順位を計画してください。", "d": "medium"},
+    {
+        "q": "テストカバレッジを向上させるための優先順位を計画してください。",
+        "d": "medium",
+    },
     {"q": "GraphQL サポートを追加する場合のアーキテクチャ案は？", "d": "hard"},
     {"q": "ヘルスチェックエンドポイントを標準化する設計案は？", "d": "easy"},
     {"q": "リクエストログの構造化を実装する変更計画は？", "d": "medium"},
@@ -162,7 +190,8 @@ CHANGE_PLANNING = [
 
 MULTI_TURN_TEMPLATES = [
     {
-        "category": "onboarding", "scenario": "依存性注入の段階的深掘り",
+        "category": "onboarding",
+        "scenario": "依存性注入の段階的深掘り",
         "tags": ["topic_narrowing"],
         "turns": [
             "FastAPI の全体構成を教えてください。",
@@ -174,7 +203,8 @@ MULTI_TURN_TEMPLATES = [
         ],
     },
     {
-        "category": "onboarding", "scenario": "セキュリティ機能の探索",
+        "category": "onboarding",
+        "scenario": "セキュリティ機能の探索",
         "tags": ["topic_narrowing"],
         "turns": [
             "FastAPI のセキュリティ関連モジュールを一覧してください。",
@@ -186,7 +216,8 @@ MULTI_TURN_TEMPLATES = [
         ],
     },
     {
-        "category": "impact_analysis", "scenario": "Router 変更の影響調査",
+        "category": "impact_analysis",
+        "scenario": "Router 変更の影響調査",
         "tags": ["topic_narrowing"],
         "turns": [
             "APIRouter の主要メソッドを教えてください。",
@@ -198,7 +229,8 @@ MULTI_TURN_TEMPLATES = [
         ],
     },
     {
-        "category": "bug_localization", "scenario": "422 エラーの原因調査",
+        "category": "bug_localization",
+        "scenario": "422 エラーの原因調査",
         "tags": ["topic_narrowing"],
         "turns": [
             "422 Validation Error が発生する主な原因は？",
@@ -210,7 +242,8 @@ MULTI_TURN_TEMPLATES = [
         ],
     },
     {
-        "category": "onboarding", "scenario": "話題切り替えテスト",
+        "category": "onboarding",
+        "scenario": "話題切り替えテスト",
         "tags": ["topic_shift"],
         "turns": [
             "FastAPI のミドルウェアの仕組みを教えてください。",
@@ -222,7 +255,8 @@ MULTI_TURN_TEMPLATES = [
         ],
     },
     {
-        "category": "safe_recgen", "scenario": "exact quote テスト",
+        "category": "safe_recgen",
+        "scenario": "exact quote テスト",
         "tags": ["exact_quote"],
         "turns": [
             "FastAPI クラスの __init__ を教えてください。",
@@ -234,7 +268,8 @@ MULTI_TURN_TEMPLATES = [
         ],
     },
     {
-        "category": "safe_recgen", "scenario": "diff/patch テスト",
+        "category": "safe_recgen",
+        "scenario": "diff/patch テスト",
         "tags": ["diff_or_patch"],
         "turns": [
             "CORS の設定にカスタムヘッダを追加したい。",
@@ -246,7 +281,8 @@ MULTI_TURN_TEMPLATES = [
         ],
     },
     {
-        "category": "change_planning", "scenario": "認可設計の比較",
+        "category": "change_planning",
+        "scenario": "認可設計の比較",
         "tags": ["topic_narrowing"],
         "turns": [
             "現在の認可の仕組みを教えてください。",
@@ -295,6 +331,7 @@ def generate_stress_turns(topic: str, n: int = 10) -> list[str]:
 # ================================================================
 # Generator
 # ================================================================
+
 
 def generate_static_eval(output_path: Path) -> int:
     output_path.parent.mkdir(parents=True, exist_ok=True)

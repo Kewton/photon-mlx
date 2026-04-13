@@ -42,7 +42,7 @@ def hybrid_search(
         RetrievalResult(
             chunk_id=cid,
             score=lexical_weight * lex_norm.get(cid, 0.0)
-                  + embedding_weight * emb_norm.get(cid, 0.0),
+            + embedding_weight * emb_norm.get(cid, 0.0),
             lexical_score=lex_norm.get(cid, 0.0),
             embedding_score=emb_norm.get(cid, 0.0),
         )

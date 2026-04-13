@@ -5,6 +5,7 @@ Usage:
     python scripts/run_multi_turn_eval.py --max-sessions 5
     python scripts/run_multi_turn_eval.py  # all 30
 """
+
 from __future__ import annotations
 
 import argparse
@@ -61,13 +62,15 @@ def main() -> None:
         if line.strip():
             sessions.append(json.loads(line))
     if args.max_sessions > 0:
-        sessions = sessions[:args.max_sessions]
+        sessions = sessions[: args.max_sessions]
 
     print(f"run_id: {run_id}")
     print(f"sessions: {len(sessions)}")
     print()
 
-    output_path = Path(args.output) if args.output else Path(f"logs/{run_id}_predictions.jsonl")
+    output_path = (
+        Path(args.output) if args.output else Path(f"logs/{run_id}_predictions.jsonl")
+    )
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     session_stats: list[dict] = []
@@ -104,30 +107,36 @@ def main() -> None:
                 turn_latencies.append(result.latency.total_ms)
                 turn_citations.append(len(result.cited_chunk_ids))
 
-                print(f"  T{turn['turn_id']}: {result.latency.total_ms:.0f}ms "
-                      f"cites={len(result.cited_chunk_ids)}")
+                print(
+                    f"  T{turn['turn_id']}: {result.latency.total_ms:.0f}ms "
+                    f"cites={len(result.cited_chunk_ids)}"
+                )
 
             # Session summary
             avg_lat = sum(turn_latencies) / len(turn_latencies)
             followup_lat = sum(turn_latencies[1:]) / max(len(turn_latencies) - 1, 1)
-            session_stats.append({
-                "session_id": sid,
-                "avg_latency_ms": avg_lat,
-                "followup_avg_latency_ms": followup_lat,
-                "first_turn_latency_ms": turn_latencies[0],
-                "total_citations": sum(turn_citations),
-                "no_citation_turns": sum(1 for c in turn_citations if c == 0),
-            })
+            session_stats.append(
+                {
+                    "session_id": sid,
+                    "avg_latency_ms": avg_lat,
+                    "followup_avg_latency_ms": followup_lat,
+                    "first_turn_latency_ms": turn_latencies[0],
+                    "total_citations": sum(turn_citations),
+                    "no_citation_turns": sum(1 for c in turn_citations if c == 0),
+                }
+            )
             print(f"  → avg {avg_lat:.0f}ms, follow-up avg {followup_lat:.0f}ms\n")
 
     # Summary
-    print(f"\n{'='*50}")
+    print(f"\n{'=' * 50}")
     print("Session summary:")
     for s in session_stats:
-        print(f"  {s['session_id']}: avg={s['avg_latency_ms']:.0f}ms "
-              f"followup={s['followup_avg_latency_ms']:.0f}ms "
-              f"cites={s['total_citations']} "
-              f"no_cite_turns={s['no_citation_turns']}")
+        print(
+            f"  {s['session_id']}: avg={s['avg_latency_ms']:.0f}ms "
+            f"followup={s['followup_avg_latency_ms']:.0f}ms "
+            f"cites={s['total_citations']} "
+            f"no_cite_turns={s['no_citation_turns']}"
+        )
 
     # Save summary
     summary_path = output_path.with_suffix(".summary.json")

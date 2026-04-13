@@ -1,4 +1,5 @@
 """Shape and smoke tests for the PHOTON MLX model."""
+
 from __future__ import annotations
 
 import sys
@@ -53,6 +54,7 @@ def tiny_model() -> PhotonModel:
 # Shape tests
 # ---------------------------------------------------------------
 
+
 class TestShapes:
     def test_forward_logits_shape(self, tiny_model: PhotonModel) -> None:
         # T=64 divisible by 4*4=16
@@ -77,6 +79,7 @@ class TestShapes:
 # Chunk boundary tests
 # ---------------------------------------------------------------
 
+
 class TestChunkBoundary:
     def test_minimum_length(self, tiny_model: PhotonModel) -> None:
         """Minimum T = product of chunk_sizes = 4*4 = 16."""
@@ -93,6 +96,7 @@ class TestChunkBoundary:
 # ---------------------------------------------------------------
 # Smoke tests
 # ---------------------------------------------------------------
+
 
 class TestSmoke:
     def test_logits_finite(self, tiny_model: PhotonModel) -> None:

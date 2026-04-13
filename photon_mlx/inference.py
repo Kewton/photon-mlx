@@ -7,6 +7,7 @@ Wraps the PhotonModel for multi-turn session usage:
 - Answer-time local refresh
 - Grounded generation via conditioning
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -17,6 +18,7 @@ from .model import PhotonModel
 from .session import DriftMetrics, HierarchicalState, PhotonSessionState
 
 import sys
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from torch_ref.config import PhotonConfig  # noqa: E402
 
@@ -34,11 +36,16 @@ class PhotonInference:
         self._sessions: dict[str, PhotonSessionState] = {}
 
     def get_session(
-        self, session_id: str, repo_id: str, repo_commit: str,
+        self,
+        session_id: str,
+        repo_id: str,
+        repo_commit: str,
     ) -> PhotonSessionState:
         if session_id not in self._sessions:
             self._sessions[session_id] = PhotonSessionState(
-                session_id, repo_id, repo_commit,
+                session_id,
+                repo_id,
+                repo_commit,
             )
         return self._sessions[session_id]
 
@@ -67,6 +74,7 @@ class PhotonInference:
         for lv in range(L):
             x = model.chunkers[lv](x)
             from .blocks import causal_mask
+
             mask = causal_mask(x.shape[1])
             for block in model.encoders[lv]:
                 x = block(x, model._rope_cos, model._rope_sin, mask)
@@ -80,14 +88,18 @@ class PhotonInference:
 
         for lv in reversed(range(1, L)):
             h_dec = model._decode_level(
-                h_dec, enc_outputs[lv],
-                model.converters[lv], model.decoders[lv - 1],
+                h_dec,
+                enc_outputs[lv],
+                model.converters[lv],
+                model.decoders[lv - 1],
                 h.chunk_sizes[lv],
             )
 
         h_dec = model._decode_level(
-            h_dec, enc_outputs[0],
-            model.converters[0], model.local_decoder,
+            h_dec,
+            enc_outputs[0],
+            model.converters[0],
+            model.local_decoder,
             h.chunk_sizes[0],
         )
 

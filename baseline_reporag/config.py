@@ -14,10 +14,14 @@ class Config:
             if isinstance(value, dict):
                 object.__setattr__(self, key, Config(value))
             elif isinstance(value, list):
-                object.__setattr__(self, key, [
-                    Config(item) if isinstance(item, dict) else item
-                    for item in value
-                ])
+                object.__setattr__(
+                    self,
+                    key,
+                    [
+                        Config(item) if isinstance(item, dict) else item
+                        for item in value
+                    ],
+                )
             else:
                 object.__setattr__(self, key, value)
 

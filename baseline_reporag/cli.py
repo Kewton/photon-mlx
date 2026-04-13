@@ -9,6 +9,7 @@ Usage (single question):
 Usage (interactive):
     python -m baseline_reporag.cli --repo-id fastapi_fastapi
 """
+
 from __future__ import annotations
 
 import argparse
@@ -37,11 +38,7 @@ def main() -> None:
     cfg = load_config(args.config)
     repo_id = args.repo_id or cfg.repo.repo_id
     idx_dir = Path(cfg.paths.data_root) / "indexes" / repo_id
-    run_id = (
-        f"baseline_{repo_id}"
-        f"_{time.strftime('%Y%m%d')}"
-        f"_{cfg.repo.repo_commit[:7]}"
-    )
+    run_id = f"baseline_{repo_id}_{time.strftime('%Y%m%d')}_{cfg.repo.repo_commit[:7]}"
 
     pipeline = RepoRAGPipeline(
         config=cfg,
@@ -65,15 +62,19 @@ def main() -> None:
             session_id=args.session_id,
             repo_id=repo_id,
         )
-        print(f"\n[Turn {result.turn_id}]  {result.latency.total_ms:.0f} ms"
-              f"  (retrieval {result.latency.retrieval_ms:.0f}"
-              f" | gen {result.latency.generation_ms:.0f})"
-              f"  mem {result.memory.peak_mb:.1f} MB\n")
+        print(
+            f"\n[Turn {result.turn_id}]  {result.latency.total_ms:.0f} ms"
+            f"  (retrieval {result.latency.retrieval_ms:.0f}"
+            f" | gen {result.latency.generation_ms:.0f})"
+            f"  mem {result.memory.peak_mb:.1f} MB\n"
+        )
         print(result.answer)
         if result.no_citation:
             print("\n[WARNING] No citations in this answer.")
         if result.wrong_citation_indices:
-            print(f"[WARNING] Unknown citation indices: {result.wrong_citation_indices}")
+            print(
+                f"[WARNING] Unknown citation indices: {result.wrong_citation_indices}"
+            )
         print(f"\nCited: {result.cited_chunk_ids}")
         print(f"Session: {result.session_id}")
 

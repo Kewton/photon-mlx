@@ -1,4 +1,5 @@
 """Training loop for PHOTON models in MLX."""
+
 from __future__ import annotations
 
 import json
@@ -16,6 +17,7 @@ from .loss import photon_loss
 from .model import PhotonModel
 
 import sys
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from torch_ref.config import PhotonConfig  # noqa: E402
 
@@ -40,12 +42,14 @@ def save_checkpoint(
     mx.savez(str(path / "weights.npz"), **_flatten(weights))
     # Save state
     (path / "state.json").write_text(
-        json.dumps({
-            "step": state.step,
-            "best_val_loss": state.best_val_loss,
-            "train_losses": state.train_losses[-100:],
-            "val_losses": state.val_losses[-100:],
-        }),
+        json.dumps(
+            {
+                "step": state.step,
+                "best_val_loss": state.best_val_loss,
+                "train_losses": state.train_losses[-100:],
+                "val_losses": state.val_losses[-100:],
+            }
+        ),
         encoding="utf-8",
     )
 
@@ -172,14 +176,20 @@ def train(
         # Log
         if state.step % log_every == 0:
             elapsed = time.time() - t0
-            print(f"  step {state.step:>5d}  loss {loss_val:.4f}  "
-                  f"elapsed {elapsed:.0f}s")
+            print(
+                f"  step {state.step:>5d}  loss {loss_val:.4f}  elapsed {elapsed:.0f}s"
+            )
             with log_path.open("a", encoding="utf-8") as f:
-                f.write(json.dumps({
-                    "step": state.step,
-                    "train_loss": loss_val,
-                    "elapsed_s": round(elapsed, 1),
-                }) + "\n")
+                f.write(
+                    json.dumps(
+                        {
+                            "step": state.step,
+                            "train_loss": loss_val,
+                            "elapsed_s": round(elapsed, 1),
+                        }
+                    )
+                    + "\n"
+                )
 
         # Eval
         if state.step % eval_every == 0:
@@ -188,15 +198,22 @@ def train(
             improved = val_loss < state.best_val_loss
             if improved:
                 state.best_val_loss = val_loss
-            print(f"  [eval] step {state.step}  val_loss {val_loss:.4f}"
-                  f"  best {state.best_val_loss:.4f}"
-                  f"{'  *' if improved else ''}")
+            print(
+                f"  [eval] step {state.step}  val_loss {val_loss:.4f}"
+                f"  best {state.best_val_loss:.4f}"
+                f"{'  *' if improved else ''}"
+            )
             with log_path.open("a", encoding="utf-8") as f:
-                f.write(json.dumps({
-                    "step": state.step,
-                    "val_loss": val_loss,
-                    "best": improved,
-                }) + "\n")
+                f.write(
+                    json.dumps(
+                        {
+                            "step": state.step,
+                            "val_loss": val_loss,
+                            "best": improved,
+                        }
+                    )
+                    + "\n"
+                )
 
         # Checkpoint
         if state.step % save_every == 0:
