@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
+from typing import Any
 
 from .citation import resolve_citations
 from .config import Config
@@ -36,6 +37,9 @@ class QueryResult:
     no_citation: bool
     latency: LatencyBreakdown
     memory: MemorySnapshot
+    drift_metrics: dict[str, Any] | None = None
+    confidence: float | None = None
+    fallback_decision: dict[str, Any] | None = None
 
 
 class RepoRAGPipeline:

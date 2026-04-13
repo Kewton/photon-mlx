@@ -35,4 +35,6 @@ class Config:
 def load_config(path: str | Path) -> Config:
     with open(path, encoding="utf-8") as f:
         data = yaml.safe_load(f)
-    return Config(data)
+    cfg = Config(data)
+    object.__setattr__(cfg, "_config_path", str(path))
+    return cfg

@@ -3,7 +3,6 @@ from __future__ import annotations
 from typing import Callable
 
 try:
-    import mlx.core as mx
     import mlx_lm
     from mlx_lm.sample_utils import make_sampler
 

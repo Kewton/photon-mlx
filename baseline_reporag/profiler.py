@@ -17,6 +17,9 @@ class LatencyBreakdown:
     generation_ms: float = 0.0
     citation_ms: float = 0.0
     total_ms: float = 0.0
+    photon_prefill_ms: float = 0.0
+    drift_eval_ms: float = 0.0
+    safe_recgen_ms: float = 0.0
 
     def as_dict(self) -> dict:
         return {

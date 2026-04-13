@@ -115,7 +115,6 @@ def _chunk_python(
         cur_syms = []
 
     for s, e, name in boundaries:
-        node_body = "".join(lines[s - 1 : e])
         if cur_start is None:
             cur_start, cur_end, cur_syms = s, e, [name]
         else:
