@@ -106,7 +106,93 @@ def _build_baseline_deps(cfg: Config) -> dict[str, Any]:
 
 def _build_photon_deps(cfg: Config) -> dict[str, Any]:
     """Construct PHOTON-specific dependencies from config."""
-    raise NotImplementedError("Wire _build_photon_deps to real PHOTON components.")
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+    from torch_ref.config import PhotonConfig
+
+    from photon_mlx.inference import PhotonInference
+    from photon_mlx.model import PhotonModel
+    from photon_mlx.safe_recgen import SafeRecGenConfig, SafeRecGenController
+
+    from torch_ref.config import (
+        HierarchyConfig,
+        ModelConfig,
+        TokenizerConfig,
+    )
+
+    model_cfg = ModelConfig(
+        architecture=cfg.model.get("architecture", "photon_decoder"),
+        base_embed_dim=cfg.model.base_embed_dim,
+        hidden_size=cfg.model.hidden_size,
+        intermediate_size=cfg.model.intermediate_size,
+        num_attention_heads=cfg.model.get("num_heads", 4),
+        num_key_value_heads=cfg.model.get("num_heads", 4),
+    )
+    hierarchy_cfg = HierarchyConfig(
+        levels=cfg.hierarchy.levels,
+        chunk_sizes=cfg.hierarchy.chunk_sizes,
+        encoder_layers_per_level=cfg.hierarchy.encoder_layers_per_level,
+        decoder_layers_per_level=cfg.hierarchy.decoder_layers_per_level,
+    )
+    tok_cfg = TokenizerConfig(
+        vocab_size=cfg.model.get("vocab_size", 1000),
+    )
+    photon_cfg = PhotonConfig(
+        model=model_cfg,
+        hierarchy=hierarchy_cfg,
+        tokenizer=tok_cfg,
+    )
+
+    model = PhotonModel(photon_cfg)
+    photon_inference = PhotonInference(model, photon_cfg)
+
+    safe_recgen_enabled = getattr(cfg.get("inference"), "safe_recgen_enabled", True)
+    if safe_recgen_enabled:
+        sr_cfg_data = cfg.get("safe_recgen")
+        if sr_cfg_data is not None:
+            thresholds = sr_cfg_data.get("thresholds")
+            sr_config = SafeRecGenConfig(
+                enabled=True,
+                confidence_floor=(
+                    thresholds.confidence_floor
+                    if thresholds and hasattr(thresholds, "confidence_floor")
+                    else 0.40
+                ),
+            )
+        else:
+            sr_config = SafeRecGenConfig(enabled=True)
+        safe_recgen = SafeRecGenController(sr_config)
+    else:
+        safe_recgen = None
+
+    tokenizer = _get_stub_tokenizer(photon_cfg.tokenizer.vocab_size)
+
+    return {
+        "photon_inference": photon_inference,
+        "safe_recgen": safe_recgen,
+        "photon_cfg": photon_cfg,
+        "tokenizer": tokenizer,
+    }
+
+
+class _StubTokenizer:
+    """Minimal tokenizer for PHOTON prefill (encode/decode via utf-8 byte ids)."""
+
+    def __init__(self, vocab_size: int) -> None:
+        self.vocab_size = vocab_size
+        self.pad_token_id = 0
+
+    def encode(self, text: str) -> list[int]:
+        return [b % self.vocab_size for b in text.encode("utf-8")]
+
+    def decode(self, ids: list[int]) -> str:
+        return bytes(i % 256 for i in ids).decode("utf-8", errors="replace")
+
+
+def _get_stub_tokenizer(vocab_size: int) -> _StubTokenizer:
+    return _StubTokenizer(vocab_size)
 
 
 def build_pipeline(cfg: Config) -> RepoRAGPipeline | PhotonRAGPipeline:
@@ -167,5 +253,37 @@ class PhotonRAGPipeline:
         repo_id: str = "",
     ) -> QueryResult:
         """Run PHOTON-enhanced query with drift tracking and fallback."""
-        # Delegate to baseline for now (full integration in later cycles)
-        return self.baseline.query(question, session_id=session_id, repo_id=repo_id)
+        # 1) Run PHOTON prefill for drift / confidence estimation
+        evidence_tokens = tokenize_evidence_pack(question, self.tokenizer, self.cfg)
+        if evidence_tokens.size > 0:
+            input_ids = evidence_tokens.reshape(1, -1)
+            logits, drift = self.photon_inference.session_forward(
+                input_ids,
+                session_id=session_id or "default",
+                repo_id=repo_id or "unknown",
+                repo_commit="HEAD",
+            )
+            confidence = compute_confidence(logits)
+            drift_dict = drift.as_dict() if drift else None
+        else:
+            confidence = 1.0
+            drift = None
+            drift_dict = None
+
+        # 2) Safe RecGen evaluation
+        fallback_dict = None
+        if self.safe_recgen is not None and drift is not None:
+            decision = self.safe_recgen.evaluate(
+                question, drift=drift, confidence=confidence
+            )
+            fallback_dict = decision.as_dict()
+
+        # 3) Delegate generation to baseline pipeline
+        result = self.baseline.query(question, session_id=session_id, repo_id=repo_id)
+
+        # 4) Attach PHOTON metadata
+        result.drift_metrics = drift_dict
+        result.confidence = confidence
+        result.fallback_decision = fallback_dict
+
+        return result
