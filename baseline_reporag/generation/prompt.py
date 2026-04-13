@@ -12,12 +12,31 @@ Rules:
 6. Respond in the same language as the question.\
 """
 
-_FORMAT_HINT = """\
+_FEW_SHOT_EXAMPLES = """\
+Example:
+Q: Where is the main router defined?
+A: The main application router is defined in `app/main.py` [C:1], \
+where it uses `APIRouter` to register all endpoints [C:2].
+
+Q: How is authentication implemented across the codebase?
+A: Authentication is handled by a middleware in `auth/middleware.py` [C:1] \
+that validates JWT tokens [C:3]. The token generation logic is in \
+`auth/tokens.py` [C:2], using the `python-jose` library for signing.\
+"""
+
+_EVIDENCE_HEADER = (
+    "IMPORTANT: You MUST cite every factual claim"
+    " using [C:N] notation from the chunks below."
+)
+
+_FORMAT_HINT = f"""\
 Answer format:
 - Start with a direct answer.
 - Cite every factual claim: [C:N].
 - Use code blocks for code snippets.
-- End with a one-sentence summary if the answer is long.\
+- End with a one-sentence summary if the answer is long.
+
+{_FEW_SHOT_EXAMPLES}\
 """
 
 
