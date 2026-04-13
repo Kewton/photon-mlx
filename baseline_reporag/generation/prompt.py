@@ -12,22 +12,12 @@ Rules:
 6. Respond in the same language as the question.\
 """
 
-# Citation rules — keep in sync with _EVIDENCE_HEADER (evidence_pack.py) and
-# _SYSTEM Rules 2, 5 above.  See also: design-policy §5-2 DR1-001.
 _FORMAT_HINT = """\
 Answer format:
 - Start with a direct answer.
 - Cite every factual claim: [C:N].
 - Use code blocks for code snippets.
-- End with a one-sentence summary if the answer is long.
-
-Examples of well-cited answers (cite ONLY from the current chunks):
-
-Q: Where is the main entry point?
-A: The main entry point is the `main()` function defined in [C:1]. It initialises the application config and starts the server.
-
-Q: How is the module structured?
-A: The module has three layers: the HTTP handler in [C:1] dispatches requests to the service class in [C:3], which queries the database via the repository in [C:5].\
+- End with a one-sentence summary if the answer is long.\
 """
 
 

@@ -107,7 +107,7 @@ def grade_one(
     Call the judge model and return parsed scores.
     Replace the NotImplementedError with your LLM client call.
     """
-    build_grader_messages(
+    messages = build_grader_messages(
         question, reference_answer, grading_notes, answer, cited_chunk_ids
     )
     # TODO: call LLM judge here

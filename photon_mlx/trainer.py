@@ -99,6 +99,7 @@ def train(
     resume_from: str | Path | None = None,
 ) -> TrainState:
     """Full training loop."""
+    t_cfg = cfg.model
     h_cfg = cfg.hierarchy
 
     # Build model

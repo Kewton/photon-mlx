@@ -18,6 +18,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from baseline_reporag.config import load_config
+from baseline_reporag.ingestion.store import ChunkStore
 
 # ================================================================
 # Static eval templates (30 per category)
@@ -281,13 +283,13 @@ def generate_stress_turns(topic: str, n: int = 10) -> list[str]:
         f"{topic}の概要を教えてください。",
         f"{topic}の主要ファイルはどこですか？",
         f"{topic}のエントリポイントを教えてください。",
-        "そのコードを見せてください。",
-        "依存関係を教えてください。",
-        "変更した場合の影響範囲は？",
-        "テストはどこにありますか？",
-        "改善案を提案してください。",
-        "最もリスクが高い変更は何ですか？",
-        "まとめてください。",
+        f"そのコードを見せてください。",
+        f"依存関係を教えてください。",
+        f"変更した場合の影響範囲は？",
+        f"テストはどこにありますか？",
+        f"改善案を提案してください。",
+        f"最もリスクが高い変更は何ですか？",
+        f"まとめてください。",
     ]
     return base_questions[:n]
 

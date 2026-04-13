@@ -5,13 +5,6 @@ from dataclasses import dataclass
 from ..ingestion.store import ChunkStore, Chunk
 from ..memory.session import SessionState
 
-# Citation instruction header — keep in sync with _SYSTEM (prompt.py) and
-# _FORMAT_HINT (prompt.py).  See also: design-policy §5-2 DR1-001.
-_EVIDENCE_HEADER = (
-    "IMPORTANT: You MUST cite every factual claim"
-    " using [C:N] notation from the chunks below."
-)
-
 
 @dataclass
 class EvidencePack:
@@ -19,8 +12,6 @@ class EvidencePack:
     chunk_indices: dict[str, int]  # chunk_id -> 1-based citation index
 
     def format_for_prompt(self) -> str:
-        if not self.chunks:
-            return ""
         parts: list[str] = []
         for chunk in self.chunks:
             idx = self.chunk_indices[chunk.chunk_id]
@@ -31,8 +22,7 @@ class EvidencePack:
             if chunk.section_header:
                 header += f"  [{chunk.section_header}]"
             parts.append(f"{header}\n{chunk.content.strip()}")
-        body = "\n\n---\n\n".join(parts)
-        return f"{_EVIDENCE_HEADER}\n\n{body}"
+        return "\n\n---\n\n".join(parts)
 
 
 def build_evidence_pack(
