@@ -46,10 +46,29 @@ class TokenizerConfig:
 
 
 @dataclass
+class TrainingConfig:
+    learning_rate: float = 2e-4
+    min_learning_rate: float = 0.0
+    warmup_ratio: float = 0.0
+    micro_batch_size: int = 4
+    gradient_accumulation_steps: int = 1
+    weight_decay: float = 0.0
+    max_grad_norm: float = 1.0
+    context_length: int = 2048
+    max_steps: int = 5000
+    eval_every_steps: int = 200
+    save_every_steps: int = 500
+    log_every_steps: int = 20
+    train_corpus: str = ""
+    val_corpus: str = ""
+
+
+@dataclass
 class PhotonConfig:
     model: ModelConfig = field(default_factory=ModelConfig)
     hierarchy: HierarchyConfig = field(default_factory=HierarchyConfig)
     tokenizer: TokenizerConfig = field(default_factory=TokenizerConfig)
+    training: TrainingConfig | None = None
 
 
 def _set_fields(dc: Any, raw: dict) -> None:
@@ -65,4 +84,7 @@ def load_photon_config(path: str | Path) -> PhotonConfig:
     _set_fields(cfg.model, raw.get("model", {}))
     _set_fields(cfg.hierarchy, raw.get("hierarchy", {}))
     _set_fields(cfg.tokenizer, raw.get("tokenizer", {}))
+    if "training" in raw:
+        cfg.training = TrainingConfig()
+        _set_fields(cfg.training, raw["training"])
     return cfg

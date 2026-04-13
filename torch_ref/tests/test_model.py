@@ -5,7 +5,13 @@ from __future__ import annotations
 import torch
 import pytest
 
-from torch_ref.config import PhotonConfig, ModelConfig, HierarchyConfig, TokenizerConfig
+from torch_ref.config import (
+    PhotonConfig,
+    ModelConfig,
+    HierarchyConfig,
+    TokenizerConfig,
+    TrainingConfig,
+)
 from torch_ref.model import MinimalLM
 
 
@@ -169,3 +175,121 @@ class TestLogitsSanity:
         assert n > 0
         # Tiny config should be well under 1M params
         assert n < 1_000_000, f"Tiny model has {n} params, expected < 1M"
+
+
+# ---------------------------------------------------------------
+# TrainingConfig tests
+# ---------------------------------------------------------------
+
+
+class TestTrainingConfig:
+    def test_training_config_defaults(self) -> None:
+        tc = TrainingConfig()
+        assert tc.learning_rate == 2e-4
+        assert tc.micro_batch_size == 4
+        assert tc.gradient_accumulation_steps == 1
+        assert tc.max_steps == 5000
+        assert tc.weight_decay == 0.0
+        assert tc.max_grad_norm == 1.0
+        assert tc.warmup_ratio == 0.0
+        assert tc.min_learning_rate == 0.0
+        assert tc.train_corpus == ""
+        assert tc.val_corpus == ""
+        assert tc.context_length == 2048
+
+    def test_photon_config_backward_compat(self) -> None:
+        """PhotonConfig without training should still work (Optional[None])."""
+        cfg = _tiny_config()
+        assert cfg.training is None
+
+    def test_photon_config_with_training(self) -> None:
+        tc = TrainingConfig(
+            learning_rate=1.5e-4,
+            micro_batch_size=2,
+            gradient_accumulation_steps=16,
+            max_steps=12000,
+        )
+        cfg = PhotonConfig(
+            model=ModelConfig(
+                hidden_size=64,
+                intermediate_size=128,
+                num_attention_heads=4,
+                num_key_value_heads=4,
+                head_dim=16,
+                base_embed_dim=16,
+            ),
+            hierarchy=HierarchyConfig(),
+            tokenizer=TokenizerConfig(vocab_size=256),
+            training=tc,
+        )
+        assert cfg.training is not None
+        assert cfg.training.learning_rate == 1.5e-4
+        assert cfg.training.gradient_accumulation_steps == 16
+
+    def test_load_config_with_training(self, tmp_path) -> None:
+        import yaml
+        from torch_ref.config import load_photon_config
+
+        cfg_dict = {
+            "model": {
+                "hidden_size": 64,
+                "intermediate_size": 128,
+                "num_attention_heads": 4,
+                "num_key_value_heads": 4,
+                "head_dim": 16,
+                "base_embed_dim": 16,
+            },
+            "hierarchy": {"levels": 2},
+            "tokenizer": {"vocab_size": 256},
+            "training": {
+                "learning_rate": 0.00015,
+                "micro_batch_size": 2,
+                "gradient_accumulation_steps": 16,
+                "max_steps": 12000,
+                "weight_decay": 0.1,
+                "max_grad_norm": 1.0,
+                "warmup_ratio": 0.03,
+                "min_learning_rate": 0.000015,
+                "train_corpus": "data/train.jsonl",
+                "val_corpus": "data/val.jsonl",
+                "context_length": 2048,
+                "eval_every_steps": 250,
+                "save_every_steps": 1000,
+                "log_every_steps": 20,
+            },
+        }
+        p = tmp_path / "cfg.yaml"
+        p.write_text(yaml.dump(cfg_dict), encoding="utf-8")
+
+        cfg = load_photon_config(str(p))
+        assert cfg.training is not None
+        assert cfg.training.learning_rate == 0.00015
+        assert cfg.training.micro_batch_size == 2
+        assert cfg.training.gradient_accumulation_steps == 16
+        assert cfg.training.max_steps == 12000
+        assert cfg.training.weight_decay == 0.1
+        assert cfg.training.warmup_ratio == 0.03
+        assert cfg.training.train_corpus == "data/train.jsonl"
+
+    def test_load_config_without_training(self, tmp_path) -> None:
+        """Config without training section should leave training=None."""
+        import yaml
+        from torch_ref.config import load_photon_config
+
+        cfg_dict = {
+            "model": {
+                "hidden_size": 64,
+                "intermediate_size": 128,
+                "num_attention_heads": 4,
+                "num_key_value_heads": 4,
+                "head_dim": 16,
+                "base_embed_dim": 16,
+            },
+            "hierarchy": {"levels": 2},
+            "tokenizer": {"vocab_size": 256},
+        }
+        p = tmp_path / "cfg.yaml"
+        p.write_text(yaml.dump(cfg_dict), encoding="utf-8")
+
+        cfg = load_photon_config(str(p))
+        assert cfg.training is None

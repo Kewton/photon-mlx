@@ -16,11 +16,18 @@ from torch_ref.config import (
     ModelConfig,
     PhotonConfig,
     TokenizerConfig,
+    TrainingConfig,
 )
 from photon_mlx.model import PhotonModel
 from photon_mlx.loss import photon_loss, next_token_loss
 from photon_mlx.data import pack_sequences, create_batches, load_jsonl
-from photon_mlx.trainer import save_checkpoint, load_checkpoint, load_model, TrainState
+from photon_mlx.trainer import (
+    save_checkpoint,
+    load_checkpoint,
+    load_model,
+    train,
+    TrainState,
+)
 
 
 def _tiny_cfg() -> PhotonConfig:
@@ -245,3 +252,134 @@ class TestOverfit:
         assert final_loss < initial_loss * 0.5, (
             f"Loss did not drop enough: {initial_loss:.4f} → {final_loss:.4f}"
         )
+
+
+# ---------------------------------------------------------------
+# Helper: dummy corpus
+# ---------------------------------------------------------------
+
+
+def _write_dummy_corpus(path: Path, n_docs: int = 10, seq_len: int = 32) -> None:
+    import json
+    import random
+
+    random.seed(42)
+    with open(path, "w", encoding="utf-8") as f:
+        for _ in range(n_docs):
+            tokens = [random.randint(1, 255) for _ in range(seq_len)]
+            f.write(json.dumps({"tokens": tokens}) + "\n")
+
+
+def _tiny_train_cfg(tmp_path: Path, **overrides) -> PhotonConfig:
+    """Create a tiny config with TrainingConfig for testing train()."""
+    train_path = tmp_path / "train.jsonl"
+    val_path = tmp_path / "val.jsonl"
+    _write_dummy_corpus(train_path, n_docs=10, seq_len=32)
+    _write_dummy_corpus(val_path, n_docs=3, seq_len=32)
+
+    defaults = dict(
+        learning_rate=1e-3,
+        micro_batch_size=2,
+        max_steps=10,
+        eval_every_steps=5,
+        save_every_steps=5,
+        log_every_steps=5,
+        gradient_accumulation_steps=1,
+        context_length=16,
+        train_corpus=str(train_path),
+        val_corpus=str(val_path),
+        weight_decay=0.0,
+        max_grad_norm=1.0,
+        warmup_ratio=0.0,
+        min_learning_rate=0.0,
+    )
+    defaults.update(overrides)
+    tc = TrainingConfig(**defaults)
+
+    cfg = _tiny_cfg()
+    cfg.training = tc
+    return cfg
+
+
+# ---------------------------------------------------------------
+# train() integration tests
+# ---------------------------------------------------------------
+
+
+class TestTrainFunction:
+    def test_train_uses_config_max_steps(self, tmp_path: Path) -> None:
+        """train() should run for cfg.training.max_steps."""
+        cfg = _tiny_train_cfg(tmp_path, max_steps=10)
+        state = train(cfg, checkpoint_dir=tmp_path / "ckpt", log_dir=tmp_path / "logs")
+        assert state.step == 10
+
+    def test_train_saves_checkpoint_at_configured_interval(
+        self, tmp_path: Path
+    ) -> None:
+        """Checkpoints should be saved at save_every_steps intervals."""
+        cfg = _tiny_train_cfg(tmp_path, max_steps=10, save_every_steps=5)
+        train(cfg, checkpoint_dir=tmp_path / "ckpt", log_dir=tmp_path / "logs")
+        assert (tmp_path / "ckpt" / "step_000005").exists()
+        assert (tmp_path / "ckpt" / "final").exists()
+
+    def test_train_gradient_accumulation(self, tmp_path: Path) -> None:
+        """train() with gradient_accumulation_steps > 1 should complete."""
+        cfg = _tiny_train_cfg(
+            tmp_path,
+            max_steps=8,
+            gradient_accumulation_steps=4,
+            eval_every_steps=100,
+            save_every_steps=100,
+            log_every_steps=4,
+        )
+        state = train(cfg, checkpoint_dir=tmp_path / "ckpt", log_dir=tmp_path / "logs")
+        assert state.step == 8
+
+    def test_train_adamw_weight_decay(self, tmp_path: Path) -> None:
+        """train() with weight_decay > 0 should complete without error."""
+        cfg = _tiny_train_cfg(tmp_path, max_steps=5, weight_decay=0.1)
+        state = train(cfg, checkpoint_dir=tmp_path / "ckpt", log_dir=tmp_path / "logs")
+        assert state.step == 5
+
+    def test_train_lr_warmup_cosine(self, tmp_path: Path) -> None:
+        """train() with warmup + cosine decay should complete."""
+        cfg = _tiny_train_cfg(
+            tmp_path,
+            max_steps=20,
+            warmup_ratio=0.1,
+            min_learning_rate=1e-5,
+            eval_every_steps=100,
+            save_every_steps=100,
+        )
+        state = train(cfg, checkpoint_dir=tmp_path / "ckpt", log_dir=tmp_path / "logs")
+        assert state.step == 20
+
+    def test_train_grad_clipping(self, tmp_path: Path) -> None:
+        """train() with max_grad_norm should complete without error."""
+        cfg = _tiny_train_cfg(tmp_path, max_steps=5, max_grad_norm=0.5)
+        state = train(cfg, checkpoint_dir=tmp_path / "ckpt", log_dir=tmp_path / "logs")
+        assert state.step == 5
+
+    def test_loss_breakdown_in_log(self, tmp_path: Path) -> None:
+        """Loss breakdown (next_token_loss) should appear in train log."""
+        import json
+
+        cfg = _tiny_train_cfg(tmp_path, max_steps=5, log_every_steps=5)
+        train(cfg, checkpoint_dir=tmp_path / "ckpt", log_dir=tmp_path / "logs")
+
+        log_path = tmp_path / "logs" / "train_log.jsonl"
+        assert log_path.exists()
+        found_breakdown = False
+        for line in log_path.read_text(encoding="utf-8").strip().split("\n"):
+            entry = json.loads(line)
+            if "next_token_loss" in entry:
+                found_breakdown = True
+                break
+        assert found_breakdown, "Loss breakdown not found in train log"
+
+    def test_train_loss_decreases(self, tmp_path: Path) -> None:
+        """Loss should decrease during training."""
+        cfg = _tiny_train_cfg(tmp_path, max_steps=30, log_every_steps=10)
+        state = train(cfg, checkpoint_dir=tmp_path / "ckpt", log_dir=tmp_path / "logs")
+        assert len(state.train_losses) > 1
+        assert state.train_losses[-1] < state.train_losses[0]
