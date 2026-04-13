@@ -177,7 +177,7 @@ class PhotonModel(nn.Module):
 
         prefix = converter(h_above)  # (B, N_low, P, D)
         enc_chunked = enc_out.reshape(B, N_high, C, D)  # (B, N_high, C, D)
-        prefix_chunked = prefix.reshape(B, N_high, C, P, D)
+        _prefix_chunked = prefix.reshape(B, N_high, C, P, D)
 
         # Per-chunk: [P prefix vecs, 1 encoder vec] = P+1 positions
         # But actually each super-chunk has C encoder positions.

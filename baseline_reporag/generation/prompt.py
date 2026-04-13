@@ -44,8 +44,11 @@ def build_messages(
     question: str,
     evidence_text: str,
     history_text: str = "",
+    session_summary: str = "",
 ) -> list[dict]:
     parts: list[str] = []
+    if session_summary:
+        parts.append(f"## Session Summary\n{session_summary}")
     if history_text:
         parts.append(f"## Conversation History\n{history_text}")
     parts.append(f"## Code Chunks\n{evidence_text}")
