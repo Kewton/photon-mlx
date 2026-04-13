@@ -19,7 +19,7 @@ from .model import PhotonModel
 import sys
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from torch_ref.config import PhotonConfig  # noqa: E402
+from torch_ref.config import PhotonConfig, load_photon_config  # noqa: E402
 
 
 @dataclass
@@ -63,6 +63,18 @@ def load_checkpoint(
     model.load_weights(list(weights.items()))
     state_data = json.loads((path / "state.json").read_text(encoding="utf-8"))
     return TrainState(**state_data)
+
+
+def load_model(
+    config_path: str | Path,
+    checkpoint_path: str | Path,
+) -> PhotonModel:
+    """Build a PhotonModel from config YAML and checkpoint directory."""
+    cfg = load_photon_config(str(config_path))
+    model = PhotonModel(cfg)
+    _state = load_checkpoint(model, checkpoint_path)
+    mx.eval(model.parameters())
+    return model
 
 
 def _flatten(tree: Any, prefix: str = "") -> dict[str, mx.array]:
