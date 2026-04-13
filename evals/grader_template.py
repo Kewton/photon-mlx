@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import re
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -93,7 +95,50 @@ def build_grader_messages(
 
 
 # ---------------------------------------------------------------------------
-# Grader runner (stub – wire to LLM client when ready)
+# Default rubric (correctness 0-2, grounding 0-2, usefulness 0-1)
+# ---------------------------------------------------------------------------
+
+_DEFAULT_RUBRIC: dict[str, dict] = {
+    "correctness": {"min": 0, "max": 2},
+    "grounding": {"min": 0, "max": 2},
+    "usefulness": {"min": 0, "max": 1},
+}
+
+# ---------------------------------------------------------------------------
+# LLM client abstraction
+# ---------------------------------------------------------------------------
+
+
+def _call_llm_judge(messages: list[dict], model_id: str = "qwen3.5:27b") -> str:
+    """Call an OpenAI-compatible endpoint to get the judge response text."""
+    import httpx
+
+    base_url = os.getenv("LLM_JUDGE_BASE_URL", "http://localhost:11434/v1")
+    api_key = os.getenv("LLM_JUDGE_API_KEY", "ollama")
+
+    payload = {
+        "model": model_id,
+        "messages": messages,
+        "temperature": 0.0,
+    }
+    resp = httpx.post(
+        f"{base_url}/chat/completions",
+        json=payload,
+        headers={"Authorization": f"Bearer {api_key}"},
+        timeout=120.0,
+    )
+    resp.raise_for_status()
+    return resp.json()["choices"][0]["message"]["content"]
+
+
+def _parse_judge_response(text: str) -> dict:
+    """Parse JSON from raw LLM output, stripping markdown fences if present."""
+    cleaned = re.sub(r"```(?:json)?\s*", "", text).strip().rstrip("`")
+    return json.loads(cleaned)
+
+
+# ---------------------------------------------------------------------------
+# Grader runner
 # ---------------------------------------------------------------------------
 
 
@@ -105,39 +150,37 @@ def grade_one(
     cited_chunk_ids: list[str],
     model_id: str = "qwen3.5:27b",
 ) -> dict:
-    """
-    Call the judge model and return parsed scores.
-    Replace the NotImplementedError with your LLM client call.
-    """
-    _messages = build_grader_messages(
+    """Call the judge model and return parsed scores."""
+    messages = build_grader_messages(
         question, reference_answer, grading_notes, answer, cited_chunk_ids
     )
-    # TODO: call LLM judge here
-    # response_text = call_llm(model_id, messages)
-    # return json.loads(response_text)
-    raise NotImplementedError("Wire grade_one() to an LLM client.")
+    response_text = _call_llm_judge(messages, model_id=model_id)
+    return _parse_judge_response(response_text)
 
 
-def compute_aggregate(scores: list[dict]) -> dict:
+def compute_aggregate(
+    scores: list[dict],
+    rubric: dict[str, dict] | None = None,
+) -> dict:
+    """Aggregate grading scores using rubric-aware dynamic calculation."""
     n = len(scores)
     if n == 0:
         return {}
-    return {
-        "n": n,
-        "correctness_mean": sum(s["correctness"] for s in scores) / n,
-        "grounding_mean": sum(s["grounding"] for s in scores) / n,
-        "usefulness_mean": sum(s["usefulness"] for s in scores) / n,
-        "total_mean": sum(
-            s["correctness"] + s["grounding"] + s["usefulness"] for s in scores
-        )
-        / n,
-        "total_100": sum(
-            s["correctness"] + s["grounding"] + s["usefulness"] for s in scores
-        )
-        / n
-        / 5
-        * 100,
-    }
+
+    rubric = rubric or _DEFAULT_RUBRIC
+    dims = list(rubric.keys())
+    max_total = sum(rubric[d]["max"] for d in dims)
+
+    agg: dict = {"n": n}
+    total_sum = 0.0
+    for dim in dims:
+        dim_sum = sum(s.get(dim, 0) for s in scores)
+        agg[f"{dim}_mean"] = dim_sum / n
+        total_sum += dim_sum
+
+    agg["total_mean"] = total_sum / n
+    agg["total_100"] = (total_sum / n / max_total * 100) if max_total > 0 else 0.0
+    return agg
 
 
 def main() -> None:

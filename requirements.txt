@@ -25,3 +25,4 @@ uvicorn[standard]
 
 # Evaluation / grading
 tqdm
+httpx

@@ -346,3 +346,185 @@ def _make_mock_photon_deps():
         "photon_cfg": MagicMock(),
         "tokenizer": MagicMock(),
     }
+
+
+# ---------------------------------------------------------------------------
+# TDD Cycle 7: _build_photon_deps wires real PHOTON components
+# ---------------------------------------------------------------------------
+
+
+class TestBuildPhotonDeps:
+    """_build_photon_deps constructs PHOTON components from config."""
+
+    def test_returns_required_keys(self, tmp_path):
+        from baseline_reporag.config import load_config
+        from baseline_reporag.photon_pipeline import _build_photon_deps
+
+        cfg_file = tmp_path / "photon.yaml"
+        cfg_file.write_text(
+            "model:\n"
+            "  provider: photon\n"
+            "  architecture: photon_decoder\n"
+            "  base_embed_dim: 64\n"
+            "  hidden_size: 128\n"
+            "  intermediate_size: 256\n"
+            "  num_heads: 4\n"
+            "  vocab_size: 1000\n"
+            "hierarchy:\n"
+            "  levels: 2\n"
+            "  chunk_sizes: [4, 4]\n"
+            "  encoder_layers_per_level: [2, 2]\n"
+            "  decoder_layers_per_level: [2, 2]\n"
+            "inference:\n"
+            "  hierarchical_prefill: true\n"
+            "  safe_recgen_enabled: true\n"
+            "safe_recgen:\n"
+            "  enabled: true\n"
+            "  thresholds:\n"
+            "    confidence_floor: 0.40\n"
+        )
+        cfg = load_config(str(cfg_file))
+        deps = _build_photon_deps(cfg)
+        assert "photon_inference" in deps
+        assert "safe_recgen" in deps
+        assert "photon_cfg" in deps
+        assert "tokenizer" in deps
+
+    def test_safe_recgen_disabled(self, tmp_path):
+        from baseline_reporag.config import load_config
+        from baseline_reporag.photon_pipeline import _build_photon_deps
+
+        cfg_file = tmp_path / "photon.yaml"
+        cfg_file.write_text(
+            "model:\n"
+            "  provider: photon\n"
+            "  architecture: photon_decoder\n"
+            "  base_embed_dim: 64\n"
+            "  hidden_size: 128\n"
+            "  intermediate_size: 256\n"
+            "  num_heads: 4\n"
+            "  vocab_size: 1000\n"
+            "hierarchy:\n"
+            "  levels: 2\n"
+            "  chunk_sizes: [4, 4]\n"
+            "  encoder_layers_per_level: [2, 2]\n"
+            "  decoder_layers_per_level: [2, 2]\n"
+            "inference:\n"
+            "  hierarchical_prefill: true\n"
+            "  safe_recgen_enabled: false\n"
+        )
+        cfg = load_config(str(cfg_file))
+        deps = _build_photon_deps(cfg)
+        assert deps["safe_recgen"] is None
+
+
+# ---------------------------------------------------------------------------
+# TDD Cycle 8: PhotonRAGPipeline.query with PHOTON inference path
+# ---------------------------------------------------------------------------
+
+
+class TestPhotonQueryFlow:
+    """PhotonRAGPipeline.query runs PHOTON prefill, drift, and fallback."""
+
+    def test_query_populates_drift_metrics(self):
+        from baseline_reporag.photon_pipeline import PhotonRAGPipeline
+        from baseline_reporag.profiler import LatencyBreakdown, MemorySnapshot
+        from baseline_reporag.pipeline import QueryResult
+
+        import mlx.core as mx
+
+        baseline_deps = _make_mock_deps()
+        photon_deps = _make_mock_photon_deps()
+
+        # Setup mock baseline query result
+        mock_baseline_result = QueryResult(
+            answer="baseline answer",
+            session_id="s1",
+            turn_id=1,
+            cited_chunk_ids=["c1"],
+            wrong_citation_indices=[],
+            no_citation=False,
+            latency=LatencyBreakdown(10, 20, 5, 30, 65),
+            memory=MemorySnapshot(100, 50),
+        )
+        baseline_deps["sessions"].get_or_create.return_value = MagicMock()
+
+        cfg = MagicMock()
+        cfg.model.provider = "photon"
+        cfg.hierarchy.chunk_sizes = [4, 4]
+
+        pipeline = PhotonRAGPipeline(
+            cfg=cfg, baseline_deps=baseline_deps, photon_deps=photon_deps
+        )
+        # Mock baseline.query
+        pipeline.baseline.query = MagicMock(return_value=mock_baseline_result)
+
+        # Mock photon_inference.session_forward
+        mock_drift = MagicMock()
+        mock_drift.as_dict.return_value = {"latent_cosine_drift": 0.05}
+        photon_deps["photon_inference"].session_forward.return_value = (
+            mx.zeros((1, 10, 1000)),
+            mock_drift,
+        )
+
+        # Mock safe_recgen.evaluate
+        mock_decision = MagicMock()
+        mock_decision.should_fallback = False
+        mock_decision.as_dict.return_value = {"should_fallback": False}
+        photon_deps["safe_recgen"].evaluate.return_value = mock_decision
+
+        result = pipeline.query("test question", session_id="s1", repo_id="r1")
+        assert isinstance(result, QueryResult)
+        assert result.drift_metrics is not None
+        assert result.confidence is not None
+
+    def test_query_fallback_to_baseline_on_safe_recgen(self):
+        from baseline_reporag.photon_pipeline import PhotonRAGPipeline
+        from baseline_reporag.profiler import LatencyBreakdown, MemorySnapshot
+        from baseline_reporag.pipeline import QueryResult
+
+        import mlx.core as mx
+
+        baseline_deps = _make_mock_deps()
+        photon_deps = _make_mock_photon_deps()
+
+        mock_baseline_result = QueryResult(
+            answer="fallback answer",
+            session_id="s1",
+            turn_id=1,
+            cited_chunk_ids=[],
+            wrong_citation_indices=[],
+            no_citation=True,
+            latency=LatencyBreakdown(10, 20, 5, 30, 65),
+            memory=MemorySnapshot(100, 50),
+        )
+
+        cfg = MagicMock()
+        cfg.model.provider = "photon"
+        cfg.hierarchy.chunk_sizes = [4, 4]
+
+        pipeline = PhotonRAGPipeline(
+            cfg=cfg, baseline_deps=baseline_deps, photon_deps=photon_deps
+        )
+        pipeline.baseline.query = MagicMock(return_value=mock_baseline_result)
+
+        # Mock: safe_recgen triggers fallback
+        mock_drift = MagicMock()
+        mock_drift.as_dict.return_value = {"latent_cosine_drift": 0.5}
+        photon_deps["photon_inference"].session_forward.return_value = (
+            mx.zeros((1, 10, 1000)),
+            mock_drift,
+        )
+
+        mock_decision = MagicMock()
+        mock_decision.should_fallback = True
+        mock_decision.actions = ["fallback_to_baseline_path"]
+        mock_decision.as_dict.return_value = {
+            "should_fallback": True,
+            "actions": ["fallback_to_baseline_path"],
+        }
+        photon_deps["safe_recgen"].evaluate.return_value = mock_decision
+
+        result = pipeline.query("security auth question", session_id="s1", repo_id="r1")
+        assert result.fallback_decision is not None
+        assert result.fallback_decision["should_fallback"] is True
