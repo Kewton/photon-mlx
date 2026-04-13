@@ -20,7 +20,10 @@ from typing import Any
 import mlx.core as mx
 import mlx.nn as nn
 
+from math import prod
+
 from .blocks import TransformerBlock, causal_mask, precompute_rope
+from .optimize import pad_input_ids, pad_to_multiple
 
 # ── sys.path for shared config ──────────────────────────────────
 import sys
@@ -273,6 +276,50 @@ class PhotonModel(nn.Module):
             )
 
         return logits, loss
+
+    # ────────────────────────────────────────────────────────────
+    # Greedy decode
+    # ────────────────────────────────────────────────────────────
+    def generate(
+        self,
+        input_ids: mx.array,
+        max_new_tokens: int = 64,
+        return_logits: bool = False,
+    ) -> tuple[mx.array, mx.array | None]:
+        """Greedy autoregressive decode with chunk-aligned padding.
+
+        Args:
+            input_ids: (B, T_prompt) pre-tokenized prompt.
+            max_new_tokens: number of new tokens to generate.
+            return_logits: if True, return per-step next-token logits.
+
+        Returns:
+            (generated_ids, step_logits | None)
+            generated_ids: (B, T_prompt + max_new_tokens)
+            step_logits:   (B, max_new_tokens, V) if return_logits else None
+        """
+        total_chunk = prod(self.cfg.hierarchy.chunk_sizes)
+        prompt_len = input_ids.shape[1]
+        padded_len = pad_to_multiple(prompt_len + max_new_tokens, total_chunk)
+        ids = pad_input_ids(input_ids, padded_len)
+        actual_len = prompt_len
+
+        step_logits_list: list[mx.array] | None = [] if return_logits else None
+
+        for _step in range(max_new_tokens):
+            logits, _loss = self.__call__(ids, labels=None)
+            next_logits = logits[:, actual_len - 1, :]
+            next_token = mx.argmax(next_logits, axis=-1)
+
+            if step_logits_list is not None:
+                step_logits_list.append(next_logits)
+
+            ids[:, actual_len] = next_token
+            actual_len += 1
+            mx.eval(ids)
+
+        step_logits = mx.stack(step_logits_list, axis=1) if step_logits_list else None
+        return ids[:, : prompt_len + max_new_tokens], step_logits
 
     def count_parameters(self) -> int:
         from mlx.utils import tree_flatten

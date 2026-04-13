@@ -20,7 +20,7 @@ from torch_ref.config import (
 from photon_mlx.model import PhotonModel
 from photon_mlx.loss import photon_loss, next_token_loss
 from photon_mlx.data import pack_sequences, create_batches, load_jsonl
-from photon_mlx.trainer import save_checkpoint, load_checkpoint, TrainState
+from photon_mlx.trainer import save_checkpoint, load_checkpoint, load_model, TrainState
 
 
 def _tiny_cfg() -> PhotonConfig:
@@ -132,6 +132,87 @@ class TestCheckpoint:
 # ---------------------------------------------------------------
 # Overfit test (end-to-end training sanity)
 # ---------------------------------------------------------------
+
+
+class TestLoadModel:
+    def test_load_model(self, tmp_path: Path) -> None:
+        mx.random.seed(42)
+        cfg = _tiny_cfg()
+        model = PhotonModel(cfg)
+        state = TrainState(step=100, best_val_loss=2.0)
+
+        ckpt_dir = tmp_path / "ckpt"
+        save_checkpoint(model, state, ckpt_dir)
+
+        # Write a minimal config YAML
+        config_path = tmp_path / "config.yaml"
+        import yaml
+
+        cfg_dict = {
+            "model": {
+                "base_embed_dim": 16,
+                "hidden_size": 64,
+                "intermediate_size": 128,
+                "num_attention_heads": 4,
+                "num_key_value_heads": 4,
+                "head_dim": 16,
+                "max_position_embeddings": 128,
+            },
+            "hierarchy": {
+                "levels": 2,
+                "chunk_sizes": [4, 4],
+                "converter_prefix_lengths": [2, 2],
+                "encoder_layers_per_level": [1, 1],
+                "decoder_layers_per_level": [1, 1],
+            },
+            "tokenizer": {"vocab_size": 256},
+        }
+        config_path.write_text(yaml.dump(cfg_dict), encoding="utf-8")
+
+        loaded = load_model(config_path, ckpt_dir)
+        assert isinstance(loaded, PhotonModel)
+
+    def test_load_model_forward_consistency(self, tmp_path: Path) -> None:
+        mx.random.seed(42)
+        cfg = _tiny_cfg()
+        model = PhotonModel(cfg)
+
+        ids = mx.random.randint(0, 256, (1, 16))
+        logits_before, _ = model(ids)
+        mx.eval(logits_before)
+
+        ckpt_dir = tmp_path / "ckpt"
+        save_checkpoint(model, TrainState(), ckpt_dir)
+
+        import yaml
+
+        config_path = tmp_path / "config.yaml"
+        cfg_dict = {
+            "model": {
+                "base_embed_dim": 16,
+                "hidden_size": 64,
+                "intermediate_size": 128,
+                "num_attention_heads": 4,
+                "num_key_value_heads": 4,
+                "head_dim": 16,
+                "max_position_embeddings": 128,
+            },
+            "hierarchy": {
+                "levels": 2,
+                "chunk_sizes": [4, 4],
+                "converter_prefix_lengths": [2, 2],
+                "encoder_layers_per_level": [1, 1],
+                "decoder_layers_per_level": [1, 1],
+            },
+            "tokenizer": {"vocab_size": 256},
+        }
+        config_path.write_text(yaml.dump(cfg_dict), encoding="utf-8")
+
+        loaded = load_model(config_path, ckpt_dir)
+        logits_after, _ = loaded(ids)
+        mx.eval(logits_after)
+
+        assert mx.allclose(logits_before, logits_after, atol=1e-5).item()
 
 
 class TestOverfit:
