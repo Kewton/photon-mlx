@@ -1,4 +1,5 @@
 """Training pipeline tests for PHOTON."""
+
 from __future__ import annotations
 
 import sys
@@ -48,6 +49,7 @@ def _tiny_cfg() -> PhotonConfig:
 # Loss tests
 # ---------------------------------------------------------------
 
+
 class TestLoss:
     def test_next_token_loss_positive(self) -> None:
         logits = mx.random.normal((2, 16, 256))
@@ -75,6 +77,7 @@ class TestLoss:
 # ---------------------------------------------------------------
 # Data pipeline tests
 # ---------------------------------------------------------------
+
 
 class TestData:
     def test_pack_sequences(self) -> None:
@@ -104,6 +107,7 @@ class TestData:
 # Checkpoint tests
 # ---------------------------------------------------------------
 
+
 class TestCheckpoint:
     def test_save_and_load(self, tmp_path: Path) -> None:
         mx.random.seed(42)
@@ -128,6 +132,7 @@ class TestCheckpoint:
 # ---------------------------------------------------------------
 # Overfit test (end-to-end training sanity)
 # ---------------------------------------------------------------
+
 
 class TestOverfit:
     def test_tiny_overfit(self) -> None:

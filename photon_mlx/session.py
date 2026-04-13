@@ -4,6 +4,7 @@ PHOTON session-level working memory.
 Maintains hierarchical latent state across turns, tracks drift,
 and provides topic shift features for Safe RecGen.
 """
+
 from __future__ import annotations
 
 import time
@@ -15,8 +16,9 @@ import mlx.core as mx
 @dataclass
 class HierarchicalState:
     """Cached encoder outputs at each hierarchy level."""
+
     level_states: list[mx.array] = field(default_factory=list)  # per-level latents
-    token_proj: mx.array | None = None                          # projected token embeddings
+    token_proj: mx.array | None = None  # projected token embeddings
     turn_id: int = 0
     timestamp: float = field(default_factory=time.time)
 
@@ -24,11 +26,12 @@ class HierarchicalState:
 @dataclass
 class DriftMetrics:
     """Per-turn drift measurements."""
+
     turn_id: int = 0
-    latent_cosine_drift: float = 0.0    # cosine distance between prev/current top latent
-    token_agreement: float = 1.0        # fraction of top-1 predictions that agree
-    logit_kl: float = 0.0              # KL divergence of logit distributions
-    topic_shift_score: float = 0.0     # proxy for topic change magnitude
+    latent_cosine_drift: float = 0.0  # cosine distance between prev/current top latent
+    token_agreement: float = 1.0  # fraction of top-1 predictions that agree
+    logit_kl: float = 0.0  # KL divergence of logit distributions
+    topic_shift_score: float = 0.0  # proxy for topic change magnitude
 
     def as_dict(self) -> dict:
         return {
@@ -112,8 +115,7 @@ class PhotonSessionState:
             metrics.topic_shift_score = metrics.latent_cosine_drift
 
         if self.prev_logits is not None and new_logits is not None:
-            metrics.token_agreement = token_agreement_rate(
-                self.prev_logits, new_logits)
+            metrics.token_agreement = token_agreement_rate(self.prev_logits, new_logits)
             metrics.logit_kl = kl_divergence(self.prev_logits, new_logits)
 
         self.prev_logits = new_logits

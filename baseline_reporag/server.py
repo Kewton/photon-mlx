@@ -4,6 +4,7 @@ Baseline RepoRAG – FastAPI server.
 Start with:
     python -m baseline_reporag.server --config configs/baseline.yaml
 """
+
 from __future__ import annotations
 
 import time

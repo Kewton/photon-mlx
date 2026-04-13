@@ -5,6 +5,7 @@ Usage:
     python scripts/export_report.py --run-id latest
     python scripts/export_report.py --run-id baseline_fastapi_fastapi_20260412_eba8942
 """
+
 from __future__ import annotations
 
 import argparse

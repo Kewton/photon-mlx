@@ -1,4 +1,5 @@
 """Latency and memory profiling utilities for benchmark runs."""
+
 from __future__ import annotations
 
 import time
@@ -88,7 +89,9 @@ class TurnProfiler:
 
         latency = LatencyBreakdown(
             retrieval_ms=self._watches.get("retrieval", StopWatch()).elapsed_ms,
-            graph_expansion_ms=self._watches.get("graph_expansion", StopWatch()).elapsed_ms,
+            graph_expansion_ms=self._watches.get(
+                "graph_expansion", StopWatch()
+            ).elapsed_ms,
             evidence_pack_ms=self._watches.get("evidence_pack", StopWatch()).elapsed_ms,
             generation_ms=self._watches.get("generation", StopWatch()).elapsed_ms,
             citation_ms=self._watches.get("citation", StopWatch()).elapsed_ms,

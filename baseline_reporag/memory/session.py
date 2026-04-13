@@ -97,4 +97,6 @@ class SessionManager:
             "pinned_chunk_ids": session.pinned_chunk_ids,
             "cited_chunk_ids": session.cited_chunk_ids,
         }
-        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        path.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+        )

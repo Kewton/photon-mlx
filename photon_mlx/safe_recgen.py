@@ -19,6 +19,7 @@ Fallback actions:
   - re-prefill hierarchy
   - fallback to baseline path
 """
+
 from __future__ import annotations
 
 import re
@@ -31,6 +32,7 @@ from .session import DriftMetrics
 # ================================================================
 # Configuration
 # ================================================================
+
 
 @dataclass
 class SafeRecGenConfig:
@@ -53,13 +55,21 @@ class SafeRecGenConfig:
     logit_kl_threshold: float = 0.75
 
     # High-risk keywords
-    high_risk_keywords: list[str] = field(default_factory=lambda: [
-        "auth", "authorization", "permission",
-        "billing", "payment",
-        "security", "encryption",
-        "delete", "drop table", "migration",
-        "compliance",
-    ])
+    high_risk_keywords: list[str] = field(
+        default_factory=lambda: [
+            "auth",
+            "authorization",
+            "permission",
+            "billing",
+            "payment",
+            "security",
+            "encryption",
+            "delete",
+            "drop table",
+            "migration",
+            "compliance",
+        ]
+    )
 
 
 class FallbackReason(Enum):
@@ -134,6 +144,7 @@ def is_high_risk_query(question: str, keywords: list[str]) -> bool:
 # ================================================================
 # Controller
 # ================================================================
+
 
 class SafeRecGenController:
     """

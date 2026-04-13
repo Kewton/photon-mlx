@@ -4,6 +4,7 @@ train_photon.py  –  Train a PHOTON model.
 Usage:
     python scripts/train_photon.py --config configs/photon_tiny.yaml
 """
+
 from __future__ import annotations
 
 import argparse
@@ -25,6 +26,7 @@ def main() -> None:
     cfg = load_photon_config(args.config)
 
     import yaml
+
     with open(args.config, encoding="utf-8") as f:
         raw = yaml.safe_load(f)
 

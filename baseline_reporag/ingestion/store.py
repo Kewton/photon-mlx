@@ -27,15 +27,31 @@ CREATE INDEX IF NOT EXISTS idx_path    ON chunks(repo_id, repo_commit, rel_path)
 
 
 def _row_to_chunk(row: tuple) -> Chunk:
-    (chunk_id, repo_id, repo_commit, rel_path, language,
-     start_line, end_line, content, symbols_json,
-     section_header, file_header) = row
+    (
+        chunk_id,
+        repo_id,
+        repo_commit,
+        rel_path,
+        language,
+        start_line,
+        end_line,
+        content,
+        symbols_json,
+        section_header,
+        file_header,
+    ) = row
     return Chunk(
-        chunk_id=chunk_id, repo_id=repo_id, repo_commit=repo_commit,
-        rel_path=rel_path, language=language,
-        start_line=start_line, end_line=end_line,
-        content=content, symbols=json.loads(symbols_json),
-        section_header=section_header, file_header=file_header,
+        chunk_id=chunk_id,
+        repo_id=repo_id,
+        repo_commit=repo_commit,
+        rel_path=rel_path,
+        language=language,
+        start_line=start_line,
+        end_line=end_line,
+        content=content,
+        symbols=json.loads(symbols_json),
+        section_header=section_header,
+        file_header=file_header,
     )
 
 
@@ -61,11 +77,19 @@ class ChunkStore:
                start_line, end_line, content, symbols, section_header, file_header)
             VALUES (?,?,?,?,?,?,?,?,?,?,?)
             """,
-            (chunk.chunk_id, chunk.repo_id, chunk.repo_commit,
-             chunk.rel_path, chunk.language,
-             chunk.start_line, chunk.end_line,
-             chunk.content, json.dumps(chunk.symbols),
-             chunk.section_header, chunk.file_header),
+            (
+                chunk.chunk_id,
+                chunk.repo_id,
+                chunk.repo_commit,
+                chunk.rel_path,
+                chunk.language,
+                chunk.start_line,
+                chunk.end_line,
+                chunk.content,
+                json.dumps(chunk.symbols),
+                chunk.section_header,
+                chunk.file_header,
+            ),
         )
 
     def commit(self) -> None:

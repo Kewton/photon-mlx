@@ -4,6 +4,7 @@ build_indexes.py  –  Build lexical and embedding indexes.
 Usage:
     python scripts/build_indexes.py --repo-id fastapi_fastapi
 """
+
 from __future__ import annotations
 
 import argparse
@@ -43,7 +44,9 @@ def main() -> None:
         model_id=cfg.indexing.embedding.model_id,
     )
     embedding.build(
-        store, args.repo_id, repo_commit,
+        store,
+        args.repo_id,
+        repo_commit,
         batch_size=cfg.indexing.embedding.batch_size,
     )
     embedding.save(idx_dir / "embedding")

@@ -64,10 +64,12 @@ class SymbolGraph:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
-            json.dumps({
-                "definitions": dict(self._definitions),
-                "edges": dict(self._edges),
-            }),
+            json.dumps(
+                {
+                    "definitions": dict(self._definitions),
+                    "edges": dict(self._edges),
+                }
+            ),
             encoding="utf-8",
         )
 

@@ -6,6 +6,7 @@ Mac (Apple Silicon) optimization utilities for PHOTON inference.
 - Warmup routines
 - Padding for compile-friendly shapes
 """
+
 from __future__ import annotations
 
 import time
@@ -17,6 +18,7 @@ import mlx.core as mx
 # ================================================================
 # Shape utilities
 # ================================================================
+
 
 def pad_to_multiple(seq_len: int, multiple: int) -> int:
     """Return the smallest value >= seq_len that is a multiple of `multiple`."""
@@ -37,6 +39,7 @@ def pad_input_ids(input_ids: mx.array, target_len: int, pad_id: int = 0) -> mx.a
 # ================================================================
 # Memory measurement
 # ================================================================
+
 
 @dataclass
 class MemoryReport:
@@ -83,6 +86,7 @@ def reset_peak_memory() -> None:
 # Warmup
 # ================================================================
 
+
 def warmup_model(
     model_fn: callable,
     input_shape: tuple[int, int],
@@ -106,6 +110,7 @@ def warmup_model(
 # ================================================================
 # Benchmark harness
 # ================================================================
+
 
 @dataclass
 class LatencyResult:
@@ -163,9 +168,11 @@ def benchmark_session(
         mx.eval(out)
         elapsed = (time.perf_counter() - t0) * 1000
         total_tokens = B * T
-        results.append(LatencyResult(
-            total_ms=elapsed,
-            per_token_ms=elapsed / total_tokens,
-            tokens_per_sec=total_tokens / (elapsed / 1000),
-        ))
+        results.append(
+            LatencyResult(
+                total_ms=elapsed,
+                per_token_ms=elapsed / total_tokens,
+                tokens_per_sec=total_tokens / (elapsed / 1000),
+            )
+        )
     return results

@@ -49,8 +49,7 @@ def extract_files(
         rel_root = Path(root).relative_to(repo_path)
         # Prune excluded directories early
         dirs[:] = [
-            d for d in dirs
-            if not _matches_any(str(rel_root / d) + "/", exclude)
+            d for d in dirs if not _matches_any(str(rel_root / d) + "/", exclude)
         ]
         for fname in sorted(files):
             rel_path = str(rel_root / fname)

@@ -1,4 +1,5 @@
 """Loss functions for PHOTON training."""
+
 from __future__ import annotations
 
 import mlx.core as mx

@@ -1,4 +1,5 @@
 """Shared config loader for torch_ref and photon_mlx."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field

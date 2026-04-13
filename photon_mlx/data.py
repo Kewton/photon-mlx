@@ -1,4 +1,5 @@
 """Training data pipeline for PHOTON models."""
+
 from __future__ import annotations
 
 import json

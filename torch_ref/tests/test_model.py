@@ -1,4 +1,5 @@
 """Correctness tests for the minimal LM."""
+
 from __future__ import annotations
 
 import torch
@@ -39,6 +40,7 @@ def tiny_model() -> MinimalLM:
 # Shape tests
 # ---------------------------------------------------------------
 
+
 class TestShapes:
     def test_forward_logits_shape(self, tiny_model: MinimalLM) -> None:
         ids = torch.randint(0, 256, (2, 16))
@@ -62,6 +64,7 @@ class TestShapes:
 # ---------------------------------------------------------------
 # Mask test: causal mask prevents attending to future tokens
 # ---------------------------------------------------------------
+
 
 class TestCausalMask:
     def test_causal_mask_shape(self, tiny_model: MinimalLM) -> None:
@@ -94,6 +97,7 @@ class TestCausalMask:
 # Overfit test: model can memorize 1 batch
 # ---------------------------------------------------------------
 
+
 class TestOverfit:
     def test_1batch_overfit(self) -> None:
         cfg = _tiny_config()
@@ -123,6 +127,7 @@ class TestOverfit:
 # Reproducibility test
 # ---------------------------------------------------------------
 
+
 class TestReproducibility:
     def test_seed_determinism(self) -> None:
         cfg = _tiny_config()
@@ -143,6 +148,7 @@ class TestReproducibility:
 # ---------------------------------------------------------------
 # Logits sanity check
 # ---------------------------------------------------------------
+
 
 class TestLogitsSanity:
     def test_logits_finite(self, tiny_model: MinimalLM) -> None:
