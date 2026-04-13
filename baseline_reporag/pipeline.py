@@ -9,9 +9,9 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 
-from .citation import CitationResult, resolve_citations
+from .citation import resolve_citations
 from .config import Config
-from .generation.evidence_pack import EvidencePack, build_evidence_pack
+from .generation.evidence_pack import build_evidence_pack
 from .generation.generator import Generator
 from .generation.prompt import build_messages
 from .indexing.embedding import EmbeddingIndex
@@ -19,10 +19,10 @@ from .indexing.lexical import LexicalIndex
 from .indexing.symbol_graph import SymbolGraph
 from .ingestion.store import ChunkStore
 from .logger import RunLogger
-from .memory.session import SessionManager, SessionState, Turn
+from .memory.session import SessionManager
 from .profiler import LatencyBreakdown, MemorySnapshot, TurnProfiler
 from .retrieval.graph_expansion import expand_with_graph
-from .retrieval.hybrid import RetrievalResult, hybrid_search
+from .retrieval.hybrid import hybrid_search
 
 
 @dataclass

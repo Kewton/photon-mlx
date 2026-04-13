@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Callable
 
 try:
-    import mlx.core as mx
+    import mlx.core as mx  # noqa: F401 – imported for side-effect / availability check
     import mlx_lm
     from mlx_lm.sample_utils import make_sampler
     _HAS_MLX = True

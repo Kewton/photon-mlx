@@ -18,7 +18,6 @@ from torch_ref.config import (
 from photon_mlx.model import PhotonModel
 from photon_mlx.inference import PhotonInference
 from photon_mlx.session import (
-    DriftMetrics,
     HierarchicalState,
     PhotonSessionState,
     cosine_distance,
