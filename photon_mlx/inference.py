@@ -10,10 +10,8 @@ Wraps the PhotonModel for multi-turn session usage:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 import mlx.core as mx
-import mlx.nn as nn
 
 from .model import PhotonModel
 from .session import DriftMetrics, HierarchicalState, PhotonSessionState
