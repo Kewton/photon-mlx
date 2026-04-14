@@ -77,6 +77,9 @@ def compute_confidence(logits: mx.array) -> float:
 
 def _build_baseline_deps(cfg: Config) -> dict[str, Any]:
     """Construct real baseline pipeline dependencies from config."""
+    from pathlib import Path
+    import uuid
+
     from .generation.generator import Generator
     from .indexing.embedding import EmbeddingIndex
     from .indexing.lexical import LexicalIndex
@@ -85,13 +88,20 @@ def _build_baseline_deps(cfg: Config) -> dict[str, Any]:
     from .logger import RunLogger
     from .memory.session import SessionManager
 
-    store = ChunkStore(cfg.repo.repo_id, cfg.repo.repo_commit)
-    lexical = LexicalIndex(store)
-    embedding = EmbeddingIndex(store)
-    graph = SymbolGraph(store)
-    sessions = SessionManager(log_dir=cfg.memory.log_dir)
-    generator = Generator(cfg.model.model_id)
-    logger = RunLogger(cfg)
+    idx_dir = Path(cfg.paths.data_root) / "indexes" / cfg.repo.repo_id
+    store = ChunkStore(idx_dir / "chunks.db")
+    lexical = LexicalIndex.load(idx_dir / "lexical.pkl")
+    embedding = EmbeddingIndex.load(idx_dir / "embedding")
+    graph = SymbolGraph.load(idx_dir / "symbol_graph.json")
+    sessions = SessionManager(log_dir=Path(cfg.paths.log_root) / "sessions")
+    generator = Generator(
+        model_id=cfg.model.model_id,
+        max_new_tokens=cfg.generation.max_new_tokens,
+        temperature=cfg.generation.temperature,
+        top_p=cfg.generation.top_p,
+    )
+    run_id = f"bench_variant_{uuid.uuid4().hex[:8]}"
+    logger = RunLogger(cfg.paths.log_root, run_id)
 
     return {
         "store": store,

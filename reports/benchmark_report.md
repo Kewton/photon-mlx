@@ -96,14 +96,33 @@
 
 ---
 
-## Comparison Matrix
+## Comparison Matrix — 4-Variant Final (2026-04-14)
 
-| Variant | Static No-cite | MT No-cite | Latency P50 | Memory P50 | Wrong cite |
-|---|---|---|---|---|---|
-| Baseline-RAG (full) | **54.2%** | **43.3%** | 18,774 ms | 19 MB | 0% |
-| Baseline-RAG + prompt fix | TBD | TBD | TBD | TBD | TBD |
-| PHOTON-RAG | TBD | TBD | TBD | TBD | TBD |
-| PHOTON-RAG + Safe RecGen | TBD | TBD | TBD | TBD | TBD |
+**Run ID**: `bench_20260414_130853_c81af3`
+
+### Static Eval 120問
+
+| Variant | No-citation | P50 (ms) | Mean (ms) | P90 (ms) |
+|---------|-------------|----------|-----------|----------|
+| baseline_rag | 44.2% | **11,291** | 12,939 | 20,795 |
+| baseline_rag + summary_memory | 40.0% | 12,168 | 13,068 | 21,773 |
+| photon_rag | 42.5% | 11,738 | 13,325 | 22,380 |
+| photon_rag + safe_recgen | 40.8% | 12,566 | 13,255 | 21,013 |
+
+### Multi-turn Eval (180 turns)
+
+| Variant | No-citation | Follow-up P50 | 状態 |
+|---------|-------------|---------------|------|
+| baseline_rag | 30.6% | **13,727 ms** | ✅ 完了 |
+| baseline_rag + summary_memory | 32.2% | 13,857 ms | ✅ 完了 |
+| photon_rag | — | — | ❌ MT バグで実行不可 |
+| photon_rag + safe_recgen | — | — | ❌ MT バグで実行不可 |
+
+### Gate 2 判定: **No-Go**
+
+- 必須条件「follow-up latency baseline 比 −30%」は測定不可
+- Static では 4 variants 間で実効差なし（P50 +4%, no-citation +/-2pt）
+- **詳細**: [gate2_judgment.md](gate2_judgment.md)
 
 ---
 
