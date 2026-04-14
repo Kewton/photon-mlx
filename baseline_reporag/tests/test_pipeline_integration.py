@@ -203,3 +203,145 @@ class TestPipelineEvidenceHeader:
         user_content = messages[1]["content"]
         assert "Example:" in user_content
         assert "Q: Where is the main router defined?" in user_content
+
+
+def _build_postprocess_pipeline(
+    enabled: bool,
+    answer: str = "This answer has no citation.",
+) -> RepoRAGPipeline:
+    """Build a pipeline with citation_postprocess_enabled controlled."""
+    cfg_data = {
+        "repo": {
+            "repo_id": "test_repo",
+            "repo_commit": "abc123",
+        },
+        "retrieval": {
+            "lexical_top_k": 10,
+            "embedding_top_k": 10,
+            "fused_top_k": 8,
+            "weights": {"lexical": 0.5, "embedding": 0.5},
+            "graph_expansion": {"max_hops": 1, "max_nodes": 16},
+            "neighborhood_expansion": {"before": 1, "after": 1},
+        },
+        "evidence_pack": {
+            "max_chunks": 16,
+            "max_tokens": 16000,
+        },
+        "model": {
+            "model_id": "test-model",
+        },
+        "answering": {
+            "citation_postprocess_enabled": enabled,
+        },
+    }
+    config = Config(cfg_data)
+
+    mock_store = MagicMock()
+    mock_store.get_many.return_value = _make_test_chunks()
+
+    mock_gen = MagicMock()
+    mock_gen.generate.return_value = answer
+
+    sessions = SessionManager()
+
+    return RepoRAGPipeline(
+        config=config,
+        store=mock_store,
+        lexical=MagicMock(),
+        embedding=MagicMock(),
+        graph=MagicMock(),
+        sessions=sessions,
+        generator=mock_gen,
+        logger=MagicMock(),
+    )
+
+
+@patch(
+    "baseline_reporag.pipeline.expand_with_graph",
+    side_effect=_mock_expand_with_graph,
+)
+@patch(
+    "baseline_reporag.pipeline.hybrid_search",
+    side_effect=_mock_hybrid_search,
+)
+class TestCitationPostprocess:
+    """post-processing ON/OFF の統合テスト。"""
+
+    def test_postprocess_enabled_adds_citation(
+        self,
+        mock_search: MagicMock,
+        mock_expand: MagicMock,
+    ) -> None:
+        """enabled=True のとき no_citation 回答に [C:1] が付与される。"""
+        pipeline = _build_postprocess_pipeline(
+            enabled=True, answer="No citation in this answer."
+        )
+        result = pipeline.query("test question", session_id="s1")
+        assert result.citation_postprocessed is True
+        assert "[C:1]" in result.answer
+        assert result.no_citation is False
+
+    def test_postprocess_disabled_preserves_no_citation(
+        self,
+        mock_search: MagicMock,
+        mock_expand: MagicMock,
+    ) -> None:
+        """enabled=False のとき no_citation 回答が変更されない。"""
+        original_answer = "No citation in this answer."
+        pipeline = _build_postprocess_pipeline(enabled=False, answer=original_answer)
+        result = pipeline.query("test question", session_id="s1")
+        assert result.citation_postprocessed is False
+        assert result.answer == original_answer
+        assert result.no_citation is True
+
+    def test_postprocess_skips_when_already_cited(
+        self,
+        mock_search: MagicMock,
+        mock_expand: MagicMock,
+    ) -> None:
+        """回答に既に [C:1] がある場合は post-process フラグが立たない。"""
+        pipeline = _build_postprocess_pipeline(
+            enabled=True, answer="Answer with [C:1]."
+        )
+        result = pipeline.query("test question", session_id="s1")
+        assert result.citation_postprocessed is False
+        assert result.no_citation is False
+
+    def test_postprocess_skips_abstain_marker(
+        self,
+        mock_search: MagicMock,
+        mock_expand: MagicMock,
+    ) -> None:
+        """ABSTAIN_MARKER を含む回答には [C:1] が付与されない。"""
+        from baseline_reporag.generation.prompt import ABSTAIN_MARKER
+
+        abstain_answer = f"{ABSTAIN_MARKER}。詳細は不明です。"
+        pipeline = _build_postprocess_pipeline(enabled=True, answer=abstain_answer)
+        result = pipeline.query("test question", session_id="s1")
+        assert result.citation_postprocessed is False
+        assert result.answer == abstain_answer
+
+    def test_postprocess_does_not_pollute_session(
+        self,
+        mock_search: MagicMock,
+        mock_expand: MagicMock,
+    ) -> None:
+        """機械付与した cited_chunk_ids は session に積まれない。"""
+        pipeline = _build_postprocess_pipeline(enabled=True, answer="No citation here.")
+        result = pipeline.query("test question", session_id="s1")
+        assert result.citation_postprocessed is True
+        # Session should not contain the auto-attached citation
+        session = pipeline.sessions.get_or_create("s1", "test_repo", "abc123")
+        assert session.cited_chunk_ids == []
+
+    def test_postprocess_logs_field(
+        self,
+        mock_search: MagicMock,
+        mock_expand: MagicMock,
+    ) -> None:
+        """logger.log_turn に citation_postprocessed フィールドが入る。"""
+        pipeline = _build_postprocess_pipeline(enabled=True, answer="No citation here.")
+        pipeline.query("test question", session_id="s1")
+        log_payload = pipeline.logger.log_turn.call_args[0][0]
+        assert "citation_postprocessed" in log_payload
+        assert log_payload["citation_postprocessed"] is True

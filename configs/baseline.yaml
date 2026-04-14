@@ -194,6 +194,8 @@ answering:
   allow_abstain: true
   abstain_message: "根拠が不足しているため断定できません。追加の関連箇所を再検索します。"
 
+  citation_postprocess_enabled: true   # post-processing: no-citation 回答に [C:1] を自動付与
+
   structure:
     short_answer: true
     key_evidence: true

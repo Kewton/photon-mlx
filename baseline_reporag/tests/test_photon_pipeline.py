@@ -256,6 +256,43 @@ class TestQueryResultExtension:
         assert result.confidence == 0.85
         assert result.fallback_decision == {"should_fallback": False}
 
+    def test_query_result_has_citation_postprocessed_field(self):
+        """citation_postprocessed defaults to False (backward compatible)."""
+        from baseline_reporag.pipeline import QueryResult
+        from baseline_reporag.profiler import LatencyBreakdown, MemorySnapshot
+
+        # Existing call sites do not pass citation_postprocessed — must still work.
+        result = QueryResult(
+            answer="test",
+            session_id="s1",
+            turn_id=1,
+            cited_chunk_ids=[],
+            wrong_citation_indices=[],
+            no_citation=False,
+            latency=LatencyBreakdown(0, 0, 0, 0, 0),
+            memory=MemorySnapshot(0, 0),
+        )
+        assert hasattr(result, "citation_postprocessed")
+        assert result.citation_postprocessed is False
+
+    def test_query_result_accepts_citation_postprocessed_true(self):
+        """citation_postprocessed can be set to True via kwarg."""
+        from baseline_reporag.pipeline import QueryResult
+        from baseline_reporag.profiler import LatencyBreakdown, MemorySnapshot
+
+        result = QueryResult(
+            answer="test [C:1]",
+            session_id="s1",
+            turn_id=1,
+            cited_chunk_ids=["c1"],
+            wrong_citation_indices=[],
+            no_citation=False,
+            latency=LatencyBreakdown(0, 0, 0, 0, 0),
+            memory=MemorySnapshot(0, 0),
+            citation_postprocessed=True,
+        )
+        assert result.citation_postprocessed is True
+
 
 # ---------------------------------------------------------------------------
 # TDD Cycle 5: LatencyBreakdown PHOTON fields

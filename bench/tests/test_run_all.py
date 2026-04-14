@@ -40,6 +40,7 @@ class _MockQueryResult:
     drift_metrics: dict = None
     confidence: float = None
     fallback_decision: dict = None
+    citation_postprocessed: bool = False
 
     def __post_init__(self):
         if self.cited_chunk_ids is None:
