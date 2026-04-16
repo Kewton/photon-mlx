@@ -178,7 +178,7 @@ training:
   weight_decay: 0.1
   max_grad_norm: 1.0
 
-  max_steps: 400
+  max_steps: 800
   eval_every_steps: 100
   save_every_steps: 100
   log_every_steps: 20
