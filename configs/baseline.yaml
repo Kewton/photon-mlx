@@ -129,7 +129,7 @@ retrieval:
     model_id: ""
 
   query_expansion:
-    enabled: false
+    enabled: true
     include_symbol_aliases: true
     include_filename_hints: true
 

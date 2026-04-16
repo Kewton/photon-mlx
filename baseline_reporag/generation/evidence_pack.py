@@ -31,14 +31,22 @@ def build_evidence_pack(
     session: SessionState,
     max_chunks: int = 16,
     max_tokens: int = 16000,
+    recent_citation_turns: int = 2,
 ) -> EvidencePack:
-    cited_set = set(session.cited_chunk_ids)
+    # Use only recently cited chunks for citation bias to avoid crowding out
+    # fresh retrieval in later turns.  Cumulative cited_chunk_ids grows every
+    # turn and causes T5-T6 degradation where stale citations dominate the pack.
+    recent_turns = session.recent_history(max_turns=recent_citation_turns)
+    recent_cited: set[str] = set()
+    for t in recent_turns:
+        recent_cited.update(t.cited_chunk_ids)
+
     pinned_set = set(session.pinned_chunk_ids)
 
     def priority(cid: str) -> int:
         if cid in pinned_set:
             return 0
-        if cid in cited_set:
+        if cid in recent_cited:
             return 1
         return 2
 

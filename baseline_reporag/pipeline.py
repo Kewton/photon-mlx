@@ -25,6 +25,7 @@ from .memory.session import SessionManager
 from .profiler import LatencyBreakdown, MemorySnapshot, TurnProfiler
 from .retrieval.graph_expansion import expand_with_graph
 from .retrieval.hybrid import hybrid_search
+from .retrieval.query_expansion import expand_query
 
 
 @dataclass
@@ -130,6 +131,12 @@ class RepoRAGPipeline:
 
         # --- Retrieval ---
         with prof.phase("retrieval"):
+            qe_cfg = cfg.retrieval.query_expansion
+            if qe_cfg.get("enabled", False):
+                queries = expand_query(question)
+                expanded = queries[1:]  # skip original; passed separately
+            else:
+                expanded = []
             raw = hybrid_search(
                 query=question,
                 lexical_index=self.lexical,
@@ -139,6 +146,7 @@ class RepoRAGPipeline:
                 fused_top_k=cfg.retrieval.fused_top_k,
                 lexical_weight=cfg.retrieval.weights.lexical,
                 embedding_weight=cfg.retrieval.weights.embedding,
+                expanded_queries=expanded,
             )
 
         # --- Graph expansion ---

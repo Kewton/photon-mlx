@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -49,8 +50,15 @@ class SessionState:
         lines: list[str] = []
         for t in self.recent_history(max_turns):
             lines.append(f"Q{t.turn_id}: {t.question}")
-            # Truncate long answers in history to save context budget
-            answer_preview = t.answer[:400] + "..." if len(t.answer) > 400 else t.answer
+            # Strip [C:N] markers from history: citation indices are local to each
+            # turn's evidence pack and must not bleed into subsequent turns where
+            # the pack differs, which would cause wrong_citation_indices errors.
+            answer_stripped = re.sub(r"\[C:\d+\]", "", t.answer).strip()
+            answer_preview = (
+                answer_stripped[:400] + "..."
+                if len(answer_stripped) > 400
+                else answer_stripped
+            )
             lines.append(f"A{t.turn_id}: {answer_preview}")
         return "\n".join(lines)
 
