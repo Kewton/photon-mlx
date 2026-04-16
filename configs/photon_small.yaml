@@ -72,6 +72,15 @@ retrieval:
     embedding: 0.45
     graph: 0.10
 
+  reranker:
+    enabled: true
+    model_id: "cross-encoder/ms-marco-MiniLM-L-6-v2"
+
+  query_expansion:
+    enabled: true
+    include_symbol_aliases: true
+    include_filename_hints: true
+
   neighborhood_expansion:
     enabled: true
     before: 1
