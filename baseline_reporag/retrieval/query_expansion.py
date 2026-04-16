@@ -14,6 +14,7 @@ import re
 # Mapping from Japanese technical terms to English/code equivalents commonly
 # found in Python/FastAPI codebases.  Keeps the list minimal and repo-relevant.
 _JP_TO_CODE: dict[str, list[str]] = {
+    # --- Architecture / infrastructure terms ---
     "ミドルウェア": ["middleware", "Middleware", "BaseHTTPMiddleware"],
     "依存性注入": ["dependency injection", "Depends", "dependencies"],
     "依存性": ["dependency", "Depends", "dependencies"],
@@ -44,6 +45,23 @@ _JP_TO_CODE: dict[str, list[str]] = {
     "ストリーミング": ["streaming", "StreamingResponse", "stream"],
     "実行順序": ["execution order", "order", "stack"],
     "移植": ["migration", "porting", "refactor"],
+    # --- Bug localization: symptom → implementation file keywords ---
+    # BM25 verified: each expansion lifts the relevant impl file into top-5.
+    "エンコーディング": ["jsonable_encoder", "ENCODERS_BY_TYPE", "encoders"],
+    "デッドロック": ["run_in_threadpool", "asyncio", "anyio", "concurrency"],
+    "非同期": ["asyncio", "run_in_threadpool", "anyio", "concurrency"],
+    "ステータスコード": ["status_code", "routing"],
+    "マルチパート": ["UploadFile", "ImmutableMultiDict", "datastructures", "multipart"],
+    "フォームデータ": ["UploadFile", "Form", "datastructures"],
+    "ファイルアップロード": ["UploadFile", "File", "datastructures"],
+    "パスパラメータ": ["path_params", "solve_dependencies", "routing", "Path"],
+    "型変換": ["solve_dependencies", "request_path", "routing", "field"],
+    "クエリパラメータ": ["query_params", "Query", "Param", "ParamTypes"],
+    "デフォルト値": ["Param", "ParamTypes", "Query", "Body", "Form"],
+    "独自バリデータ": ["Param", "ParamTypes", "field_validator", "model_validator"],
+    "バリデータ": ["Param", "ParamTypes", "field_validator", "model_validator"],
+    "サブアプリ": ["mount", "sub_applications", "routing"],
+    "サブアプリケーション": ["mount", "sub_applications", "routing"],
 }
 
 _IDENTIFIER_PATTERN = re.compile(
