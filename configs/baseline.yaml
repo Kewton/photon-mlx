@@ -125,8 +125,8 @@ retrieval:
     graph: 0.10
 
   reranker:
-    enabled: false
-    model_id: ""
+    enabled: true
+    model_id: "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
   query_expansion:
     enabled: true

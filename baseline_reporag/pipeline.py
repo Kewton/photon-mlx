@@ -26,6 +26,7 @@ from .profiler import LatencyBreakdown, MemorySnapshot, TurnProfiler
 from .retrieval.graph_expansion import expand_with_graph
 from .retrieval.hybrid import hybrid_search
 from .retrieval.query_expansion import expand_query
+from .retrieval.reranker import CrossEncoderReranker
 
 
 @dataclass
@@ -101,6 +102,7 @@ class RepoRAGPipeline:
         sessions: SessionManager,
         generator: Generator,
         logger: RunLogger,
+        reranker: CrossEncoderReranker | None = None,
     ) -> None:
         self.cfg = config
         self.store = store
@@ -110,6 +112,7 @@ class RepoRAGPipeline:
         self.sessions = sessions
         self.generator = generator
         self.logger = logger
+        self.reranker = reranker
 
     def query(
         self,
@@ -129,14 +132,16 @@ class RepoRAGPipeline:
             cfg.repo.repo_commit,
         )
 
+        # --- Query expansion (computed once, shared by retrieval + reranker) ---
+        qe_cfg = cfg.retrieval.query_expansion
+        if qe_cfg.get("enabled", False):
+            _queries = expand_query(question)
+            expansion_terms: str | None = _queries[1] if len(_queries) > 1 else None
+        else:
+            expansion_terms = None
+
         # --- Retrieval ---
         with prof.phase("retrieval"):
-            qe_cfg = cfg.retrieval.query_expansion
-            if qe_cfg.get("enabled", False):
-                queries = expand_query(question)
-                expanded = queries[1:]  # skip original; passed separately
-            else:
-                expanded = []
             raw = hybrid_search(
                 query=question,
                 lexical_index=self.lexical,
@@ -146,8 +151,19 @@ class RepoRAGPipeline:
                 fused_top_k=cfg.retrieval.fused_top_k,
                 lexical_weight=cfg.retrieval.weights.lexical,
                 embedding_weight=cfg.retrieval.weights.embedding,
-                expanded_queries=expanded,
+                expanded_queries=[expansion_terms] if expansion_terms else [],
             )
+
+        # --- Reranking (noise filter + optional cross-encoder) ---
+        with prof.phase("reranking"):
+            if self.reranker is not None:
+                raw = self.reranker.rerank(
+                    query=question,
+                    results=raw,
+                    store=self.store,
+                    top_k=cfg.retrieval.rerank_top_k,
+                    rerank_query=expansion_terms,  # English terms for cross-encoder
+                )
 
         # --- Graph expansion ---
         with prof.phase("graph_expansion"):

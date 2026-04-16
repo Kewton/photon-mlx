@@ -25,6 +25,7 @@ from .ingestion.store import ChunkStore
 from .logger import RunLogger
 from .memory.session import SessionManager
 from .pipeline import RepoRAGPipeline
+from .retrieval.reranker import CrossEncoderReranker
 
 
 def main() -> None:
@@ -40,6 +41,16 @@ def main() -> None:
     idx_dir = Path(cfg.paths.data_root) / "indexes" / repo_id
     run_id = f"baseline_{repo_id}_{time.strftime('%Y%m%d')}_{cfg.repo.repo_commit[:7]}"
 
+    reranker_cfg = cfg.retrieval.reranker
+    reranker = (
+        CrossEncoderReranker(
+            model_id=reranker_cfg.get(
+                "model_id", "cross-encoder/ms-marco-MiniLM-L-6-v2"
+            )
+        )
+        if reranker_cfg.get("enabled", False)
+        else None
+    )
     pipeline = RepoRAGPipeline(
         config=cfg,
         store=ChunkStore(idx_dir / "chunks.db"),
@@ -54,6 +65,7 @@ def main() -> None:
             top_p=cfg.generation.top_p,
         ),
         logger=RunLogger(cfg.paths.log_root, run_id),
+        reranker=reranker,
     )
 
     def run_query(question: str) -> None:

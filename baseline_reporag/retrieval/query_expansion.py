@@ -62,6 +62,26 @@ _JP_TO_CODE: dict[str, list[str]] = {
     "バリデータ": ["Param", "ParamTypes", "field_validator", "model_validator"],
     "サブアプリ": ["mount", "sub_applications", "routing"],
     "サブアプリケーション": ["mount", "sub_applications", "routing"],
+    # Additional bug localization terms - BM25 verified
+    "エラーハンドリング": [
+        "exception_handler",
+        "add_exception_handler",
+        "HTTPException",
+        "exception_handlers",
+    ],
+    "ハンドリング": ["exception_handler", "add_exception_handler", "handler"],
+    "ルーティング": ["routing", "APIRouter", "include_router", "route"],
+    "OpenAPI": ["openapi", "get_openapi", "generate_operation_id", "openapi_utils"],
+    "openapi": ["openapi", "get_openapi", "generate_operation_id", "openapi_utils"],
+    "スキーマ生成": ["get_openapi", "generate_operation_id", "openapi_utils"],
+    "セキュリティスキーム": [
+        "SecurityMiddleware",
+        "add_middleware",
+        "TrustedHostMiddleware",
+        "security",
+    ],
+    "HTTPSリダイレクト": ["HTTPSRedirectMiddleware", "add_middleware", "middleware"],
+    "信頼済みホスト": ["TrustedHostMiddleware", "add_middleware", "middleware"],
 }
 
 _IDENTIFIER_PATTERN = re.compile(
