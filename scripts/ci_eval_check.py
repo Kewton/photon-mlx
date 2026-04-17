@@ -6,7 +6,8 @@ Exit code 0 = pass, 1 = threshold violated.
 Usage:
     python scripts/ci_eval_check.py \
         --static-log logs/baseline_eval_*.jsonl \
-        --mt-log logs/mt_eval_*.jsonl
+        --mt-log logs/mt_eval_*.jsonl \
+        --eval-set data/eval_sets/static_eval.jsonl
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ from __future__ import annotations
 import argparse
 import glob
 import json
+import os
 import statistics
 import sys
 
@@ -51,6 +53,17 @@ def _load_records(path: str) -> list[dict]:
     return records
 
 
+def _load_unanswerable_ids(eval_set_path: str) -> set[str]:
+    """Load question IDs marked as unanswerable from the eval set."""
+    unanswerable: set[str] = set()
+    if not os.path.exists(eval_set_path):
+        return unanswerable
+    for rec in _load_records(eval_set_path):
+        if rec.get("answerable") is False:
+            unanswerable.add(rec["id"])
+    return unanswerable
+
+
 def _get_latency(record: dict) -> float | None:
     """Extract total latency in ms from a record.
 
@@ -66,23 +79,56 @@ def _get_latency(record: dict) -> float | None:
 # ---------------------------------------------------------------------------
 
 
-def check_static(log_path: str) -> dict:
+def check_static(
+    log_path: str,
+    unanswerable_ids: set[str] | None = None,
+) -> dict:
     """Check static eval thresholds."""
     records = _load_records(log_path)
     total = len(records)
     if total == 0:
         return {"total": 0, "error": "no records found"}
 
+    if unanswerable_ids is None:
+        unanswerable_ids = set()
+
     no_cite = sum(1 for r in records if r.get("no_citation"))
     wrong_cite = sum(1 for r in records if r.get("wrong_citation_indices"))
     latencies = [lat for r in records if (lat := _get_latency(r)) is not None]
 
-    return {
+    # True NC: exclude unanswerable questions that correctly got no citation
+    # Run logs use session_id="eval-SE-XXX-NNN", eval set uses id="SE-XXX-NNN"
+    def _get_qid(r: dict) -> str:
+        qid = r.get("eval_id", "") or r.get("id", "")
+        if not qid:
+            sid = r.get("session_id", "")
+            qid = sid.replace("eval-", "", 1) if sid.startswith("eval-") else sid
+        return qid
+
+    answerable_records = [r for r in records if _get_qid(r) not in unanswerable_ids]
+    answerable_total = len(answerable_records)
+    answerable_no_cite = sum(1 for r in answerable_records if r.get("no_citation"))
+    correct_abstains = sum(
+        1 for r in records if _get_qid(r) in unanswerable_ids and r.get("no_citation")
+    )
+
+    result: dict = {
         "total": total,
         "no_citation_rate": no_cite / total,
         "wrong_citation_count": wrong_cite,
         "latency_p50": statistics.median(latencies) if latencies else 0,
     }
+
+    if unanswerable_ids:
+        result["unanswerable_count"] = len(unanswerable_ids)
+        result["correct_abstains"] = correct_abstains
+        result["answerable_total"] = answerable_total
+        result["answerable_no_cite"] = answerable_no_cite
+        result["true_nc_rate"] = (
+            answerable_no_cite / answerable_total if answerable_total else 0
+        )
+
+    return result
 
 
 def check_mt(log_path: str) -> dict:
@@ -119,6 +165,12 @@ def main() -> None:
         required=True,
         help="Glob pattern for multi-turn eval log (e.g. logs/mt_eval_*.jsonl)",
     )
+    parser.add_argument(
+        "--eval-set",
+        default="data/eval_sets/static_eval.jsonl",
+        help="Path to static eval set JSONL with answerable flags "
+        "(default: data/eval_sets/static_eval.jsonl)",
+    )
     args = parser.parse_args()
 
     violations: list[str] = []
@@ -129,12 +181,30 @@ def main() -> None:
         print(f"FAIL: No static eval log found matching: {args.static_log}")
         sys.exit(1)
 
+    # Load unanswerable question IDs from eval set
+    unanswerable_ids = _load_unanswerable_ids(args.eval_set)
+    if unanswerable_ids:
+        print(f"Eval set: {args.eval_set}")
+        print(f"  Unanswerable questions: {len(unanswerable_ids)}")
+
     print(f"Static eval log: {static_path}")
-    static = check_static(static_path)
+    static = check_static(static_path, unanswerable_ids=unanswerable_ids)
     print(f"  Total records:        {static['total']}")
     print(f"  No-citation rate:     {static['no_citation_rate']:.2%}")
     print(f"  Wrong citation count: {static['wrong_citation_count']}")
     print(f"  Latency P50:          {static['latency_p50']:.0f} ms")
+
+    if "true_nc_rate" in static:
+        print(
+            f"  Correct abstains:     "
+            f"{static['correct_abstains']}/{static['unanswerable_count']}"
+        )
+        print(
+            f"  True NC (answerable only): "
+            f"{static['answerable_no_cite']}"
+            f"/{static['answerable_total']}"
+            f" = {static['true_nc_rate']:.1%}"
+        )
 
     if static["no_citation_rate"] > STATIC_NC_MAX:
         violations.append(
