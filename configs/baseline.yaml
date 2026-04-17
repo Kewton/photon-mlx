@@ -143,6 +143,8 @@ retrieval:
     max_hops: 1
     max_nodes: 24
 
+  file_type_boost: 0.15            # score bonus for .py chunks (applied after reranking)
+
   citation_bias:
     prefer_previously_cited_chunks: true
     boost_recent_citations: 0.15

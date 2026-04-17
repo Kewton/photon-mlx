@@ -24,7 +24,7 @@ from .logger import RunLogger
 from .memory.session import SessionManager
 from .profiler import LatencyBreakdown, MemorySnapshot, TurnProfiler
 from .retrieval.graph_expansion import expand_with_graph
-from .retrieval.hybrid import hybrid_search
+from .retrieval.hybrid import apply_file_type_boost, hybrid_search
 from .retrieval.query_expansion import expand_query
 from .retrieval.reranker import CrossEncoderReranker
 
@@ -164,6 +164,11 @@ class RepoRAGPipeline:
                     top_k=cfg.retrieval.rerank_top_k,
                     rerank_query=expansion_terms,  # English terms for cross-encoder
                 )
+
+        # --- File-type boost (post-reranking) ---
+        file_type_boost = cfg.retrieval.get("file_type_boost", 0.0)
+        if file_type_boost:
+            raw = apply_file_type_boost(raw, boost=file_type_boost)
 
         # --- Graph expansion ---
         with prof.phase("graph_expansion"):
