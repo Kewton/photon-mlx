@@ -77,9 +77,13 @@ def _build_test_pipeline(
             "lexical_top_k": 10,
             "embedding_top_k": 10,
             "fused_top_k": 8,
+            "rerank_top_k": 8,
             "weights": {"lexical": 0.5, "embedding": 0.5},
             "graph_expansion": {"max_hops": 1, "max_nodes": 16},
             "neighborhood_expansion": {"before": 1, "after": 1},
+            "query_expansion": {"enabled": False},
+            "reranker": {"enabled": False},
+            "file_type_boost": 0.0,
         },
         "evidence_pack": {
             "max_chunks": 16,
@@ -184,7 +188,7 @@ class TestPipelineEvidenceHeader:
         pipeline.query("test question", session_id="s1")
         messages = mock_gen.generate.call_args[0][0]
         user_content = messages[1]["content"]
-        assert "Example:" in user_content
+        assert "Example 1" in user_content
         assert "Q: Where is the main router defined?" in user_content
 
     def test_follow_up_turn_includes_few_shot(
@@ -201,7 +205,7 @@ class TestPipelineEvidenceHeader:
         # 2nd call args
         messages = mock_gen.generate.call_args[0][0]
         user_content = messages[1]["content"]
-        assert "Example:" in user_content
+        assert "Example 1" in user_content
         assert "Q: Where is the main router defined?" in user_content
 
 
@@ -219,9 +223,13 @@ def _build_postprocess_pipeline(
             "lexical_top_k": 10,
             "embedding_top_k": 10,
             "fused_top_k": 8,
+            "rerank_top_k": 8,
             "weights": {"lexical": 0.5, "embedding": 0.5},
             "graph_expansion": {"max_hops": 1, "max_nodes": 16},
             "neighborhood_expansion": {"before": 1, "after": 1},
+            "query_expansion": {"enabled": False},
+            "reranker": {"enabled": False},
+            "file_type_boost": 0.0,
         },
         "evidence_pack": {
             "max_chunks": 16,

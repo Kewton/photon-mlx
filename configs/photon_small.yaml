@@ -76,6 +76,8 @@ retrieval:
     enabled: true
     model_id: "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
+  file_type_boost: 0.0             # disabled: v6 eval showed +2.5pp regression at 0.15
+
   query_expansion:
     enabled: true
     include_symbol_aliases: true
