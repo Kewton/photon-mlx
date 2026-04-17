@@ -1,10 +1,10 @@
 """Training data pipeline for PHOTON models."""
+
 from __future__ import annotations
 
 import json
 import random
 from pathlib import Path
-from typing import Iterator
 
 import mlx.core as mx
 

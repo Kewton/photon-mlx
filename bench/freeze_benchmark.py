@@ -9,6 +9,7 @@ Usage:
         --repo-commit <SHA> \
         --note "Week 2 freeze"
 """
+
 from __future__ import annotations
 
 import argparse

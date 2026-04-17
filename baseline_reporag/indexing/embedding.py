@@ -60,8 +60,7 @@ class EmbeddingIndex:
         scores: np.ndarray = self._embeddings @ q_emb
         top_indices = np.argsort(scores)[::-1][:top_k]
         return [
-            EmbeddingResult(self._chunk_ids[i], float(scores[i]))
-            for i in top_indices
+            EmbeddingResult(self._chunk_ids[i], float(scores[i])) for i in top_indices
         ]
 
     def save(self, dir_path: str | Path) -> None:

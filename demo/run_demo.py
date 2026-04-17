@@ -5,6 +5,7 @@ Usage:
     python demo/run_demo.py --scenario demo-01 --config configs/baseline.yaml
     python demo/run_demo.py --list
 """
+
 from __future__ import annotations
 
 import argparse
@@ -67,11 +68,11 @@ def main() -> None:
 
     session_id = f"demo-{scenario.id}"
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"Demo: [{scenario.id}] {scenario.title}")
     print(f"Axis: {scenario.axis}")
     print(f"Session: {session_id}")
-    print(f"{'='*60}\n")
+    print(f"{'=' * 60}\n")
 
     for i, turn in enumerate(scenario.turns, 1):
         print(f"--- Turn {i} ---")
@@ -88,15 +89,17 @@ def main() -> None:
 
         print(f"A: {result.answer}\n")
         print(f"  Cited: {result.cited_chunk_ids}")
-        print(f"  Latency: {result.latency.total_ms:.0f} ms"
-              f"  (retrieval {result.latency.retrieval_ms:.0f}"
-              f" | gen {result.latency.generation_ms:.0f})")
+        print(
+            f"  Latency: {result.latency.total_ms:.0f} ms"
+            f"  (retrieval {result.latency.retrieval_ms:.0f}"
+            f" | gen {result.latency.generation_ms:.0f})"
+        )
         print(f"  Memory: {result.memory.peak_mb:.1f} MB")
         if result.no_citation:
             print("  [WARNING] No citations")
         print()
 
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
     print(f"Demo complete. Log: logs/{run_id}.jsonl")
 
 

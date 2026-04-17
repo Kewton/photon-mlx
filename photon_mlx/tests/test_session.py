@@ -1,4 +1,5 @@
 """Tests for PHOTON session inference and drift tracking."""
+
 from __future__ import annotations
 
 import sys
@@ -18,7 +19,6 @@ from torch_ref.config import (
 from photon_mlx.model import PhotonModel
 from photon_mlx.inference import PhotonInference
 from photon_mlx.session import (
-    DriftMetrics,
     HierarchicalState,
     PhotonSessionState,
     cosine_distance,
@@ -53,6 +53,7 @@ def _tiny_cfg() -> PhotonConfig:
 # Drift metric unit tests
 # ---------------------------------------------------------------
 
+
 class TestDriftMetrics:
     def test_cosine_distance_identical(self) -> None:
         a = mx.ones((4, 64))
@@ -86,6 +87,7 @@ class TestDriftMetrics:
 # ---------------------------------------------------------------
 # Session state tests
 # ---------------------------------------------------------------
+
 
 class TestSessionState:
     def test_initial_drift_is_zero(self) -> None:
@@ -132,6 +134,7 @@ class TestSessionState:
 # ---------------------------------------------------------------
 # End-to-end inference tests
 # ---------------------------------------------------------------
+
 
 class TestInference:
     @pytest.fixture

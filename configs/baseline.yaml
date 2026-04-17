@@ -66,6 +66,7 @@ repo:
     - "**/*.jpeg"
     - "**/*.gif"
     - "**/*.pdf"
+    - "docs/*/docs/**"
 
 ingestion:
   chunking:
@@ -124,11 +125,11 @@ retrieval:
     graph: 0.10
 
   reranker:
-    enabled: false
-    model_id: ""
+    enabled: true
+    model_id: "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
   query_expansion:
-    enabled: false
+    enabled: true
     include_symbol_aliases: true
     include_filename_hints: true
 
@@ -192,6 +193,8 @@ answering:
   require_citations: true
   allow_abstain: true
   abstain_message: "根拠が不足しているため断定できません。追加の関連箇所を再検索します。"
+
+  citation_postprocess_enabled: true   # post-processing: no-citation 回答に [C:1] を自動付与
 
   structure:
     short_answer: true

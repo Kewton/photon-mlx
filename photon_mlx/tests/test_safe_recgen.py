@@ -1,7 +1,7 @@
 """Tests for Safe RecGen controller."""
+
 from __future__ import annotations
 
-import pytest
 
 from photon_mlx.safe_recgen import (
     FallbackReason,
@@ -17,6 +17,7 @@ from photon_mlx.session import DriftMetrics
 # ---------------------------------------------------------------
 # Query classifier tests
 # ---------------------------------------------------------------
+
 
 class TestQueryClassifiers:
     def test_exact_quote_english(self) -> None:
@@ -53,6 +54,7 @@ class TestQueryClassifiers:
 # Controller tests — rule-based triggers
 # ---------------------------------------------------------------
 
+
 class TestRuleBasedTriggers:
     def setup_method(self) -> None:
         self.ctrl = SafeRecGenController()
@@ -82,6 +84,7 @@ class TestRuleBasedTriggers:
 # ---------------------------------------------------------------
 # Controller tests — metric-based triggers
 # ---------------------------------------------------------------
+
 
 class TestMetricTriggers:
     def setup_method(self) -> None:
@@ -135,12 +138,15 @@ class TestMetricTriggers:
             confidence=0.35,
         )
         assert d.should_fallback
-        assert len(d.reasons) >= 4  # exact_quote + high_risk + drift + shift + kl + low_conf
+        assert (
+            len(d.reasons) >= 4
+        )  # exact_quote + high_risk + drift + shift + kl + low_conf
 
 
 # ---------------------------------------------------------------
 # Config tests
 # ---------------------------------------------------------------
+
 
 class TestConfig:
     def test_disabled(self) -> None:

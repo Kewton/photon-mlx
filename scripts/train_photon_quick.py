@@ -4,9 +4,9 @@ train_photon_quick.py  –  Quick PHOTON training smoke test (100 steps).
 Usage:
     python scripts/train_photon_quick.py
 """
+
 from __future__ import annotations
 
-import json
 import sys
 import time
 from pathlib import Path
@@ -82,8 +82,7 @@ def main() -> None:
 
         if step % log_every == 0:
             elapsed = time.time() - t0
-            print(f"  step {step:>4d}  loss {loss_val:.4f}  "
-                  f"elapsed {elapsed:.1f}s")
+            print(f"  step {step:>4d}  loss {loss_val:.4f}  elapsed {elapsed:.1f}s")
 
         if step % eval_every == 0 and val_batches:
             val_total = 0.0
@@ -99,7 +98,7 @@ def main() -> None:
     print(f"\nDone in {elapsed:.1f}s")
     print(f"  Initial loss: {losses[0]:.4f}")
     print(f"  Final loss:   {losses[-1]:.4f}")
-    print(f"  Reduction:    {(1 - losses[-1]/losses[0])*100:.1f}%")
+    print(f"  Reduction:    {(1 - losses[-1] / losses[0]) * 100:.1f}%")
 
 
 if __name__ == "__main__":

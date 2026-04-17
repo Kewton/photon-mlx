@@ -1,10 +1,11 @@
 """Latency and memory profiling utilities for benchmark runs."""
+
 from __future__ import annotations
 
 import time
 import tracemalloc
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Iterator
 
 
@@ -16,6 +17,9 @@ class LatencyBreakdown:
     generation_ms: float = 0.0
     citation_ms: float = 0.0
     total_ms: float = 0.0
+    photon_prefill_ms: float = 0.0
+    drift_eval_ms: float = 0.0
+    safe_recgen_ms: float = 0.0
 
     def as_dict(self) -> dict:
         return {
@@ -88,7 +92,9 @@ class TurnProfiler:
 
         latency = LatencyBreakdown(
             retrieval_ms=self._watches.get("retrieval", StopWatch()).elapsed_ms,
-            graph_expansion_ms=self._watches.get("graph_expansion", StopWatch()).elapsed_ms,
+            graph_expansion_ms=self._watches.get(
+                "graph_expansion", StopWatch()
+            ).elapsed_ms,
             evidence_pack_ms=self._watches.get("evidence_pack", StopWatch()).elapsed_ms,
             generation_ms=self._watches.get("generation", StopWatch()).elapsed_ms,
             citation_ms=self._watches.get("citation", StopWatch()).elapsed_ms,

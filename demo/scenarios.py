@@ -5,6 +5,7 @@ Demo scenarios for PHOTON-RepoRAG.
 Designed to showcase: working memory, citation, graph expansion,
 Safe RecGen fallback, and change comparison.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -148,7 +149,7 @@ SCENARIOS: list[DemoScenario] = [
 def print_scenarios() -> None:
     """Print all demo scenarios in human-readable format."""
     for s in SCENARIOS:
-        print(f"\n{'='*60}")
+        print(f"\n{'=' * 60}")
         print(f"[{s.id}] {s.title}")
         print(f"Axis: {s.axis}")
         print(f"Description: {s.description}")

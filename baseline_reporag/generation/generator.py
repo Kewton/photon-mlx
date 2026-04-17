@@ -3,9 +3,9 @@ from __future__ import annotations
 from typing import Callable
 
 try:
-    import mlx.core as mx
     import mlx_lm
     from mlx_lm.sample_utils import make_sampler
+
     _HAS_MLX = True
 except ImportError:
     _HAS_MLX = False

@@ -41,8 +41,7 @@ class LexicalIndex:
         if self._bm25 is None:
             raise RuntimeError("Index not built; call build() or load() first")
         scores = self._bm25.get_scores(_tokenize(query))
-        ranked = sorted(zip(self._chunk_ids, scores),
-                        key=lambda x: x[1], reverse=True)
+        ranked = sorted(zip(self._chunk_ids, scores), key=lambda x: x[1], reverse=True)
         return [LexicalResult(cid, float(s)) for cid, s in ranked[:top_k]]
 
     def save(self, path: str | Path) -> None:

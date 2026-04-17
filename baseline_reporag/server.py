@@ -4,6 +4,7 @@ Baseline RepoRAG – FastAPI server.
 Start with:
     python -m baseline_reporag.server --config configs/baseline.yaml
 """
+
 from __future__ import annotations
 
 import time
@@ -21,6 +22,7 @@ from .ingestion.store import ChunkStore
 from .logger import RunLogger
 from .memory.session import SessionManager
 from .pipeline import RepoRAGPipeline
+from .retrieval.reranker import CrossEncoderReranker
 
 app = FastAPI(title="baseline-reporag")
 _pipeline: RepoRAGPipeline | None = None
@@ -32,6 +34,16 @@ def _build_pipeline(config: Config) -> RepoRAGPipeline:
         f"baseline_{config.repo.repo_id}"
         f"_{time.strftime('%Y%m%d')}"
         f"_{config.repo.repo_commit[:7]}"
+    )
+    reranker_cfg = config.retrieval.reranker
+    reranker = (
+        CrossEncoderReranker(
+            model_id=reranker_cfg.get(
+                "model_id", "cross-encoder/ms-marco-MiniLM-L-6-v2"
+            )
+        )
+        if reranker_cfg.get("enabled", False)
+        else None
     )
     return RepoRAGPipeline(
         config=config,
@@ -47,6 +59,7 @@ def _build_pipeline(config: Config) -> RepoRAGPipeline:
             top_p=config.generation.top_p,
         ),
         logger=RunLogger(config.paths.log_root, run_id),
+        reranker=reranker,
     )
 
 

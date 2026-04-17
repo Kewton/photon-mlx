@@ -4,6 +4,7 @@ build_symbol_graph.py  –  Build the symbol and dependency graph.
 Usage:
     python scripts/build_symbol_graph.py --repo-id fastapi_fastapi
 """
+
 from __future__ import annotations
 
 import argparse

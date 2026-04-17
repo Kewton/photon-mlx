@@ -8,6 +8,9 @@ torch
 # Embeddings
 sentence-transformers
 
+# Tokenizer
+transformers
+
 # Lexical search
 rank-bm25
 
@@ -22,3 +25,4 @@ uvicorn[standard]
 
 # Evaluation / grading
 tqdm
+httpx

@@ -4,10 +4,9 @@ Minimal LLaMA-style decoder-only LM in PyTorch.
 Used as the correctness reference for PHOTON's encoder/decoder blocks,
 mask patterns, and forward pass.
 """
+
 from __future__ import annotations
 
-import math
-from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
@@ -19,6 +18,7 @@ from .config import PhotonConfig
 # ---------------------------------------------------------------------------
 # Components
 # ---------------------------------------------------------------------------
+
 
 class RMSNorm(nn.Module):
     def __init__(self, dim: int, eps: float = 1e-5) -> None:
@@ -39,7 +39,9 @@ def _precompute_rope(dim: int, max_len: int, theta: float) -> torch.Tensor:
 
 
 def _apply_rope(
-    q: torch.Tensor, k: torch.Tensor, rope: torch.Tensor,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    rope: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     # q, k: (B, H, T, D)  rope: (T, D//2)
     T = q.size(2)
@@ -66,7 +68,7 @@ class Attention(nn.Module):
         self.n_heads = n_heads
         self.n_kv_heads = n_kv_heads
         self.head_dim = head_dim
-        self.scale = head_dim ** -0.5
+        self.scale = head_dim**-0.5
 
         self.q_proj = nn.Linear(dim, n_heads * head_dim, bias=bias)
         self.k_proj = nn.Linear(dim, n_kv_heads * head_dim, bias=bias)
@@ -131,7 +133,10 @@ class TransformerBlock(nn.Module):
         self.ffn = FeedForward(dim, ffn_dim, bias)
 
     def forward(
-        self, x: torch.Tensor, rope: torch.Tensor, mask: torch.Tensor | None,
+        self,
+        x: torch.Tensor,
+        rope: torch.Tensor,
+        mask: torch.Tensor | None,
     ) -> torch.Tensor:
         x = x + self.attn(self.attn_norm(x), rope, mask)
         x = x + self.ffn(self.ffn_norm(x))
@@ -142,6 +147,7 @@ class TransformerBlock(nn.Module):
 # Full model
 # ---------------------------------------------------------------------------
 
+
 class MinimalLM(nn.Module):
     """Decoder-only LM matching LLaMA/PHOTON block structure."""
 
@@ -150,26 +156,29 @@ class MinimalLM(nn.Module):
         m = cfg.model
         self.cfg = cfg
         self.embed = nn.Embedding(cfg.tokenizer.vocab_size, m.hidden_size)
-        self.layers = nn.ModuleList([
-            TransformerBlock(
-                dim=m.hidden_size,
-                n_heads=m.num_attention_heads,
-                n_kv_heads=m.num_key_value_heads,
-                head_dim=m.head_dim,
-                ffn_dim=m.intermediate_size,
-                norm_eps=m.norm_eps,
-                bias=m.bias,
-            )
-            for _ in range(sum(cfg.hierarchy.encoder_layers_per_level))
-        ])
+        self.layers = nn.ModuleList(
+            [
+                TransformerBlock(
+                    dim=m.hidden_size,
+                    n_heads=m.num_attention_heads,
+                    n_kv_heads=m.num_key_value_heads,
+                    head_dim=m.head_dim,
+                    ffn_dim=m.intermediate_size,
+                    norm_eps=m.norm_eps,
+                    bias=m.bias,
+                )
+                for _ in range(sum(cfg.hierarchy.encoder_layers_per_level))
+            ]
+        )
         self.norm = RMSNorm(m.hidden_size, eps=m.norm_eps)
         self.lm_head = nn.Linear(m.hidden_size, cfg.tokenizer.vocab_size, bias=False)
 
         # Precompute causal mask and RoPE
         self.register_buffer(
             "causal_mask",
-            torch.full((m.max_position_embeddings, m.max_position_embeddings),
-                        float("-inf")).triu(1),
+            torch.full(
+                (m.max_position_embeddings, m.max_position_embeddings), float("-inf")
+            ).triu(1),
             persistent=False,
         )
         self.register_buffer(
@@ -180,8 +189,8 @@ class MinimalLM(nn.Module):
 
     def forward(
         self,
-        input_ids: torch.Tensor,           # (B, T)
-        labels: torch.Tensor | None = None, # (B, T) for teacher forcing
+        input_ids: torch.Tensor,  # (B, T)
+        labels: torch.Tensor | None = None,  # (B, T) for teacher forcing
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Return (logits, loss|None)."""
         x = self.embed(input_ids)
@@ -204,7 +213,7 @@ class MinimalLM(nn.Module):
     @torch.no_grad()
     def greedy_decode(
         self,
-        input_ids: torch.Tensor,   # (B, T_prompt)
+        input_ids: torch.Tensor,  # (B, T_prompt)
         max_new_tokens: int = 64,
     ) -> torch.Tensor:
         """Greedy autoregressive decode. Returns (B, T_prompt + generated)."""
