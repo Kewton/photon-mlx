@@ -143,7 +143,7 @@ retrieval:
     max_hops: 1
     max_nodes: 24
 
-  file_type_boost: 0.15            # score bonus for .py chunks (applied after reranking)
+  file_type_boost: 0.0             # disabled: v6 eval showed +2.5pp regression at 0.15
 
   citation_bias:
     prefer_previously_cited_chunks: true
