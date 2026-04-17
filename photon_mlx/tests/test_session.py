@@ -83,6 +83,22 @@ class TestDriftMetrics:
         rate = token_agreement_rate(a, b)
         assert 0.0 <= rate <= 1.0
 
+    def test_different_seq_lengths_no_crash(self) -> None:
+        """Regression: different sequence lengths must not crash (Issue #36)."""
+        short = mx.random.normal((1, 4, 64))
+        long = mx.random.normal((1, 12, 64))
+        # cosine_distance uses mean-pooling, so shapes always reduce to (64,)
+        dist = cosine_distance(short, long)
+        assert 0.0 <= dist <= 2.0
+
+        # kl_divergence and token_agreement_rate truncate to min length
+        logits_short = mx.random.normal((1, 4, 256))
+        logits_long = mx.random.normal((1, 12, 256))
+        kl = kl_divergence(logits_short, logits_long)
+        assert kl >= 0.0
+        rate = token_agreement_rate(logits_short, logits_long)
+        assert 0.0 <= rate <= 1.0
+
 
 # ---------------------------------------------------------------
 # Session state tests

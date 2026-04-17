@@ -45,11 +45,21 @@ class DriftMetrics:
 
 def cosine_distance(a: mx.array, b: mx.array) -> float:
     """1 - cosine_similarity between two vectors (mean-pooled if multi-dim)."""
-    a_flat = a.reshape(-1).astype(mx.float32)
-    b_flat = b.reshape(-1).astype(mx.float32)
-    dot = mx.sum(a_flat * b_flat)
-    norm_a = mx.sqrt(mx.sum(a_flat * a_flat))
-    norm_b = mx.sqrt(mx.sum(b_flat * b_flat))
+    # Mean-pool along all dims except the last to get a fixed (hidden_size,) vector,
+    # so different sequence lengths don't cause shape mismatches.
+    a_vec = (
+        mx.mean(a.astype(mx.float32), axis=tuple(range(a.ndim - 1)))
+        if a.ndim > 1
+        else a.astype(mx.float32)
+    )
+    b_vec = (
+        mx.mean(b.astype(mx.float32), axis=tuple(range(b.ndim - 1)))
+        if b.ndim > 1
+        else b.astype(mx.float32)
+    )
+    dot = mx.sum(a_vec * b_vec)
+    norm_a = mx.sqrt(mx.sum(a_vec * a_vec))
+    norm_b = mx.sqrt(mx.sum(b_vec * b_vec))
     cos_sim = dot / (norm_a * norm_b + 1e-8)
     mx.eval(cos_sim)
     return 1.0 - cos_sim.item()
@@ -57,6 +67,10 @@ def cosine_distance(a: mx.array, b: mx.array) -> float:
 
 def kl_divergence(p_logits: mx.array, q_logits: mx.array) -> float:
     """KL(softmax(p) || softmax(q)), averaged over positions."""
+    # Truncate to min sequence length so different-length turns don't crash.
+    min_len = min(p_logits.shape[-2], q_logits.shape[-2])
+    p_logits = p_logits[..., :min_len, :]
+    q_logits = q_logits[..., :min_len, :]
     p = mx.softmax(p_logits.astype(mx.float32), axis=-1)
     q = mx.softmax(q_logits.astype(mx.float32), axis=-1)
     kl = mx.sum(p * (mx.log(p + 1e-10) - mx.log(q + 1e-10)), axis=-1)
@@ -67,6 +81,10 @@ def kl_divergence(p_logits: mx.array, q_logits: mx.array) -> float:
 
 def token_agreement_rate(logits_a: mx.array, logits_b: mx.array) -> float:
     """Fraction of positions where argmax agrees."""
+    # Truncate to min sequence length so different-length turns don't crash.
+    min_len = min(logits_a.shape[-2], logits_b.shape[-2])
+    logits_a = logits_a[..., :min_len, :]
+    logits_b = logits_b[..., :min_len, :]
     pred_a = mx.argmax(logits_a, axis=-1)
     pred_b = mx.argmax(logits_b, axis=-1)
     agree = mx.mean((pred_a == pred_b).astype(mx.float32))
