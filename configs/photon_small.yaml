@@ -76,7 +76,7 @@ retrieval:
     enabled: true
     model_id: "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
-  file_type_boost: 0.15            # score bonus for .py chunks (applied after reranking)
+  file_type_boost: 0.0             # disabled: v6 eval showed +2.5pp regression at 0.15
 
   query_expansion:
     enabled: true
@@ -134,8 +134,8 @@ model:
   intermediate_size: 2816
 
 generation:
-  max_new_tokens: 768
-  temperature: 0.2
+  max_new_tokens: 1024
+  temperature: 0.1
   top_p: 0.9
   repetition_penalty: 1.05
   do_sample: false

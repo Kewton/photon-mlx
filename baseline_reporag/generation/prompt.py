@@ -83,7 +83,51 @@ without `__dict__`.
 non-serializable value returned by a route handler would raise `ValueError` here.
 
 Most likely cause: a response model contains a field type not registered in \
-`ENCODERS_BY_TYPE` [C:2].\
+`ENCODERS_BY_TYPE` [C:2].
+
+Example 6 — impact analysis question (trace callers and dependents):
+Q: What would be affected if we rename the `get_current_user` dependency?
+A: Renaming `get_current_user` would have a wide impact across the codebase:
+
+1. **Definition site** [C:1]: The function is defined in `auth/dependencies.py` \
+and is imported by name in multiple modules.
+2. **Direct callers** [C:3] [C:5]: At least two route modules inject it via \
+`Depends(get_current_user)` — `routes/users.py` [C:3] and `routes/admin.py` [C:5]. \
+Every endpoint using this dependency would break at import time.
+3. **Test fixtures** [C:4]: The test suite patches `get_current_user` by its \
+fully-qualified path in `conftest.py` [C:4]. Renaming would silently disable the \
+patch and cause auth-related test failures.
+4. **OpenAPI schema** [C:2]: The dependency name appears in the generated \
+`securitySchemes` section [C:2]; renaming it would change the schema output and \
+may break client SDKs that depend on the current schema.
+
+Summary: renaming requires coordinated updates in at least 4 modules ([C:1] [C:2] \
+[C:3] [C:5]) plus the test fixtures [C:4].
+
+Example 7 — change planning question (structured recommendation with evidence):
+Q: Should we switch from synchronous `requests` to `httpx.AsyncClient` for \
+external API calls?
+A: Based on the current codebase patterns:
+
+**Current state** [C:1] [C:2]: External API calls use synchronous `requests.get()` \
+in `services/external.py` [C:1]. The call is wrapped in `run_in_executor` inside \
+`routes/proxy.py` [C:2] to avoid blocking the event loop.
+
+**Option A — Keep `requests` + executor** [C:2]:
+- Pros: No migration needed; `run_in_executor` already prevents blocking [C:2].
+- Cons: Adds thread-pool overhead per request; connection pooling is per-thread \
+rather than per-process.
+
+**Option B — Migrate to `httpx.AsyncClient`** [C:1] [C:3]:
+- Pros: Native async eliminates the executor wrapper; `httpx.AsyncClient` supports \
+connection pooling via `Limits` [C:3], reducing latency for repeated calls.
+- Cons: Requires updating all call sites in `services/external.py` [C:1] and \
+replacing the executor pattern in [C:2].
+
+**Recommendation**: Migrate to `httpx.AsyncClient`. The executor pattern in [C:2] \
+is a workaround that adds unnecessary thread overhead, and the existing connection \
+setup in [C:1] can be replaced with a shared `AsyncClient` instance following the \
+pattern already used for the database session in [C:3].\
 """
 
 _EVIDENCE_HEADER = (

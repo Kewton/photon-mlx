@@ -59,12 +59,12 @@ class TestFormatHintFewShot:
         assert re.search(r"\[C:\d+\]", _FEW_SHOT_EXAMPLES)
 
     def test_few_shot_examples_count(self) -> None:
-        """example 数が 2 であること（"Q:" で始まる行が 2 つ）。"""
+        """example 数が 7 であること（"Q:" で始まる行が 7 つ）。"""
         from baseline_reporag.generation.prompt import _FEW_SHOT_EXAMPLES
 
         q_count = len(re.findall(r"^Q:", _FEW_SHOT_EXAMPLES, re.MULTILINE))
-        assert q_count == 2
+        assert q_count == 7
 
     def test_format_hint_token_budget(self) -> None:
-        """_FORMAT_HINT が 500 トークン（約 2000 文字）以内であること。"""
-        assert len(_FORMAT_HINT) <= 2000
+        """_FORMAT_HINT が 1500 トークン（約 6000 文字）以内であること。"""
+        assert len(_FORMAT_HINT) <= 6000
