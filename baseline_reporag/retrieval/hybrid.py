@@ -98,3 +98,50 @@ def hybrid_search(
 
     results = sorted(merged.values(), key=lambda r: r.score, reverse=True)
     return results[:fused_top_k]
+
+
+def _extract_extension(chunk_id: str) -> str:
+    """Extract file extension from a chunk_id of the form ``repo::path::span``.
+
+    >>> _extract_extension("repo::src/app.py::0-120")
+    '.py'
+    >>> _extract_extension("repo::README.md::0-50")
+    '.md'
+    >>> _extract_extension("repo::Makefile::0-10")
+    ''
+    """
+    parts = chunk_id.split("::")
+    if len(parts) >= 2:
+        path = parts[1]
+        dot = path.rfind(".")
+        if dot != -1:
+            return path[dot:]
+    return ""
+
+
+def apply_file_type_boost(
+    results: list[RetrievalResult],
+    boost: float = 0.0,
+) -> list[RetrievalResult]:
+    """Add a score bonus to ``.py`` chunks and re-sort.
+
+    Designed to run **after** cross-encoder reranking (which overwrites
+    the hybrid score) so that implementation files rank higher than
+    docs/config files.  When *boost* is ``0.0`` the list is returned
+    unchanged (no copy, no re-sort) to preserve backward-compatibility.
+    """
+    if boost == 0.0:
+        return results
+    boosted = []
+    for r in results:
+        ext = _extract_extension(r.chunk_id)
+        new_score = r.score + boost if ext == ".py" else r.score
+        boosted.append(
+            RetrievalResult(
+                chunk_id=r.chunk_id,
+                score=new_score,
+                lexical_score=r.lexical_score,
+                embedding_score=r.embedding_score,
+            )
+        )
+    return sorted(boosted, key=lambda x: x.score, reverse=True)
