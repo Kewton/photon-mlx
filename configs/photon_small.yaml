@@ -180,7 +180,7 @@ training:
   val_corpus: "./data/processed/val_multi.jsonl"
 
   context_length: 2048
-  micro_batch_size: 4
+  micro_batch_size: 2
   gradient_accumulation_steps: 16
 
   learning_rate: 0.00015

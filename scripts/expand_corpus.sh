@@ -62,20 +62,23 @@ for repo in "${REPOS[@]}"; do
     echo "--- ${repo} (repo_id=${rid}) ---"
 
     # 2a. Ingest into chunk store
-    echo "  [ingest] ${clone_dir}"
+    repo_sha="$(git -C "$clone_dir" rev-parse HEAD)"
+    echo "  [ingest] ${clone_dir} (commit=${repo_sha:0:7})"
     python "${SCRIPT_DIR}/ingest_repo.py" \
         --repo "$clone_dir" \
         --repo-id "$rid" \
-        --commit HEAD \
+        --commit "$repo_sha" \
         --config "$CONFIG"
 
-    # 2b. Generate training corpus
-    echo "  [corpus] generating train/val for ${rid}"
+    # 2b. Generate training corpus (per-repo subdirectory)
+    repo_out_dir="${PROCESSED_DIR}/multi_repo/${rid}"
+    echo "  [corpus] generating train/val for ${rid} (commit=${repo_sha:0:7}) -> ${repo_out_dir}"
     python "${SCRIPT_DIR}/generate_training_corpus.py" \
         --repo-id "$rid" \
         --config "$CONFIG" \
         --photon-config "$PHOTON_CONFIG" \
-        --output-dir "$PROCESSED_DIR" \
+        --output-dir "$repo_out_dir" \
+        --commit "$repo_sha" \
         --val-ratio 0.1
 done
 
@@ -92,11 +95,9 @@ VAL_MULTI="${PROCESSED_DIR}/val_multi.jsonl"
 
 for repo in "${REPOS[@]}"; do
     rid="$(repo_id_from "$repo")"
-    # The generate_training_corpus.py produces train_tiny.jsonl / val_tiny.jsonl
-    # (the full split) plus train_small.jsonl / val_small.jsonl (capped).
-    # We merge the full splits (train_tiny / val_tiny) for maximum coverage.
-    train_file="${PROCESSED_DIR}/train_tiny.jsonl"
-    val_file="${PROCESSED_DIR}/val_tiny.jsonl"
+    repo_out_dir="${PROCESSED_DIR}/multi_repo/${rid}"
+    train_file="${repo_out_dir}/train_tiny.jsonl"
+    val_file="${repo_out_dir}/val_tiny.jsonl"
 
     if [ -f "$train_file" ]; then
         cat "$train_file" >> "$TRAIN_MULTI"
