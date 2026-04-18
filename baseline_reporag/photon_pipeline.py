@@ -352,9 +352,11 @@ class PhotonRAGPipeline:
                 expanded_queries=[expansion_terms] if expansion_terms else [],
             )
 
-        # --- Reranking ---
+        is_follow_up = len(session.turns) > 0
+
+        # --- Reranking (skip on follow-up: PHOTON pruning handles selection) ---
         with prof.phase("reranking"):
-            if bl.reranker is not None:
+            if bl.reranker is not None and not is_follow_up:
                 raw = bl.reranker.rerank(
                     query=question,
                     results=raw,
@@ -394,8 +396,6 @@ class PhotonRAGPipeline:
             if inference_cfg is not None
             else 8
         )
-        is_follow_up = len(session.turns) > 0
-
         effective_max_chunks = cfg.evidence_pack.max_chunks
         if pruning_enabled and is_follow_up:
             # Fetch chunk texts for scoring
