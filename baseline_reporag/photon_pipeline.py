@@ -435,7 +435,8 @@ class PhotonRAGPipeline:
                 history_text=session.history_text(max_turns=4),
                 include_few_shot=is_first_turn,
             )
-            answer = bl.generator.generate(messages)
+            followup_tokens = 512 if not is_first_turn else None
+            answer = bl.generator.generate(messages, max_new_tokens=followup_tokens)
 
         # --- Citation ---
         with prof.phase("citation"):
