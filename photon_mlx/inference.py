@@ -136,6 +136,102 @@ class PhotonInference:
 
         return logits, drift
 
+    def prune_evidence(
+        self,
+        chunk_texts: list[str],
+        chunk_ids: list[str],
+        session_id: str,
+        max_chunks: int = 8,
+    ) -> list[int]:
+        """Return indices of the most relevant chunks based on PHOTON coarse state.
+
+        For turn 1 (no session state), returns all indices (no pruning).
+        For turn 2+, tokenizes each chunk, computes PHOTON encoding,
+        and scores against the session's coarse state via cosine similarity.
+        Returns top max_chunks indices sorted by relevance.
+        """
+        session = self._sessions.get(session_id)
+        all_indices = list(range(len(chunk_texts)))
+
+        # No session or no prior state → no pruning (turn 1)
+        if (
+            session is None
+            or session.current_state is None
+            or not session.current_state.level_states
+        ):
+            return all_indices
+
+        # Already within budget → no pruning needed
+        if len(chunk_texts) <= max_chunks:
+            return all_indices
+
+        # Get the coarse (top-level) state from the session
+        coarse_state = session.current_state.level_states[-1]
+        # Mean-pool to a single vector for comparison
+        coarse_vec = mx.mean(
+            coarse_state.astype(mx.float32),
+            axis=tuple(range(coarse_state.ndim - 1)),
+        )
+
+        # Score each chunk by cosine similarity to the session coarse state
+        scores: list[tuple[int, float]] = []
+        for idx, text in enumerate(chunk_texts):
+            if not text.strip():
+                scores.append((idx, -1.0))
+                continue
+
+            # Tokenize chunk text using stub tokenizer byte encoding
+            token_ids = [
+                b % self.cfg.tokenizer.vocab_size for b in text.encode("utf-8")
+            ]
+            if not token_ids:
+                scores.append((idx, -1.0))
+                continue
+
+            # Pad to chunk-aligned length
+            from math import prod
+
+            padding_multiple = prod(self.cfg.hierarchy.chunk_sizes)
+            remainder = len(token_ids) % padding_multiple
+            if remainder != 0:
+                token_ids = token_ids + [0] * (padding_multiple - remainder)
+
+            # Cap length to avoid OOM on large chunks
+            max_len = 2048
+            if len(token_ids) > max_len:
+                token_ids = token_ids[:max_len]
+                # Re-align after truncation
+                remainder = len(token_ids) % padding_multiple
+                if remainder != 0:
+                    token_ids = token_ids[: len(token_ids) - remainder]
+
+            if not token_ids:
+                scores.append((idx, -1.0))
+                continue
+
+            input_ids = mx.array(token_ids, dtype=mx.int32).reshape(1, -1)
+            _, h_state = self.hierarchical_prefill(input_ids)
+
+            # Get the chunk's top-level representation
+            chunk_top = h_state.level_states[-1]
+            chunk_vec = mx.mean(
+                chunk_top.astype(mx.float32),
+                axis=tuple(range(chunk_top.ndim - 1)),
+            )
+
+            # Cosine similarity (higher = more relevant)
+            dot = mx.sum(coarse_vec * chunk_vec)
+            norm_a = mx.sqrt(mx.sum(coarse_vec * coarse_vec))
+            norm_b = mx.sqrt(mx.sum(chunk_vec * chunk_vec))
+            sim = dot / (norm_a * norm_b + 1e-8)
+            mx.eval(sim)
+            scores.append((idx, float(sim.item())))
+
+        # Sort by similarity descending, take top max_chunks
+        scores.sort(key=lambda x: x[1], reverse=True)
+        selected = sorted([s[0] for s in scores[:max_chunks]])
+        return selected
+
     def get_drift_history(self, session_id: str) -> list[dict]:
         session = self._sessions.get(session_id)
         if not session:

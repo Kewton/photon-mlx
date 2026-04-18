@@ -372,6 +372,7 @@ def _make_mock_deps():
         "sessions": MagicMock(),
         "generator": MagicMock(),
         "logger": MagicMock(),
+        "reranker": None,
     }
 
 
@@ -456,6 +457,155 @@ class TestBuildPhotonDeps:
 
 
 # ---------------------------------------------------------------------------
+# Shared helpers for pipeline query tests (Issue #37+)
+# ---------------------------------------------------------------------------
+
+
+def _make_pruning_cfg():
+    """Create a minimal Config for evidence pruning tests."""
+    from baseline_reporag.config import Config
+
+    return Config(
+        {
+            "model": {
+                "provider": "photon",
+                "model_id": "test-model",
+            },
+            "repo": {
+                "repo_id": "test-repo",
+                "repo_commit": "abc123",
+            },
+            "hierarchy": {
+                "chunk_sizes": [4, 4],
+            },
+            "retrieval": {
+                "lexical_top_k": 20,
+                "embedding_top_k": 20,
+                "fused_top_k": 16,
+                "rerank_top_k": 12,
+                "weights": {
+                    "lexical": 0.45,
+                    "embedding": 0.45,
+                },
+                "query_expansion": {"enabled": False},
+                "graph_expansion": {"max_hops": 1, "max_nodes": 24},
+                "neighborhood_expansion": {"before": 1, "after": 1},
+                "file_type_boost": 0.0,
+            },
+            "evidence_pack": {
+                "max_chunks": 16,
+                "max_tokens": 16000,
+            },
+            "inference": {
+                "evidence_pruning_enabled": True,
+                "pruned_max_chunks": 8,
+            },
+        }
+    )
+
+
+def _make_pruning_cfg_disabled():
+    """Config with evidence pruning disabled."""
+    from baseline_reporag.config import Config
+
+    return Config(
+        {
+            "model": {
+                "provider": "photon",
+                "model_id": "test-model",
+            },
+            "repo": {
+                "repo_id": "test-repo",
+                "repo_commit": "abc123",
+            },
+            "hierarchy": {
+                "chunk_sizes": [4, 4],
+            },
+            "retrieval": {
+                "lexical_top_k": 20,
+                "embedding_top_k": 20,
+                "fused_top_k": 16,
+                "rerank_top_k": 12,
+                "weights": {
+                    "lexical": 0.45,
+                    "embedding": 0.45,
+                },
+                "query_expansion": {"enabled": False},
+                "graph_expansion": {"max_hops": 1, "max_nodes": 24},
+                "neighborhood_expansion": {"before": 1, "after": 1},
+                "file_type_boost": 0.0,
+            },
+            "evidence_pack": {
+                "max_chunks": 16,
+                "max_tokens": 16000,
+            },
+            "inference": {
+                "evidence_pruning_enabled": False,
+                "pruned_max_chunks": 8,
+            },
+        }
+    )
+
+
+def _setup_pipeline_for_pruning(cfg, *, session_turns=0):
+    """Build a PhotonRAGPipeline with mocked internals for pruning tests.
+
+    Args:
+        cfg: Config object.
+        session_turns: number of pre-existing turns in the session (0 = turn 1).
+
+    Returns:
+        (pipeline, baseline_deps, photon_deps, mock_session, mock_results)
+    """
+    import mlx.core as mx
+    from baseline_reporag.photon_pipeline import PhotonRAGPipeline
+    from baseline_reporag.memory.session import SessionState
+
+    baseline_deps = _make_mock_deps()
+    photon_deps = _make_mock_photon_deps()
+
+    # Build a real SessionState to track turns
+    mock_session = SessionState(
+        session_id="s1",
+        repo_id="test-repo",
+        repo_commit="abc123",
+    )
+    # Add pre-existing turns
+    for i in range(session_turns):
+        mock_session.add_turn(f"q{i + 1}", f"a{i + 1}", [])
+
+    baseline_deps["sessions"].get_or_create.return_value = mock_session
+
+    # Mock hybrid_search to return some results
+    mock_results = []
+    for i in range(16):
+        r = MagicMock()
+        r.chunk_id = f"chunk_{i}"
+        r.score = 1.0 - i * 0.05
+        mock_results.append(r)
+
+    # Mock PHOTON inference
+    mock_drift = MagicMock()
+    mock_drift.as_dict.return_value = {"latent_cosine_drift": 0.05}
+    photon_deps["photon_inference"].session_forward.return_value = (
+        mx.zeros((1, 16, 1000)),
+        mock_drift,
+    )
+
+    # Mock safe_recgen
+    mock_decision = MagicMock()
+    mock_decision.should_fallback = False
+    mock_decision.as_dict.return_value = {"should_fallback": False}
+    photon_deps["safe_recgen"].evaluate.return_value = mock_decision
+
+    pipeline = PhotonRAGPipeline(
+        cfg=cfg, baseline_deps=baseline_deps, photon_deps=photon_deps
+    )
+
+    return pipeline, baseline_deps, photon_deps, mock_session, mock_results
+
+
+# ---------------------------------------------------------------------------
 # TDD Cycle 8: PhotonRAGPipeline.query with PHOTON inference path
 # ---------------------------------------------------------------------------
 
@@ -464,86 +614,92 @@ class TestPhotonQueryFlow:
     """PhotonRAGPipeline.query runs PHOTON prefill, drift, and fallback."""
 
     def test_query_populates_drift_metrics(self):
-        from baseline_reporag.photon_pipeline import PhotonRAGPipeline
-        from baseline_reporag.profiler import LatencyBreakdown, MemorySnapshot
         from baseline_reporag.pipeline import QueryResult
+        from baseline_reporag.ingestion.chunker import Chunk
 
-        import mlx.core as mx
-
-        baseline_deps = _make_mock_deps()
-        photon_deps = _make_mock_photon_deps()
-
-        # Setup mock baseline query result
-        mock_baseline_result = QueryResult(
-            answer="baseline answer",
-            session_id="s1",
-            turn_id=1,
-            cited_chunk_ids=["c1"],
-            wrong_citation_indices=[],
-            no_citation=False,
-            latency=LatencyBreakdown(10, 20, 5, 30, 65),
-            memory=MemorySnapshot(100, 50),
-        )
-        baseline_deps["sessions"].get_or_create.return_value = MagicMock()
-
-        cfg = MagicMock()
-        cfg.model.provider = "photon"
-        cfg.hierarchy.chunk_sizes = [4, 4]
-
-        pipeline = PhotonRAGPipeline(
-            cfg=cfg, baseline_deps=baseline_deps, photon_deps=photon_deps
-        )
-        # Mock baseline.query
-        pipeline.baseline.query = MagicMock(return_value=mock_baseline_result)
-
-        # Mock photon_inference.session_forward
-        mock_drift = MagicMock()
-        mock_drift.as_dict.return_value = {"latent_cosine_drift": 0.05}
-        photon_deps["photon_inference"].session_forward.return_value = (
-            mx.zeros((1, 10, 1000)),
-            mock_drift,
+        cfg = _make_pruning_cfg_disabled()
+        pipeline, baseline_deps, photon_deps, mock_session, mock_results = (
+            _setup_pipeline_for_pruning(cfg, session_turns=0)
         )
 
-        # Mock safe_recgen.evaluate
-        mock_decision = MagicMock()
-        mock_decision.should_fallback = False
-        mock_decision.as_dict.return_value = {"should_fallback": False}
-        photon_deps["safe_recgen"].evaluate.return_value = mock_decision
+        chunks = [
+            Chunk(
+                chunk_id=f"chunk_{i}",
+                repo_id="test-repo",
+                repo_commit="abc123",
+                rel_path=f"file{i}.py",
+                language="python",
+                start_line=1,
+                end_line=10,
+                content=f"def func_{i}(): pass",
+                symbols=[f"func_{i}"],
+                section_header="",
+                file_header="",
+            )
+            for i in range(16)
+        ]
 
-        result = pipeline.query("test question", session_id="s1", repo_id="r1")
+        def mock_get_many(ids):
+            by_id = {c.chunk_id: c for c in chunks}
+            return [by_id[cid] for cid in ids if cid in by_id]
+
+        baseline_deps["store"].get_many.side_effect = mock_get_many
+
+        expanded_ids = [f"chunk_{i}" for i in range(16)]
+
+        with (
+            patch(
+                "baseline_reporag.photon_pipeline.hybrid_search",
+                return_value=mock_results,
+            ),
+            patch(
+                "baseline_reporag.photon_pipeline.expand_with_graph",
+                return_value=expanded_ids,
+            ),
+        ):
+            baseline_deps["generator"].generate.return_value = "Answer [C:1]"
+            result = pipeline.query(
+                "test question", session_id="s1", repo_id="test-repo"
+            )
+
         assert isinstance(result, QueryResult)
         assert result.drift_metrics is not None
         assert result.confidence is not None
 
     def test_query_fallback_to_baseline_on_safe_recgen(self):
-        from baseline_reporag.photon_pipeline import PhotonRAGPipeline
-        from baseline_reporag.profiler import LatencyBreakdown, MemorySnapshot
-        from baseline_reporag.pipeline import QueryResult
+        from baseline_reporag.ingestion.chunker import Chunk
 
         import mlx.core as mx
 
-        baseline_deps = _make_mock_deps()
-        photon_deps = _make_mock_photon_deps()
-
-        mock_baseline_result = QueryResult(
-            answer="fallback answer",
-            session_id="s1",
-            turn_id=1,
-            cited_chunk_ids=[],
-            wrong_citation_indices=[],
-            no_citation=True,
-            latency=LatencyBreakdown(10, 20, 5, 30, 65),
-            memory=MemorySnapshot(100, 50),
+        cfg = _make_pruning_cfg_disabled()
+        pipeline, baseline_deps, photon_deps, mock_session, mock_results = (
+            _setup_pipeline_for_pruning(cfg, session_turns=0)
         )
 
-        cfg = MagicMock()
-        cfg.model.provider = "photon"
-        cfg.hierarchy.chunk_sizes = [4, 4]
+        chunks = [
+            Chunk(
+                chunk_id=f"chunk_{i}",
+                repo_id="test-repo",
+                repo_commit="abc123",
+                rel_path=f"file{i}.py",
+                language="python",
+                start_line=1,
+                end_line=10,
+                content=f"def func_{i}(): pass",
+                symbols=[f"func_{i}"],
+                section_header="",
+                file_header="",
+            )
+            for i in range(16)
+        ]
 
-        pipeline = PhotonRAGPipeline(
-            cfg=cfg, baseline_deps=baseline_deps, photon_deps=photon_deps
-        )
-        pipeline.baseline.query = MagicMock(return_value=mock_baseline_result)
+        def mock_get_many(ids):
+            by_id = {c.chunk_id: c for c in chunks}
+            return [by_id[cid] for cid in ids if cid in by_id]
+
+        baseline_deps["store"].get_many.side_effect = mock_get_many
+
+        expanded_ids = [f"chunk_{i}" for i in range(16)]
 
         # Mock: safe_recgen triggers fallback
         mock_drift = MagicMock()
@@ -562,6 +718,262 @@ class TestPhotonQueryFlow:
         }
         photon_deps["safe_recgen"].evaluate.return_value = mock_decision
 
-        result = pipeline.query("security auth question", session_id="s1", repo_id="r1")
+        with (
+            patch(
+                "baseline_reporag.photon_pipeline.hybrid_search",
+                return_value=mock_results,
+            ),
+            patch(
+                "baseline_reporag.photon_pipeline.expand_with_graph",
+                return_value=expanded_ids,
+            ),
+        ):
+            baseline_deps["generator"].generate.return_value = "fallback answer [C:1]"
+            result = pipeline.query(
+                "security auth question", session_id="s1", repo_id="test-repo"
+            )
+
         assert result.fallback_decision is not None
         assert result.fallback_decision["should_fallback"] is True
+
+
+# ---------------------------------------------------------------------------
+# TDD Cycle 9: Evidence pruning (Issue #37)
+# ---------------------------------------------------------------------------
+
+
+class TestEvidencePruningTurn1:
+    """Turn 1 uses full evidence — no pruning applied."""
+
+    def test_turn1_no_pruning(self):
+        """On turn 1 (no prior turns), all chunks should be used."""
+        from baseline_reporag.ingestion.chunker import Chunk
+
+        cfg = _make_pruning_cfg()
+        pipeline, baseline_deps, photon_deps, mock_session, mock_results = (
+            _setup_pipeline_for_pruning(cfg, session_turns=0)
+        )
+
+        # Create chunk objects for the store
+        chunks = []
+        for i in range(16):
+            chunks.append(
+                Chunk(
+                    chunk_id=f"chunk_{i}",
+                    repo_id="test-repo",
+                    repo_commit="abc123",
+                    rel_path=f"file{i}.py",
+                    language="python",
+                    start_line=1,
+                    end_line=10,
+                    content=f"def func_{i}(): pass",
+                    symbols=[f"func_{i}"],
+                    section_header="",
+                    file_header="",
+                )
+            )
+
+        def mock_get_many(ids):
+            by_id = {c.chunk_id: c for c in chunks}
+            return [by_id[cid] for cid in ids if cid in by_id]
+
+        baseline_deps["store"].get_many.side_effect = mock_get_many
+
+        # Mock the retrieval + graph expansion to return chunk IDs
+        expanded_ids = [f"chunk_{i}" for i in range(16)]
+
+        with (
+            patch(
+                "baseline_reporag.photon_pipeline.hybrid_search",
+                return_value=mock_results,
+            ),
+            patch(
+                "baseline_reporag.photon_pipeline.expand_with_graph",
+                return_value=expanded_ids,
+            ),
+        ):
+            # Generator returns a simple answer
+            baseline_deps["generator"].generate.return_value = "Answer [C:1]"
+
+            result = pipeline.query("What is X?", session_id="s1", repo_id="test-repo")
+
+        assert result.answer == "Answer [C:1]"
+        # Turn 1 → no pruning, prune_evidence should NOT be called
+        photon_deps["photon_inference"].prune_evidence.assert_not_called()
+
+    def test_turn1_pruning_disabled_no_prune(self):
+        """With pruning disabled, no pruning even on follow-up turns."""
+        from baseline_reporag.ingestion.chunker import Chunk
+
+        cfg = _make_pruning_cfg_disabled()
+        pipeline, baseline_deps, photon_deps, mock_session, mock_results = (
+            _setup_pipeline_for_pruning(cfg, session_turns=1)
+        )
+
+        chunks = []
+        for i in range(16):
+            chunks.append(
+                Chunk(
+                    chunk_id=f"chunk_{i}",
+                    repo_id="test-repo",
+                    repo_commit="abc123",
+                    rel_path=f"file{i}.py",
+                    language="python",
+                    start_line=1,
+                    end_line=10,
+                    content=f"def func_{i}(): pass",
+                    symbols=[f"func_{i}"],
+                    section_header="",
+                    file_header="",
+                )
+            )
+
+        def mock_get_many(ids):
+            by_id = {c.chunk_id: c for c in chunks}
+            return [by_id[cid] for cid in ids if cid in by_id]
+
+        baseline_deps["store"].get_many.side_effect = mock_get_many
+
+        expanded_ids = [f"chunk_{i}" for i in range(16)]
+
+        with (
+            patch(
+                "baseline_reporag.photon_pipeline.hybrid_search",
+                return_value=mock_results,
+            ),
+            patch(
+                "baseline_reporag.photon_pipeline.expand_with_graph",
+                return_value=expanded_ids,
+            ),
+        ):
+            baseline_deps["generator"].generate.return_value = "Answer [C:1]"
+            pipeline.query("Follow-up question?", session_id="s1", repo_id="test-repo")
+
+        # Pruning disabled → prune_evidence should NOT be called
+        photon_deps["photon_inference"].prune_evidence.assert_not_called()
+
+
+class TestEvidencePruningTurn2:
+    """Turn 2+ uses pruned evidence — max_chunks reduced."""
+
+    def test_turn2_calls_prune_evidence(self):
+        """On turn 2 with pruning enabled, prune_evidence should be called."""
+        from baseline_reporag.ingestion.chunker import Chunk
+
+        cfg = _make_pruning_cfg()
+        pipeline, baseline_deps, photon_deps, mock_session, mock_results = (
+            _setup_pipeline_for_pruning(cfg, session_turns=1)
+        )
+
+        chunks = []
+        for i in range(16):
+            chunks.append(
+                Chunk(
+                    chunk_id=f"chunk_{i}",
+                    repo_id="test-repo",
+                    repo_commit="abc123",
+                    rel_path=f"file{i}.py",
+                    language="python",
+                    start_line=1,
+                    end_line=10,
+                    content=f"def func_{i}(): pass",
+                    symbols=[f"func_{i}"],
+                    section_header="",
+                    file_header="",
+                )
+            )
+
+        call_log = {"get_many_calls": []}
+
+        def mock_get_many(ids):
+            call_log["get_many_calls"].append(list(ids))
+            by_id = {c.chunk_id: c for c in chunks}
+            return [by_id[cid] for cid in ids if cid in by_id]
+
+        baseline_deps["store"].get_many.side_effect = mock_get_many
+
+        expanded_ids = [f"chunk_{i}" for i in range(16)]
+
+        # prune_evidence returns top 8 indices
+        photon_deps["photon_inference"].prune_evidence.return_value = list(range(8))
+
+        with (
+            patch(
+                "baseline_reporag.photon_pipeline.hybrid_search",
+                return_value=mock_results,
+            ),
+            patch(
+                "baseline_reporag.photon_pipeline.expand_with_graph",
+                return_value=expanded_ids,
+            ),
+        ):
+            baseline_deps["generator"].generate.return_value = "Pruned answer [C:1]"
+            pipeline.query("Follow-up question?", session_id="s1", repo_id="test-repo")
+
+        # prune_evidence should have been called
+        photon_deps["photon_inference"].prune_evidence.assert_called_once()
+        call_kwargs = photon_deps["photon_inference"].prune_evidence.call_args
+        assert call_kwargs.kwargs.get("max_chunks") == 8 or (
+            len(call_kwargs.args) >= 4 and call_kwargs.args[3] == 8
+        )
+
+        # The build_evidence_pack call should use only the 8 pruned chunk IDs
+        # (the second get_many call is from build_evidence_pack with pruned IDs)
+        assert len(call_log["get_many_calls"]) >= 2
+        pruned_ids_to_build = call_log["get_many_calls"][-1]
+        assert len(pruned_ids_to_build) <= 8
+
+    def test_turn2_result_has_correct_answer(self):
+        """Turn 2 with pruning still returns a valid QueryResult."""
+        from baseline_reporag.ingestion.chunker import Chunk
+
+        cfg = _make_pruning_cfg()
+        pipeline, baseline_deps, photon_deps, mock_session, mock_results = (
+            _setup_pipeline_for_pruning(cfg, session_turns=1)
+        )
+
+        chunks = []
+        for i in range(16):
+            chunks.append(
+                Chunk(
+                    chunk_id=f"chunk_{i}",
+                    repo_id="test-repo",
+                    repo_commit="abc123",
+                    rel_path=f"file{i}.py",
+                    language="python",
+                    start_line=1,
+                    end_line=10,
+                    content=f"def func_{i}(): pass",
+                    symbols=[f"func_{i}"],
+                    section_header="",
+                    file_header="",
+                )
+            )
+
+        def mock_get_many(ids):
+            by_id = {c.chunk_id: c for c in chunks}
+            return [by_id[cid] for cid in ids if cid in by_id]
+
+        baseline_deps["store"].get_many.side_effect = mock_get_many
+
+        expanded_ids = [f"chunk_{i}" for i in range(16)]
+        photon_deps["photon_inference"].prune_evidence.return_value = [0, 2, 4, 6]
+
+        with (
+            patch(
+                "baseline_reporag.photon_pipeline.hybrid_search",
+                return_value=mock_results,
+            ),
+            patch(
+                "baseline_reporag.photon_pipeline.expand_with_graph",
+                return_value=expanded_ids,
+            ),
+        ):
+            baseline_deps["generator"].generate.return_value = "Pruned [C:1]"
+            result = pipeline.query("Follow-up?", session_id="s1", repo_id="test-repo")
+
+        from baseline_reporag.pipeline import QueryResult
+
+        assert isinstance(result, QueryResult)
+        assert result.drift_metrics is not None
+        assert result.confidence is not None

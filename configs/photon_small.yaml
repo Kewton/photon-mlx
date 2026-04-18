@@ -180,7 +180,7 @@ training:
   val_corpus: "./data/processed/val_multi.jsonl"
 
   context_length: 2048
-  micro_batch_size: 4
+  micro_batch_size: 2
   gradient_accumulation_steps: 16
 
   learning_rate: 0.00015
@@ -198,6 +198,8 @@ inference:
   hierarchical_prefill: true
   recgen_enabled: true
   safe_recgen_enabled: true
+  evidence_pruning_enabled: true
+  pruned_max_chunks: 8  # follow-up turns use 8 instead of 16
 
   answer_max_new_tokens: 768
   temperature: 0.2
