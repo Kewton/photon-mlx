@@ -433,6 +433,7 @@ class PhotonRAGPipeline:
                 question=question,
                 evidence_text=evidence_text,
                 history_text=session.history_text(max_turns=4),
+                include_few_shot=is_first_turn,
             )
             answer = bl.generator.generate(messages)
 
