@@ -83,6 +83,22 @@ class TestDriftMetrics:
         rate = token_agreement_rate(a, b)
         assert 0.0 <= rate <= 1.0
 
+    def test_different_seq_lengths_no_crash(self) -> None:
+        """Regression: different sequence lengths must not crash (Issue #36)."""
+        short = mx.random.normal((1, 4, 64))
+        long = mx.random.normal((1, 12, 64))
+        # cosine_distance uses mean-pooling, so shapes always reduce to (64,)
+        dist = cosine_distance(short, long)
+        assert 0.0 <= dist <= 2.0
+
+        # kl_divergence and token_agreement_rate truncate to min length
+        logits_short = mx.random.normal((1, 4, 256))
+        logits_long = mx.random.normal((1, 12, 256))
+        kl = kl_divergence(logits_short, logits_long)
+        assert kl >= 0.0
+        rate = token_agreement_rate(logits_short, logits_long)
+        assert 0.0 <= rate <= 1.0
+
 
 # ---------------------------------------------------------------
 # Session state tests
@@ -177,3 +193,69 @@ class TestInference:
         h2 = engine.get_drift_history("s2")
         assert len(h1) == 1
         assert len(h2) == 1
+
+
+# ---------------------------------------------------------------
+# Evidence pruning tests (Issue #37)
+# ---------------------------------------------------------------
+
+
+class TestPruneEvidence:
+    """prune_evidence selects top-K chunks using PHOTON coarse state."""
+
+    @pytest.fixture
+    def engine(self) -> PhotonInference:
+        mx.random.seed(42)
+        cfg = _tiny_cfg()
+        model = PhotonModel(cfg)
+        return PhotonInference(model, cfg)
+
+    def test_turn1_no_pruning(self, engine: PhotonInference) -> None:
+        """On turn 1 (no session state), all indices are returned."""
+        texts = [f"chunk text {i}" for i in range(12)]
+        ids = [f"c{i}" for i in range(12)]
+        result = engine.prune_evidence(texts, ids, "no_session", max_chunks=8)
+        # No session state → return all indices
+        assert result == list(range(12))
+
+    def test_turn1_existing_session_no_state(self, engine: PhotonInference) -> None:
+        """Session exists but has no state yet → no pruning."""
+        engine.get_session("s1", "repo", "abc")
+        texts = [f"chunk {i}" for i in range(10)]
+        ids = [f"c{i}" for i in range(10)]
+        result = engine.prune_evidence(texts, ids, "s1", max_chunks=8)
+        assert result == list(range(10))
+
+    def test_turn2_prunes_to_max_chunks(self, engine: PhotonInference) -> None:
+        """After session_forward, prune_evidence returns max_chunks indices."""
+        # Run a forward pass to establish session state
+        ids = mx.random.randint(0, 256, (1, 16))
+        engine.session_forward(ids, "s1", "repo", "abc")
+
+        texts = [f"chunk text number {i}" for i in range(12)]
+        chunk_ids = [f"c{i}" for i in range(12)]
+        result = engine.prune_evidence(texts, chunk_ids, "s1", max_chunks=6)
+
+        assert len(result) == 6
+        # Indices should be sorted
+        assert result == sorted(result)
+        # All indices should be valid
+        assert all(0 <= idx < 12 for idx in result)
+
+    def test_fewer_chunks_than_max_no_pruning(self, engine: PhotonInference) -> None:
+        """If chunks <= max_chunks, all are returned even on turn 2."""
+        ids = mx.random.randint(0, 256, (1, 16))
+        engine.session_forward(ids, "s1", "repo", "abc")
+
+        texts = [f"chunk {i}" for i in range(5)]
+        chunk_ids = [f"c{i}" for i in range(5)]
+        result = engine.prune_evidence(texts, chunk_ids, "s1", max_chunks=8)
+        assert result == list(range(5))
+
+    def test_empty_chunks_handled(self, engine: PhotonInference) -> None:
+        """Empty chunk list returns empty."""
+        ids = mx.random.randint(0, 256, (1, 16))
+        engine.session_forward(ids, "s1", "repo", "abc")
+
+        result = engine.prune_evidence([], [], "s1", max_chunks=8)
+        assert result == []

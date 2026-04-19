@@ -40,7 +40,7 @@ class Generator:
             top_p=self._top_p,
         )
 
-    def generate(self, messages: list[dict]) -> str:
+    def generate(self, messages: list[dict], max_new_tokens: int | None = None) -> str:
         self._load()
         prompt: str = self._tokenizer.apply_chat_template(
             messages,
@@ -51,6 +51,6 @@ class Generator:
             self._model,
             self._tokenizer,
             prompt=prompt,
-            max_tokens=self._max_new_tokens,
+            max_tokens=max_new_tokens or self._max_new_tokens,
             sampler=self._sampler,
         )

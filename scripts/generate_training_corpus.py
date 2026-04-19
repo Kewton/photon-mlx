@@ -105,10 +105,15 @@ def main() -> None:
     parser.add_argument(
         "--max-chunks", type=int, default=0, help="Limit chunks (0 = all)"
     )
+    parser.add_argument(
+        "--commit",
+        default=None,
+        help="Override repo_commit from config (use for non-default repos)",
+    )
     args = parser.parse_args()
 
     cfg = load_config(args.config)
-    repo_commit = cfg.repo.repo_commit
+    repo_commit = args.commit if args.commit else cfg.repo.repo_commit
     idx_dir = Path(cfg.paths.data_root) / "indexes" / args.repo_id
     store = ChunkStore(idx_dir / "chunks.db")
 

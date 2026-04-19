@@ -135,12 +135,16 @@ _EVIDENCE_HEADER = (
     " using [C:N] notation from the chunks below."
 )
 
-_FORMAT_HINT = f"""\
+_FORMAT_HINT_SHORT = """\
 Answer format:
 - Start with a direct answer.
 - Cite every factual claim: [C:N].
 - Use code blocks for code snippets.
-- End with a one-sentence summary if the answer is long.
+- End with a one-sentence summary if the answer is long.\
+"""
+
+_FORMAT_HINT = f"""\
+{_FORMAT_HINT_SHORT}
 
 {_FEW_SHOT_EXAMPLES}\
 """
@@ -151,6 +155,7 @@ def build_messages(
     evidence_text: str,
     history_text: str = "",
     session_summary: str = "",
+    include_few_shot: bool = True,
 ) -> list[dict]:
     parts: list[str] = []
     if session_summary:
@@ -159,7 +164,8 @@ def build_messages(
         parts.append(f"## Conversation History\n{history_text}")
     parts.append(f"## Code Chunks\n{evidence_text}")
     parts.append(f"## Question\n{question}")
-    parts.append(f"## Instructions\n{_FORMAT_HINT}")
+    hint = _FORMAT_HINT if include_few_shot else _FORMAT_HINT_SHORT
+    parts.append(f"## Instructions\n{hint}")
 
     return [
         {"role": "system", "content": _SYSTEM},

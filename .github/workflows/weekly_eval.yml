@@ -1,0 +1,42 @@
+name: Weekly Eval (baseline_rag)
+
+on:
+  schedule:
+    - cron: '0 0 * * 1'  # Monday 00:00 UTC = 09:00 JST
+  workflow_dispatch:  # manual trigger
+
+jobs:
+  eval:
+    runs-on: self-hosted  # M3 Ultra with MLX
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run static eval
+        run: |
+          python -m scripts.run_baseline_eval \
+            --config configs/baseline.yaml \
+            --max-questions 120
+      - name: Run multi-turn eval
+        run: |
+          python -m scripts.run_multi_turn_eval \
+            --config configs/baseline.yaml \
+            --max-sessions 30
+      - name: Check thresholds
+        run: |
+          python scripts/ci_eval_check.py \
+            --static-log logs/baseline_eval_*.jsonl \
+            --mt-log logs/mt_eval_*.jsonl
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-results-${{ github.run_number }}
+          path: |
+            logs/baseline_eval_*.jsonl
+            logs/mt_eval_*.jsonl

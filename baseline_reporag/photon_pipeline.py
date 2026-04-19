@@ -9,13 +9,21 @@ Provides:
 
 from __future__ import annotations
 
+import uuid
 from math import prod
 from typing import Any
 
 import mlx.core as mx
 
+from .citation import resolve_citations
 from .config import Config
-from .pipeline import QueryResult, RepoRAGPipeline
+from .generation.evidence_pack import build_evidence_pack
+from .generation.prompt import _EVIDENCE_HEADER, build_messages
+from .pipeline import QueryResult, RepoRAGPipeline, apply_citation_postprocess
+from .profiler import TurnProfiler
+from .retrieval.graph_expansion import expand_with_graph
+from .retrieval.hybrid import apply_file_type_boost, hybrid_search
+from .retrieval.query_expansion import expand_query
 
 
 # ---------------------------------------------------------------------------
@@ -277,14 +285,33 @@ class PhotonRAGPipeline:
         session_id: str = "",
         repo_id: str = "",
     ) -> QueryResult:
-        """Run PHOTON-enhanced query with drift tracking and fallback."""
-        # 1) Run PHOTON prefill for drift / confidence estimation
-        evidence_tokens = tokenize_evidence_pack(question, self.tokenizer, self.cfg)
+        """Run PHOTON-enhanced query with drift tracking and evidence pruning.
+
+        On follow-up turns (turn 2+), PHOTON coarse state is used to prune
+        the evidence pack from max_chunks down to pruned_max_chunks, halving
+        LLM prefill time while retaining the most session-relevant chunks.
+        """
+        cfg = self.cfg
+        bl = self.baseline  # access baseline components without calling query()
+        prof = TurnProfiler()
+        prof.start()
+
+        session_id = session_id or str(uuid.uuid4())
+        repo_id = repo_id or cfg.repo.repo_id
+        session = bl.sessions.get_or_create(
+            session_id,
+            repo_id,
+            cfg.repo.repo_commit,
+        )
+
+        # --- PHOTON prefill for drift / confidence ---
+        photon_session_id = session_id or "default"
+        evidence_tokens = tokenize_evidence_pack(question, self.tokenizer, cfg)
         if evidence_tokens.size > 0:
             input_ids = evidence_tokens.reshape(1, -1)
             logits, drift = self.photon_inference.session_forward(
                 input_ids,
-                session_id=session_id or "default",
+                session_id=photon_session_id,
                 repo_id=repo_id or "unknown",
                 repo_commit="HEAD",
             )
@@ -295,7 +322,7 @@ class PhotonRAGPipeline:
             drift = None
             drift_dict = None
 
-        # 2) Safe RecGen evaluation
+        # --- Safe RecGen evaluation ---
         fallback_dict = None
         if self.safe_recgen is not None and drift is not None:
             decision = self.safe_recgen.evaluate(
@@ -303,10 +330,177 @@ class PhotonRAGPipeline:
             )
             fallback_dict = decision.as_dict()
 
-        # 3) Delegate generation to baseline pipeline
-        result = self.baseline.query(question, session_id=session_id, repo_id=repo_id)
+        # --- Query expansion ---
+        qe_cfg = cfg.retrieval.query_expansion
+        if qe_cfg.get("enabled", False):
+            _queries = expand_query(question)
+            expansion_terms: str | None = _queries[1] if len(_queries) > 1 else None
+        else:
+            expansion_terms = None
 
-        # 4) Attach PHOTON metadata
+        # --- Retrieval ---
+        with prof.phase("retrieval"):
+            raw = hybrid_search(
+                query=question,
+                lexical_index=bl.lexical,
+                embedding_index=bl.embedding,
+                lexical_top_k=cfg.retrieval.lexical_top_k,
+                embedding_top_k=cfg.retrieval.embedding_top_k,
+                fused_top_k=cfg.retrieval.fused_top_k,
+                lexical_weight=cfg.retrieval.weights.lexical,
+                embedding_weight=cfg.retrieval.weights.embedding,
+                expanded_queries=[expansion_terms] if expansion_terms else [],
+            )
+
+        is_follow_up = len(session.turns) > 0
+
+        # --- Reranking (skip on follow-up: PHOTON pruning handles selection) ---
+        with prof.phase("reranking"):
+            if bl.reranker is not None and not is_follow_up:
+                raw = bl.reranker.rerank(
+                    query=question,
+                    results=raw,
+                    store=bl.store,
+                    top_k=cfg.retrieval.rerank_top_k,
+                    rerank_query=expansion_terms,
+                )
+
+        # --- File-type boost ---
+        file_type_boost = cfg.retrieval.get("file_type_boost", 0.0)
+        if file_type_boost:
+            raw = apply_file_type_boost(raw, boost=file_type_boost)
+
+        # --- Graph expansion ---
+        with prof.phase("graph_expansion"):
+            expanded_ids = expand_with_graph(
+                results=raw,
+                store=bl.store,
+                graph=bl.graph,
+                repo_id=repo_id,
+                repo_commit=cfg.repo.repo_commit,
+                max_hops=cfg.retrieval.graph_expansion.max_hops,
+                max_nodes=cfg.retrieval.graph_expansion.max_nodes,
+                neighborhood_before=cfg.retrieval.neighborhood_expansion.before,
+                neighborhood_after=cfg.retrieval.neighborhood_expansion.after,
+            )
+
+        # --- Evidence pruning (PHOTON-guided, follow-up turns only) ---
+        inference_cfg = cfg.get("inference")
+        pruning_enabled = (
+            getattr(inference_cfg, "evidence_pruning_enabled", False)
+            if inference_cfg is not None
+            else False
+        )
+        pruned_max_chunks = (
+            getattr(inference_cfg, "pruned_max_chunks", 8)
+            if inference_cfg is not None
+            else 8
+        )
+        effective_max_chunks = cfg.evidence_pack.max_chunks
+        if pruning_enabled and is_follow_up:
+            # Fetch chunk texts for scoring
+            chunks_for_scoring = bl.store.get_many(expanded_ids)
+            chunk_texts = [c.content for c in chunks_for_scoring]
+            chunk_ids_for_scoring = [c.chunk_id for c in chunks_for_scoring]
+
+            selected_indices = self.photon_inference.prune_evidence(
+                chunk_texts=chunk_texts,
+                chunk_ids=chunk_ids_for_scoring,
+                session_id=photon_session_id,
+                max_chunks=pruned_max_chunks,
+            )
+            # Filter expanded_ids to only selected chunks
+            expanded_ids = [chunk_ids_for_scoring[i] for i in selected_indices]
+            effective_max_chunks = pruned_max_chunks
+
+        # --- Evidence pack ---
+        with prof.phase("evidence_pack"):
+            pack = build_evidence_pack(
+                chunk_ids=expanded_ids,
+                store=bl.store,
+                session=session,
+                max_chunks=effective_max_chunks,
+                max_tokens=cfg.evidence_pack.max_tokens,
+            )
+
+        # --- Generation ---
+        with prof.phase("generation"):
+            evidence_text = pack.format_for_prompt()
+            is_first_turn = len(session.turns) == 0
+            if is_first_turn:
+                evidence_text = f"{_EVIDENCE_HEADER}\n\n{evidence_text}"
+            messages = build_messages(
+                question=question,
+                evidence_text=evidence_text,
+                history_text=session.history_text(max_turns=4),
+                include_few_shot=is_first_turn,
+            )
+            followup_tokens = 512 if not is_first_turn else None
+            answer = bl.generator.generate(messages, max_new_tokens=followup_tokens)
+
+        # --- Citation ---
+        with prof.phase("citation"):
+            citation = resolve_citations(answer, pack)
+            answering_cfg = getattr(cfg, "answering", None)
+            if answering_cfg is not None:
+                postprocess_enabled = answering_cfg.get(
+                    "citation_postprocess_enabled", True
+                )
+            else:
+                postprocess_enabled = True
+            if not isinstance(postprocess_enabled, bool):
+                raise RuntimeError(
+                    "answering.citation_postprocess_enabled must be bool, "
+                    f"got {type(postprocess_enabled)}"
+                )
+            answer, citation, citation_postprocessed = apply_citation_postprocess(
+                answer, pack, citation, enabled=postprocess_enabled
+            )
+
+        latency, memory = prof.finish()
+
+        # --- Session update ---
+        session_cited_ids = [] if citation_postprocessed else citation.cited_chunk_ids
+        turn = session.add_turn(question, answer, session_cited_ids)
+        bl.sessions.save(session)
+
+        # --- Log ---
+        bl.logger.log_turn(
+            {
+                "session_id": session_id,
+                "turn_id": turn.turn_id,
+                "repo_id": repo_id,
+                "repo_commit": cfg.repo.repo_commit,
+                "model_id": cfg.model.model_id,
+                "question": question,
+                "answer": answer,
+                "retrieval_chunk_ids": [r.chunk_id for r in raw],
+                "evidence_pack_ids": [c.chunk_id for c in pack.chunks],
+                "cited_chunk_ids": citation.cited_chunk_ids,
+                "wrong_citation_indices": citation.wrong_citation_indices,
+                "no_citation": citation.no_citation,
+                "citation_postprocessed": citation_postprocessed,
+                "latency": latency.as_dict(),
+                "memory": memory.as_dict(),
+                "fallback_flag": False,
+                "fallback_reason": None,
+                "evidence_pruning_applied": pruning_enabled and is_follow_up,
+            }
+        )
+
+        result = QueryResult(
+            answer=answer,
+            session_id=session_id,
+            turn_id=turn.turn_id,
+            cited_chunk_ids=citation.cited_chunk_ids,
+            wrong_citation_indices=citation.wrong_citation_indices,
+            no_citation=citation.no_citation,
+            latency=latency,
+            memory=memory,
+            citation_postprocessed=citation_postprocessed,
+        )
+
+        # Attach PHOTON metadata
         result.drift_metrics = drift_dict
         result.confidence = confidence
         result.fallback_decision = fallback_dict
