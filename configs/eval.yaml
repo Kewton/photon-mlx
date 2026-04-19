@@ -79,7 +79,7 @@ datasets:
     max_turns_per_session: 6
 
   stress_eval:
-    enabled: false
+    enabled: true
     path: "./data/eval_sets/stress_eval.jsonl"
     concurrency_levels:
       - 1
