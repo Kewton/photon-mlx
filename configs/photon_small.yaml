@@ -216,10 +216,10 @@ safe_recgen:
     high_risk_query: true
     topic_shift: true
     latent_drift: true
-    low_confidence: true
+    low_confidence: false  # disabled: stub tokenizer gives ~0.6% on question text
 
   thresholds:
-    latent_cosine_drift: 0.18
+    latent_cosine_drift: 0.50  # was 0.18; raised to avoid 100% fire rate
     topic_shift_score: 0.65
     confidence_floor: 0.40
     logit_kl: 0.75
