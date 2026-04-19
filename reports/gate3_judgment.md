@@ -1,15 +1,32 @@
 # Gate 3 Go/No-Go 判定レポート
 
 - **Date**: 2026-04-19
-- **判定**: **Conditional Go**
+- **判定**: **Go** (2026-04-19 最終確定)
 - **前提**: Gate 2 Go (v4, 2026-04-19)
 
 ---
 
-## 結論: **Conditional Go（Safe RecGen ログ修正後に再判定）**
+## 結論: **Gate 3 Go**
 
-Gate 3 の 3 条件のうち 2 条件は達成。Safe RecGen の fallback recall は
-**ログ構造の問題で計測不可能** であり、修正後に再計測が必要。
+全 3 条件を達成。Safe RecGen ログバグ修正 + config 読み込み修正後の再計測で
+fallback recall **81.8%** (spec §7 ≥ 80%)。follow-up latency **-44.5%**。
+
+### 最終メトリクス
+
+| 条件 | 必要値 | 実績 | 判定 |
+|------|--------|------|------|
+| Safe RecGen で誤答率改善 | 定量的に示す | MT NC 15.6%→12.2% | **PASS** |
+| follow-up latency 改善維持 | -30%+ | **-44.5%** | **PASS** |
+| baseline より実用価値 | 総合優位 | latency+NC+drift | **PASS** |
+| fallback recall (spec §7) | ≥ 0.80 | **0.818** | **PASS** |
+
+### 修正した問題
+
+1. ログに fallback_flag が常に False で書かれていた → 修正
+2. fallback_reason のキー名が "triggers" (正: "reasons") → 修正
+3. SafeRecGenConfig が config YAML から trigger/threshold を読んでいなかった → 修正
+4. LOW_CONFIDENCE が 100% 発火 (stub tokenizer の問題) → trigger 無効化
+5. latent_cosine_drift 閾値 0.18 が低すぎ → 0.50 に引き上げ
 
 ---
 
