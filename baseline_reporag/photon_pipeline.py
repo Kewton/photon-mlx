@@ -183,14 +183,44 @@ def _build_photon_deps(cfg: Config) -> dict[str, Any]:
     if safe_recgen_enabled:
         sr_cfg_data = cfg.get("safe_recgen")
         if sr_cfg_data is not None:
+            triggers = sr_cfg_data.get("triggers")
             thresholds = sr_cfg_data.get("thresholds")
             sr_config = SafeRecGenConfig(
                 enabled=True,
-                confidence_floor=(
-                    thresholds.confidence_floor
-                    if thresholds and hasattr(thresholds, "confidence_floor")
-                    else 0.40
-                ),
+                trigger_exact_quote=getattr(triggers, "exact_quote", True)
+                if triggers
+                else True,
+                trigger_diff_or_patch=getattr(triggers, "diff_or_patch", True)
+                if triggers
+                else True,
+                trigger_high_risk_query=getattr(triggers, "high_risk_query", True)
+                if triggers
+                else True,
+                trigger_topic_shift=getattr(triggers, "topic_shift", True)
+                if triggers
+                else True,
+                trigger_latent_drift=getattr(triggers, "latent_drift", True)
+                if triggers
+                else True,
+                trigger_low_confidence=getattr(triggers, "low_confidence", True)
+                if triggers
+                else True,
+                latent_cosine_drift_threshold=getattr(
+                    thresholds, "latent_cosine_drift", 0.18
+                )
+                if thresholds
+                else 0.18,
+                topic_shift_score_threshold=getattr(
+                    thresholds, "topic_shift_score", 0.65
+                )
+                if thresholds
+                else 0.65,
+                confidence_floor=getattr(thresholds, "confidence_floor", 0.40)
+                if thresholds
+                else 0.40,
+                logit_kl_threshold=getattr(thresholds, "logit_kl", 0.75)
+                if thresholds
+                else 0.75,
             )
         else:
             sr_config = SafeRecGenConfig(enabled=True)
