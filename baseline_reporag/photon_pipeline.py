@@ -486,7 +486,7 @@ class PhotonRAGPipeline:
                     fallback_dict and fallback_dict.get("should_fallback")
                 ),
                 "fallback_reason": (
-                    fallback_dict.get("triggers") if fallback_dict else None
+                    fallback_dict.get("reasons") if fallback_dict else None
                 ),
                 "evidence_pruning_applied": pruning_enabled and is_follow_up,
             }
