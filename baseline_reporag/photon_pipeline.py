@@ -482,8 +482,12 @@ class PhotonRAGPipeline:
                 "citation_postprocessed": citation_postprocessed,
                 "latency": latency.as_dict(),
                 "memory": memory.as_dict(),
-                "fallback_flag": False,
-                "fallback_reason": None,
+                "fallback_flag": bool(
+                    fallback_dict and fallback_dict.get("should_fallback")
+                ),
+                "fallback_reason": (
+                    fallback_dict.get("triggers") if fallback_dict else None
+                ),
                 "evidence_pruning_applied": pruning_enabled and is_follow_up,
             }
         )
