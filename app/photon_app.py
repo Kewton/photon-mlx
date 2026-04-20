@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import threading
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -19,6 +20,9 @@ import streamlit as st
 
 PROJECT_ROOT = Path(__file__).parent.parent
 STATE_FILE = PROJECT_ROOT / ".cache" / "photon_app_state.json"
+
+SYNC_INTERVAL_SECONDS = 30
+_LOG_TAIL_BYTES = 65536
 
 
 # ================================================================
@@ -155,6 +159,147 @@ def _read_training_progress(log_file: str) -> dict[str, Any]:
     return result
 
 
+def _read_log_tail(log_file: str, max_bytes: int = _LOG_TAIL_BYTES) -> str:
+    if not log_file:
+        return ""
+    path = Path(log_file)
+    if not path.exists():
+        return ""
+    try:
+        size = path.stat().st_size
+        with open(path, "rb") as f:
+            if size > max_bytes:
+                f.seek(-max_bytes, os.SEEK_END)
+            data = f.read()
+        return data.decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+# ================================================================
+# Job status reconciliation (pure helpers — no Streamlit access)
+# ================================================================
+
+
+def _sync_training_job(job: TrainingJob, progress: dict[str, Any] | None) -> bool:
+    """Reconcile a training job against live process state and logs.
+
+    Returns True if any field on `job` was mutated.
+    """
+    changed = False
+
+    if progress:
+        step = int(progress.get("last_step", 0) or 0)
+        if step > job.last_step:
+            job.last_step = step
+            changed = True
+        val_loss = float(progress.get("val_loss", 0.0) or 0.0)
+        if val_loss > 0.0 and val_loss != job.val_loss:
+            job.val_loss = val_loss
+            changed = True
+
+    if job.status == "running" and not _is_process_running(job.pid):
+        tail = _read_log_tail(job.log_file)
+        if "Training complete" in tail or job.last_step > 0:
+            job.status = "completed"
+        else:
+            job.status = "failed"
+        changed = True
+
+    return changed
+
+
+def _sync_index_job(job: IndexJob) -> bool:
+    """Reconcile an index job against live process state and logs."""
+    changed = False
+
+    log_content = ""
+    if job.log_file:
+        path = Path(job.log_file)
+        if path.exists():
+            try:
+                log_content = path.read_text(errors="replace")
+            except OSError:
+                log_content = ""
+
+    if log_content and job.status == "running":
+        if "Phase 3" in log_content:
+            new_phase = "symbol_graph"
+        elif "Phase 2" in log_content:
+            new_phase = "bm25_embed"
+        elif "Phase 1" in log_content:
+            new_phase = "ingest"
+        else:
+            new_phase = job.phase
+        if new_phase != job.phase:
+            job.phase = new_phase
+            changed = True
+
+    if job.status == "running" and not _is_process_running(job.pid):
+        if "DONE" in log_content:
+            job.status = "completed"
+            job.phase = "completed"
+        else:
+            job.status = "failed"
+        changed = True
+
+    return changed
+
+
+def _sync_all_jobs(state: AppState) -> bool:
+    """Reconcile every training/index job in `state`. Returns True if mutated."""
+    changed = False
+    progress = _read_training_progress(str(PROJECT_ROOT / "logs" / "train_log.jsonl"))
+    for job in state.training_jobs.values():
+        if _sync_training_job(job, progress):
+            changed = True
+    for job in state.index_jobs.values():
+        if _sync_index_job(job):
+            changed = True
+    return changed
+
+
+_state_file_lock = threading.Lock()
+
+
+def _sync_state_file() -> bool:
+    """Load state file, reconcile job statuses, write back if anything changed."""
+    with _state_file_lock:
+        state = _load_state()
+        if _sync_all_jobs(state):
+            _save_state(state)
+            return True
+        return False
+
+
+_sync_thread_started = False
+_sync_thread_lock = threading.Lock()
+
+
+def _start_background_sync(interval_s: float = SYNC_INTERVAL_SECONDS) -> None:
+    """Start a daemon thread that keeps the state file authoritative.
+
+    Runs once per Streamlit server process: the thread survives browser
+    disconnects and script reruns, so job status keeps advancing even when
+    no UI is mounted. Re-runs are cheap — we no-op after the first call.
+    """
+    global _sync_thread_started
+    with _sync_thread_lock:
+        if _sync_thread_started:
+            return
+        _sync_thread_started = True
+
+    def _worker() -> None:
+        while True:
+            try:
+                _sync_state_file()
+            except Exception:
+                pass
+            time.sleep(interval_s)
+
+    threading.Thread(target=_worker, daemon=True, name="photon_app_state_sync").start()
+
+
 # ================================================================
 # Page: Training
 # ================================================================
@@ -274,18 +419,10 @@ def page_training():
         st.info("学習ジョブはありません")
         return
 
+    progress = _read_training_progress(str(PROJECT_ROOT / "logs" / "train_log.jsonl"))
     for job_id, job in sorted(state.training_jobs.items(), reverse=True):
-        running = _is_process_running(job.pid)
-        if job.status == "running" and not running:
-            job.status = "completed"
+        if _sync_training_job(job, progress):
             save()
-
-        progress = _read_training_progress(
-            str(PROJECT_ROOT / "logs" / "train_log.jsonl")
-        )
-        if progress["last_step"] > 0:
-            job.last_step = progress["last_step"]
-            job.val_loss = progress["val_loss"]
 
         icon = {
             "pending": "⏳",
@@ -433,28 +570,8 @@ def page_index():
         return
 
     for job_id, job in sorted(state.index_jobs.items(), reverse=True):
-        running = _is_process_running(job.pid)
-        if job.status == "running":
-            if not running:
-                # Check if DONE
-                log_path = Path(job.log_file)
-                if log_path.exists() and "DONE" in log_path.read_text():
-                    job.status = "completed"
-                    job.phase = "completed"
-                else:
-                    job.status = "failed"
-                save()
-            else:
-                # Update phase
-                log_path = Path(job.log_file)
-                if log_path.exists():
-                    content = log_path.read_text()
-                    if "Phase 3" in content:
-                        job.phase = "symbol_graph"
-                    elif "Phase 2" in content:
-                        job.phase = "bm25_embed"
-                    else:
-                        job.phase = "ingest"
+        if _sync_index_job(job):
+            save()
 
         icon = {
             "pending": "⏳",
@@ -728,6 +845,21 @@ def main():
         page_icon="🔬",
         layout="wide",
     )
+
+    # Background sync keeps the state file correct even when no browser is
+    # attached. On first script run we also do a synchronous pass so the UI
+    # never shows stale `running` rows for jobs that already finished.
+    if "initial_sync_done" not in st.session_state:
+        try:
+            _sync_state_file()
+        except Exception:
+            pass
+        st.session_state.initial_sync_done = True
+    _start_background_sync()
+
+    # Reload from disk on each rerun so background-thread updates are visible
+    # and any external edits are picked up.
+    st.session_state.app_state = _load_state()
 
     st.sidebar.title("🔬 PHOTON-RepoRAG")
     st.sidebar.markdown("---")
