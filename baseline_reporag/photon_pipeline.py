@@ -359,6 +359,18 @@ class PhotonRAGPipeline:
                 question, drift=drift, confidence=confidence
             )
             fallback_dict = decision.as_dict()
+        should_fallback = bool(fallback_dict and fallback_dict.get("should_fallback"))
+        fallback_actions = (
+            set(fallback_dict.get("actions", [])) if fallback_dict else set()
+        )
+
+        # A fallback that invalidates the PHOTON hierarchy must clear the session
+        # state so subsequent turns do not reuse a coarse state from a stale topic.
+        if fallback_actions & {"reprefill_hierarchy", "fallback_to_baseline_path"}:
+            photon_session = self.photon_inference._sessions.get(photon_session_id)
+            if photon_session is not None:
+                photon_session.current_state = None
+                photon_session.prev_state = None
 
         # --- Query expansion ---
         qe_cfg = cfg.retrieval.query_expansion
@@ -384,9 +396,10 @@ class PhotonRAGPipeline:
 
         is_follow_up = len(session.turns) > 0
 
-        # --- Reranking (skip on follow-up: PHOTON pruning handles selection) ---
+        # --- Reranking (skip on follow-up: PHOTON pruning handles selection,
+        # unless Safe RecGen demands fallback to the baseline path) ---
         with prof.phase("reranking"):
-            if bl.reranker is not None and not is_follow_up:
+            if bl.reranker is not None and (not is_follow_up or should_fallback):
                 raw = bl.reranker.rerank(
                     query=question,
                     results=raw,
@@ -427,7 +440,9 @@ class PhotonRAGPipeline:
             else 8
         )
         effective_max_chunks = cfg.evidence_pack.max_chunks
-        if pruning_enabled and is_follow_up:
+        # Skip PHOTON pruning when Safe RecGen demanded fallback: the coarse
+        # state it relies on is not trustworthy for this turn.
+        if pruning_enabled and is_follow_up and not should_fallback:
             # Fetch chunk texts for scoring
             chunks_for_scoring = bl.store.get_many(expanded_ids)
             chunk_texts = [c.content for c in chunks_for_scoring]
@@ -518,7 +533,9 @@ class PhotonRAGPipeline:
                 "fallback_reason": (
                     fallback_dict.get("reasons") if fallback_dict else None
                 ),
-                "evidence_pruning_applied": pruning_enabled and is_follow_up,
+                "evidence_pruning_applied": (
+                    pruning_enabled and is_follow_up and not should_fallback
+                ),
             }
         )
 
