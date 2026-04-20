@@ -374,13 +374,15 @@ def page_index():
             log_file = str(PROJECT_ROOT / "logs" / f"{job_id}.log")
 
             # Run all 3 steps in background
+            # Get actual commit SHA so build_indexes/symbol_graph use it
             cmd = (
-                f"echo 'Phase 1: Ingest' && "
-                f"python -m scripts.ingest_repo --repo {repo_dir} --repo-id {repo_id} --commit HEAD --config configs/baseline.yaml && "
+                f"REPO_COMMIT=$(git -C {repo_dir} rev-parse HEAD) && "
+                f'echo "Phase 1: Ingest (commit=$REPO_COMMIT)" && '
+                f"python -m scripts.ingest_repo --repo {repo_dir} --repo-id {repo_id} --commit $REPO_COMMIT --config configs/baseline.yaml && "
                 f"echo 'Phase 2: BM25 + Embedding' && "
-                f"python -m scripts.build_indexes --repo-id {repo_id} --config configs/baseline.yaml && "
+                f"python -m scripts.build_indexes --repo-id {repo_id} --commit $REPO_COMMIT --config configs/baseline.yaml && "
                 f"echo 'Phase 3: Symbol Graph' && "
-                f"python -m scripts.build_symbol_graph --repo-id {repo_id} --config configs/baseline.yaml && "
+                f"python -m scripts.build_symbol_graph --repo-id {repo_id} --commit $REPO_COMMIT --config configs/baseline.yaml && "
                 f"echo 'DONE'"
             )
             proc = subprocess.Popen(
