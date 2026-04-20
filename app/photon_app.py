@@ -600,8 +600,21 @@ def page_chat():
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
-    # Input
-    if question := st.chat_input("質問を入力..."):
+    # Input — use text_input + button to avoid IME enter-to-send issue
+    col_input, col_btn = st.columns([5, 1])
+    with col_input:
+        question_input = st.text_input(
+            "質問",
+            key=f"q_{session_key}",
+            label_visibility="collapsed",
+            placeholder="質問を入力して送信ボタンを押してください",
+        )
+    with col_btn:
+        send_clicked = st.button("送信", type="primary", key=f"send_{session_key}")
+
+    question = question_input if send_clicked and question_input else None
+
+    if question:
         # Add user message
         history.append({"role": "user", "content": question})
         with st.chat_message("user"):
