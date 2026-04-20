@@ -24,10 +24,16 @@ def main() -> None:
     parser.add_argument("--repo-id", required=True)
     parser.add_argument("--config", default="configs/baseline.yaml")
     parser.add_argument("--commit", default=None, help="Override repo_commit from config")
+    parser.add_argument(
+        "--embedding-model",
+        default=None,
+        help="Override embedding model_id from config",
+    )
     args = parser.parse_args()
 
     cfg = load_config(args.config)
     repo_commit = args.commit if args.commit else cfg.repo.repo_commit
+    embedding_model = args.embedding_model or cfg.indexing.embedding.model_id
     idx_dir = Path(cfg.paths.data_root) / "indexes" / args.repo_id
 
     store = ChunkStore(idx_dir / "chunks.db")
@@ -40,9 +46,9 @@ def main() -> None:
     lexical.save(idx_dir / "lexical.pkl")
     print(f"        saved -> {idx_dir}/lexical.pkl")
 
-    print("  [2/2] Embedding index ...")
+    print(f"  [2/2] Embedding index ({embedding_model}) ...")
     embedding = EmbeddingIndex(
-        model_id=cfg.indexing.embedding.model_id,
+        model_id=embedding_model,
     )
     embedding.build(
         store,

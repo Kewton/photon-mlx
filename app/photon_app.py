@@ -366,6 +366,20 @@ def page_index():
         help="インデックスの識別子。英数字とアンダースコアのみ",
     )
 
+    embedding_models = {
+        "all-MiniLM-L6-v2 (軽量・英語向け)": "sentence-transformers/all-MiniLM-L6-v2",
+        "multilingual-e5-small (多言語対応)": "intfloat/multilingual-e5-small",
+        "multilingual-e5-base (多言語・高精度)": "intfloat/multilingual-e5-base",
+        "all-MiniLM-L12-v2 (英語・高精度)": "sentence-transformers/all-MiniLM-L12-v2",
+    }
+    embedding_label = st.selectbox(
+        "Embedding モデル",
+        options=list(embedding_models.keys()),
+        index=1,  # multilingual-e5-small をデフォルト
+        help="ベクトル検索に使う embedding モデル。日本語を含む場合は multilingual 推奨",
+    )
+    embedding_model_id = embedding_models[embedding_label]
+
     if st.button("作成開始", type="primary", disabled=not (repo_dir and repo_id)):
         if not Path(repo_dir).is_dir():
             st.error(f"ディレクトリが見つかりません: {repo_dir}")
@@ -379,8 +393,8 @@ def page_index():
                 f"REPO_COMMIT=$(git -C {repo_dir} rev-parse HEAD) && "
                 f'echo "Phase 1: Ingest (commit=$REPO_COMMIT)" && '
                 f"python -m scripts.ingest_repo --repo {repo_dir} --repo-id {repo_id} --commit $REPO_COMMIT --config configs/baseline.yaml && "
-                f"echo 'Phase 2: BM25 + Embedding' && "
-                f"python -m scripts.build_indexes --repo-id {repo_id} --commit $REPO_COMMIT --config configs/baseline.yaml && "
+                f"echo 'Phase 2: BM25 + Embedding ({embedding_model_id})' && "
+                f"python -m scripts.build_indexes --repo-id {repo_id} --commit $REPO_COMMIT --embedding-model {embedding_model_id} --config configs/baseline.yaml && "
                 f"echo 'Phase 3: Symbol Graph' && "
                 f"python -m scripts.build_symbol_graph --repo-id {repo_id} --commit $REPO_COMMIT --config configs/baseline.yaml && "
                 f"echo 'DONE'"
