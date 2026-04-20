@@ -120,7 +120,9 @@ class TestCheckpoint:
         mx.random.seed(42)
         cfg = _tiny_cfg()
         model = PhotonModel(cfg)
-        state = TrainState(step=100, best_val_loss=2.5)
+        state = TrainState(
+            step=100, best_val_loss=2.5, best_step=50, patience_counter=2
+        )
 
         ckpt_dir = tmp_path / "ckpt"
         save_checkpoint(model, state, ckpt_dir)
@@ -134,6 +136,31 @@ class TestCheckpoint:
         state2 = load_checkpoint(model2, ckpt_dir)
         assert state2.step == 100
         assert state2.best_val_loss == 2.5
+        assert state2.best_step == 50
+        assert state2.patience_counter == 2
+
+    def test_load_checkpoint_ignores_unknown_state_keys(self, tmp_path: Path) -> None:
+        """load_checkpoint should drop unknown keys from state.json (forward compat)."""
+        import json as _json
+
+        mx.random.seed(42)
+        cfg = _tiny_cfg()
+        model = PhotonModel(cfg)
+        state = TrainState(step=42, best_val_loss=1.2)
+
+        ckpt_dir = tmp_path / "ckpt"
+        save_checkpoint(model, state, ckpt_dir)
+
+        # Inject an unknown key (simulating a future schema extension)
+        state_path = ckpt_dir / "state.json"
+        data = _json.loads(state_path.read_text(encoding="utf-8"))
+        data["future_unknown_key"] = "ignored"
+        state_path.write_text(_json.dumps(data), encoding="utf-8")
+
+        model2 = PhotonModel(cfg)
+        state2 = load_checkpoint(model2, ckpt_dir)
+        assert state2.step == 42
+        assert state2.best_val_loss == 1.2
 
 
 # ---------------------------------------------------------------
@@ -271,7 +298,13 @@ def _write_dummy_corpus(path: Path, n_docs: int = 10, seq_len: int = 32) -> None
 
 
 def _tiny_train_cfg(tmp_path: Path, **overrides) -> PhotonConfig:
-    """Create a tiny config with TrainingConfig for testing train()."""
+    """Create a tiny config with TrainingConfig for testing train().
+
+    Note: this helper does not set ``early_stopping``; the default
+    ``EarlyStoppingConfig()`` (enabled=False) is inherited via
+    ``TrainingConfig.early_stopping``'s default_factory so existing tests
+    keep their pre-Issue#60 behaviour (runs full max_steps).
+    """
     train_path = tmp_path / "train.jsonl"
     val_path = tmp_path / "val.jsonl"
     _write_dummy_corpus(train_path, n_docs=10, seq_len=32)
@@ -321,6 +354,8 @@ class TestTrainFunction:
         train(cfg, checkpoint_dir=tmp_path / "ckpt", log_dir=tmp_path / "logs")
         assert (tmp_path / "ckpt" / "step_000005").exists()
         assert (tmp_path / "ckpt" / "final").exists()
+        # Early stopping is disabled by default, so best/ should NOT exist.
+        assert not (tmp_path / "ckpt" / "best").exists()
 
     def test_train_gradient_accumulation(self, tmp_path: Path) -> None:
         """train() with gradient_accumulation_steps > 1 should complete."""
@@ -383,3 +418,327 @@ class TestTrainFunction:
         state = train(cfg, checkpoint_dir=tmp_path / "ckpt", log_dir=tmp_path / "logs")
         assert len(state.train_losses) > 1
         assert state.train_losses[-1] < state.train_losses[0]
+
+
+# ---------------------------------------------------------------
+# Early stopping tests (Issue #60)
+# ---------------------------------------------------------------
+
+
+def _patch_evaluate_with_series(monkeypatch, losses: list[float]) -> None:
+    """Patch photon_mlx.trainer.evaluate to yield the given val_loss series."""
+    import photon_mlx.trainer as _trainer_mod
+
+    seq = iter(losses)
+
+    def fake_evaluate(model, val_batches, recursive_loss_weight=0.0):
+        try:
+            return next(seq)
+        except StopIteration:
+            # Keep returning the last value so patient tests don't crash.
+            return losses[-1]
+
+    monkeypatch.setattr(_trainer_mod, "evaluate", fake_evaluate)
+
+
+class TestEarlyStopping:
+    def test_early_stopping_disabled_runs_full_max_steps(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """enabled=false => loop runs for the full max_steps even if val_loss never improves."""
+        _patch_evaluate_with_series(monkeypatch, [2.0, 2.0, 2.0, 2.0, 2.0, 2.0])
+        cfg = _tiny_train_cfg(
+            tmp_path,
+            max_steps=5,
+            eval_every_steps=1,
+            log_every_steps=100,
+            save_every_steps=100,
+        )
+        # early_stopping defaults to enabled=False
+        state = train(cfg, checkpoint_dir=tmp_path / "ckpt", log_dir=tmp_path / "logs")
+        assert state.step == 5
+
+    def test_early_stopping_triggers_on_patience(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """After `patience` evals without improvement, training must stop early."""
+        from torch_ref.config import EarlyStoppingConfig
+
+        # val_losses: improve at step 1 (2.0 -> 1.5), then plateau.
+        # With patience=2, step 2 counter=1, step 3 counter=2 => stop after step 3.
+        _patch_evaluate_with_series(monkeypatch, [2.0, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5])
+        cfg = _tiny_train_cfg(
+            tmp_path,
+            max_steps=10,
+            eval_every_steps=1,
+            log_every_steps=100,
+            save_every_steps=100,
+        )
+        cfg.training.early_stopping = EarlyStoppingConfig(
+            enabled=True, patience=2, min_delta=0.0, restore_best=False
+        )
+        state = train(cfg, checkpoint_dir=tmp_path / "ckpt", log_dir=tmp_path / "logs")
+        # Must stop before reaching max_steps
+        assert state.step < 10
+        assert state.best_step == 2  # step where val_loss first improved to 1.5
+        assert state.patience_counter >= 2
+
+    def test_early_stopping_min_delta_ignores_tiny_improvement(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Improvements smaller than min_delta should not reset patience."""
+        from torch_ref.config import EarlyStoppingConfig
+
+        # Tiny improvements well under min_delta=0.01
+        _patch_evaluate_with_series(
+            monkeypatch, [2.0, 1.995, 1.990, 1.985, 1.980, 1.975]
+        )
+        cfg = _tiny_train_cfg(
+            tmp_path,
+            max_steps=10,
+            eval_every_steps=1,
+            log_every_steps=100,
+            save_every_steps=100,
+        )
+        cfg.training.early_stopping = EarlyStoppingConfig(
+            enabled=True, patience=2, min_delta=0.01, restore_best=False
+        )
+        state = train(cfg, checkpoint_dir=tmp_path / "ckpt", log_dir=tmp_path / "logs")
+        # patience should fire quickly since each improvement is < min_delta
+        assert state.step < 10
+
+    def test_early_stopping_saves_best_checkpoint(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """`best/` dir is created once an improvement happens."""
+        from torch_ref.config import EarlyStoppingConfig
+
+        _patch_evaluate_with_series(monkeypatch, [2.0, 1.5, 1.6, 1.7, 1.8])
+        cfg = _tiny_train_cfg(
+            tmp_path,
+            max_steps=5,
+            eval_every_steps=1,
+            log_every_steps=100,
+            save_every_steps=100,
+        )
+        cfg.training.early_stopping = EarlyStoppingConfig(
+            enabled=True, patience=5, min_delta=0.0, restore_best=False
+        )
+        train(cfg, checkpoint_dir=tmp_path / "ckpt", log_dir=tmp_path / "logs")
+        best_dir = tmp_path / "ckpt" / "best"
+        assert best_dir.exists()
+        assert (best_dir / "weights.npz").exists()
+        assert (best_dir / "state.json").exists()
+
+    def test_early_stopping_restore_best(self, tmp_path: Path, monkeypatch) -> None:
+        """restore_best=true => final/state.json.step == best_step."""
+        import json as _json
+        from torch_ref.config import EarlyStoppingConfig
+
+        _patch_evaluate_with_series(monkeypatch, [2.0, 1.0, 1.5, 1.5, 1.5, 1.5])
+        cfg = _tiny_train_cfg(
+            tmp_path,
+            max_steps=10,
+            eval_every_steps=1,
+            log_every_steps=100,
+            save_every_steps=100,
+        )
+        cfg.training.early_stopping = EarlyStoppingConfig(
+            enabled=True, patience=2, min_delta=0.0, restore_best=True
+        )
+        train(cfg, checkpoint_dir=tmp_path / "ckpt", log_dir=tmp_path / "logs")
+        final_state_path = tmp_path / "ckpt" / "final" / "state.json"
+        best_state_path = tmp_path / "ckpt" / "best" / "state.json"
+        assert final_state_path.exists()
+        final_data = _json.loads(final_state_path.read_text(encoding="utf-8"))
+        best_data = _json.loads(best_state_path.read_text(encoding="utf-8"))
+        # final/ should match best/ on the critical fields
+        assert final_data["step"] == best_data["step"]
+        assert final_data["best_step"] == best_data["best_step"]
+
+    def test_early_stopping_no_restore_best(self, tmp_path: Path, monkeypatch) -> None:
+        """restore_best=false => final/ reflects stop-time step, not best_step."""
+        import json as _json
+        from torch_ref.config import EarlyStoppingConfig
+
+        _patch_evaluate_with_series(monkeypatch, [2.0, 1.0, 1.5, 1.5, 1.5, 1.5])
+        cfg = _tiny_train_cfg(
+            tmp_path,
+            max_steps=10,
+            eval_every_steps=1,
+            log_every_steps=100,
+            save_every_steps=100,
+        )
+        cfg.training.early_stopping = EarlyStoppingConfig(
+            enabled=True, patience=2, min_delta=0.0, restore_best=False
+        )
+        state = train(cfg, checkpoint_dir=tmp_path / "ckpt", log_dir=tmp_path / "logs")
+        final_state_path = tmp_path / "ckpt" / "final" / "state.json"
+        assert final_state_path.exists()
+        final_data = _json.loads(final_state_path.read_text(encoding="utf-8"))
+        # stop-time step is strictly after best_step (1)
+        assert final_data["step"] == state.step
+        assert final_data["step"] > state.best_step
+
+    def test_early_stopping_best_dir_missing_graceful_fallback(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """If best/ disappears mid-run, train() still exits and writes final/."""
+        import shutil as _shutil
+        from torch_ref.config import EarlyStoppingConfig
+
+        # Small loss series that triggers patience quickly.
+        _patch_evaluate_with_series(monkeypatch, [2.0, 1.0, 1.5, 1.5, 1.5, 1.5])
+        cfg = _tiny_train_cfg(
+            tmp_path,
+            max_steps=10,
+            eval_every_steps=1,
+            log_every_steps=100,
+            save_every_steps=100,
+        )
+        cfg.training.early_stopping = EarlyStoppingConfig(
+            enabled=True, patience=2, min_delta=0.0, restore_best=True
+        )
+
+        # Monkeypatch load_checkpoint to fail (simulating corrupt/missing best/)
+        import photon_mlx.trainer as _trainer_mod
+
+        original_load = _trainer_mod.load_checkpoint
+
+        def raising_load(model, path):
+            # Remove best/ before calling original to simulate race.
+            p = Path(path)
+            if p.name == "best" and p.exists():
+                _shutil.rmtree(p)
+                raise FileNotFoundError(f"best dir gone: {p}")
+            return original_load(model, path)
+
+        monkeypatch.setattr(_trainer_mod, "load_checkpoint", raising_load)
+
+        train(cfg, checkpoint_dir=tmp_path / "ckpt", log_dir=tmp_path / "logs")
+        # final/ must still be present even after the fake failure.
+        assert (tmp_path / "ckpt" / "final" / "weights.npz").exists()
+        assert (tmp_path / "ckpt" / "final" / "state.json").exists()
+
+    def test_early_stopping_best_state_json_malformed_graceful_fallback(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """If best/state.json is JSON-parsable but not a dict (e.g. "oops"),
+        train() should still finish and write final/ with stop-time weights,
+        rather than crashing on ValueError from load_checkpoint.
+        """
+        from torch_ref.config import EarlyStoppingConfig
+
+        _patch_evaluate_with_series(monkeypatch, [2.0, 1.0, 1.5, 1.5, 1.5, 1.5])
+        cfg = _tiny_train_cfg(
+            tmp_path,
+            max_steps=10,
+            eval_every_steps=1,
+            log_every_steps=100,
+            save_every_steps=100,
+        )
+        cfg.training.early_stopping = EarlyStoppingConfig(
+            enabled=True, patience=2, min_delta=0.0, restore_best=True
+        )
+
+        import photon_mlx.trainer as _trainer_mod
+
+        original_load = _trainer_mod.load_checkpoint
+
+        def corrupt_then_load(model, path):
+            p = Path(path)
+            # Let save_checkpoint happen as usual, but right before the
+            # end-of-train restore_best load, replace state.json with a
+            # malformed-but-parsable payload ("oops" decodes to a str).
+            if p.name == "best" and (p / "state.json").exists():
+                (p / "state.json").write_text('"oops"', encoding="utf-8")
+            return original_load(model, p)
+
+        monkeypatch.setattr(_trainer_mod, "load_checkpoint", corrupt_then_load)
+
+        train(cfg, checkpoint_dir=tmp_path / "ckpt", log_dir=tmp_path / "logs")
+        # final/ must still be present with stop-time weights, even though
+        # load_checkpoint(best/) raised ValueError under the hood.
+        assert (tmp_path / "ckpt" / "final" / "weights.npz").exists()
+        assert (tmp_path / "ckpt" / "final" / "state.json").exists()
+
+    def test_train_log_jsonl_contains_early_stop_fields(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """eval entries in train_log.jsonl must carry early-stop fields."""
+        import json as _json
+        from torch_ref.config import EarlyStoppingConfig
+
+        _patch_evaluate_with_series(monkeypatch, [2.0, 1.0, 1.0, 1.0, 1.0])
+        cfg = _tiny_train_cfg(
+            tmp_path,
+            max_steps=5,
+            eval_every_steps=1,
+            log_every_steps=100,
+            save_every_steps=100,
+        )
+        cfg.training.early_stopping = EarlyStoppingConfig(
+            enabled=True, patience=2, min_delta=0.0, restore_best=False
+        )
+        train(cfg, checkpoint_dir=tmp_path / "ckpt", log_dir=tmp_path / "logs")
+        log_path = tmp_path / "logs" / "train_log.jsonl"
+        assert log_path.exists()
+        eval_entries = [
+            _json.loads(line)
+            for line in log_path.read_text(encoding="utf-8").strip().split("\n")
+            if "val_loss" in _json.loads(line)
+        ]
+        assert eval_entries, "No eval entries found"
+        for entry in eval_entries:
+            assert "best_step" in entry
+            assert "best_val_loss" in entry
+            assert "patience_counter" in entry
+            assert "early_stopped" in entry
+
+    def test_train_log_has_no_eval_only_fields(self, tmp_path: Path) -> None:
+        """train (log_every_steps) entries must not carry eval-only fields."""
+        import json as _json
+
+        cfg = _tiny_train_cfg(
+            tmp_path,
+            max_steps=5,
+            eval_every_steps=100,  # disable eval
+            log_every_steps=1,
+            save_every_steps=100,
+        )
+        train(cfg, checkpoint_dir=tmp_path / "ckpt", log_dir=tmp_path / "logs")
+        log_path = tmp_path / "logs" / "train_log.jsonl"
+        assert log_path.exists()
+        for line in log_path.read_text(encoding="utf-8").strip().split("\n"):
+            entry = _json.loads(line)
+            # No eval entry should be here (val_loss never written)
+            assert "val_loss" not in entry
+            assert "best_step" not in entry
+            assert "best_val_loss" not in entry
+            assert "patience_counter" not in entry
+            assert "early_stopped" not in entry
+
+    def test_eval_log_always_has_val_loss(self, tmp_path: Path, monkeypatch) -> None:
+        """Every eval entry must include val_loss (schema invariant)."""
+        import json as _json
+
+        _patch_evaluate_with_series(monkeypatch, [2.0, 1.5, 1.0, 0.8, 0.6])
+        cfg = _tiny_train_cfg(
+            tmp_path,
+            max_steps=5,
+            eval_every_steps=1,
+            log_every_steps=100,
+            save_every_steps=100,
+        )
+        train(cfg, checkpoint_dir=tmp_path / "ckpt", log_dir=tmp_path / "logs")
+        log_path = tmp_path / "logs" / "train_log.jsonl"
+        assert log_path.exists()
+        lines = log_path.read_text(encoding="utf-8").strip().split("\n")
+        # Find entries that look like eval (have best/best_step/etc) and confirm val_loss
+        found_eval = False
+        for line in lines:
+            entry = _json.loads(line)
+            if "best" in entry or "best_step" in entry or "patience_counter" in entry:
+                assert "val_loss" in entry
+                found_eval = True
+        assert found_eval

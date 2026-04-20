@@ -156,9 +156,16 @@ python scripts/train_photon.py --config configs/my_project_photon.yaml
 
 所要時間: 500 steps で約 1 時間、1000 steps で約 2 時間 (M3 Ultra)。
 
-学習中の val_loss を確認:
+**Early Stopping (Issue #60)**: `training.early_stopping.enabled: true` を設定すると、`patience` 回続けて `val_loss` が改善しない場合に学習を自動停止し、`restore_best: true` なら `final/` に最良チェックポイントを復元します。
+
+学習中の val_loss を確認 (手動 CLI 実行時のデフォルト):
 ```bash
 tail -f logs/train_log.jsonl
+```
+
+Streamlit アプリから起動した場合は run 別の log ディレクトリに分離されます:
+```bash
+tail -f logs/<job_id>/train_log.jsonl
 ```
 
 ---
@@ -264,7 +271,20 @@ configs/
 └── my_project_photon.yaml   # PHOTON 用
 │
 checkpoints/                 # PHOTON 学習済みモデル
-└── final/
+├── best/                    # Early Stopping 有効時に最良 val_loss の重み
+│   ├── weights.npz
+│   └── state.json
+└── final/                   # 学習終了時点の重み (restore_best=true なら best/ と同内容)
     ├── weights.npz
     └── state.json
+```
+
+Streamlit アプリから起動した場合は run 単位で名前空間が分離されます:
+
+```
+checkpoints/<repo_id>/<job_id>/
+├── best/
+├── final/
+└── step_XXXXXX/
+logs/<job_id>/train_log.jsonl
 ```

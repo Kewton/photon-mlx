@@ -172,6 +172,11 @@ training:
   save_every_steps: 500
   log_every_steps: 20
 
+  # Early stopping (Issue #60): explicit opt-out for this reference-only
+  # config (training.enabled is false; no real run is launched from it).
+  early_stopping:
+    enabled: false
+
 inference:
   hierarchical_prefill: true
   recgen_enabled: true

@@ -196,6 +196,11 @@ class TestTrainingConfig:
         assert tc.train_corpus == ""
         assert tc.val_corpus == ""
         assert tc.context_length == 2048
+        # Early stopping defaults (opt-in; Issue #60)
+        assert tc.early_stopping.enabled is False
+        assert tc.early_stopping.patience == 3
+        assert tc.early_stopping.min_delta == 0.0
+        assert tc.early_stopping.restore_best is True
 
     def test_photon_config_backward_compat(self) -> None:
         """PhotonConfig without training should still work (Optional[None])."""
@@ -293,3 +298,71 @@ class TestTrainingConfig:
 
         cfg = load_photon_config(str(p))
         assert cfg.training is None
+
+    def test_load_config_with_early_stopping(self, tmp_path) -> None:
+        """YAML nested early_stopping block should be parsed into EarlyStoppingConfig."""
+        import yaml
+        from torch_ref.config import load_photon_config
+
+        cfg_dict = {
+            "model": {
+                "hidden_size": 64,
+                "intermediate_size": 128,
+                "num_attention_heads": 4,
+                "num_key_value_heads": 4,
+                "head_dim": 16,
+                "base_embed_dim": 16,
+            },
+            "hierarchy": {"levels": 2},
+            "tokenizer": {"vocab_size": 256},
+            "training": {
+                "max_steps": 100,
+                "early_stopping": {
+                    "enabled": True,
+                    "patience": 5,
+                    "min_delta": 0.01,
+                    "restore_best": False,
+                },
+            },
+        }
+        p = tmp_path / "cfg.yaml"
+        p.write_text(yaml.dump(cfg_dict), encoding="utf-8")
+
+        cfg = load_photon_config(str(p))
+        assert cfg.training is not None
+        assert cfg.training.early_stopping.enabled is True
+        assert cfg.training.early_stopping.patience == 5
+        assert cfg.training.early_stopping.min_delta == 0.01
+        assert cfg.training.early_stopping.restore_best is False
+
+    def test_load_photon_config_early_stopping_unknown_key_raises(
+        self, tmp_path
+    ) -> None:
+        """Unknown key under training.early_stopping should raise TypeError (typo detection)."""
+        import yaml
+        from torch_ref.config import load_photon_config
+
+        cfg_dict = {
+            "model": {
+                "hidden_size": 64,
+                "intermediate_size": 128,
+                "num_attention_heads": 4,
+                "num_key_value_heads": 4,
+                "head_dim": 16,
+                "base_embed_dim": 16,
+            },
+            "hierarchy": {"levels": 2},
+            "tokenizer": {"vocab_size": 256},
+            "training": {
+                "max_steps": 100,
+                "early_stopping": {
+                    "enabled": True,
+                    "patiance": 5,  # typo
+                },
+            },
+        }
+        p = tmp_path / "cfg.yaml"
+        p.write_text(yaml.dump(cfg_dict), encoding="utf-8")
+
+        with pytest.raises(TypeError):
+            load_photon_config(str(p))
