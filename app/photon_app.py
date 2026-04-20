@@ -51,6 +51,7 @@ class IndexJob:
     status: str = "pending"
     log_file: str = ""
     phase: str = ""  # ingest | bm25_embed | symbol_graph | completed
+    embedding_model: str = ""
 
 
 @dataclass
@@ -417,6 +418,7 @@ def page_index():
                 status="running",
                 log_file=log_file,
                 phase="ingest",
+                embedding_model=embedding_model_id,
             )
             state.index_jobs[job_id] = job
             save()
@@ -468,6 +470,9 @@ def page_index():
             col1.metric("ステータス", job.status)
             col2.metric("フェーズ", job.phase)
             col3.metric("開始時刻", job.started_at[:19] if job.started_at else "—")
+
+            if job.embedding_model:
+                st.text(f"Embedding モデル: {job.embedding_model}")
 
             idx_dir = PROJECT_ROOT / "data" / "indexes" / job.repo_id
             if idx_dir.exists():
