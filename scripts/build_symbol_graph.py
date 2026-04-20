@@ -22,7 +22,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Build the symbol graph")
     parser.add_argument("--repo-id", required=True)
     parser.add_argument("--config", default="configs/baseline.yaml")
-    parser.add_argument("--commit", default=None, help="Override repo_commit from config")
+    parser.add_argument(
+        "--commit", default=None, help="Override repo_commit from config"
+    )
     args = parser.parse_args()
 
     cfg = load_config(args.config)

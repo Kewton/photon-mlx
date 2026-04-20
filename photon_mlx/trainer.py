@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
+import shutil
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
@@ -19,13 +22,22 @@ from .model import PhotonModel
 import sys
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from torch_ref.config import PhotonConfig, TrainingConfig, load_photon_config  # noqa: E402
+from torch_ref.config import (  # noqa: E402
+    EarlyStoppingConfig,
+    PhotonConfig,
+    TrainingConfig,
+    load_photon_config,
+)
+
+_logger = logging.getLogger(__name__)
 
 
 @dataclass
 class TrainState:
     step: int = 0
     best_val_loss: float = float("inf")
+    best_step: int = 0
+    patience_counter: int = 0
     train_losses: list[float] = field(default_factory=list)
     val_losses: list[float] = field(default_factory=list)
 
@@ -40,18 +52,24 @@ def save_checkpoint(
     # Save model weights
     weights = dict(model.parameters())
     mx.savez(str(path / "weights.npz"), **_flatten(weights))
-    # Save state
-    (path / "state.json").write_text(
+    # Save state atomically: tmp file + os.replace so a crash mid-write
+    # doesn't leave a partial state.json behind.
+    state_path = path / "state.json"
+    tmp_path = path / "state.json.tmp"
+    tmp_path.write_text(
         json.dumps(
             {
                 "step": state.step,
                 "best_val_loss": state.best_val_loss,
+                "best_step": state.best_step,
+                "patience_counter": state.patience_counter,
                 "train_losses": state.train_losses[-100:],
                 "val_losses": state.val_losses[-100:],
             }
         ),
         encoding="utf-8",
     )
+    os.replace(tmp_path, state_path)
 
 
 def load_checkpoint(
@@ -62,7 +80,49 @@ def load_checkpoint(
     weights = mx.load(str(path / "weights.npz"))
     model.load_weights(list(weights.items()))
     state_data = json.loads((path / "state.json").read_text(encoding="utf-8"))
-    return TrainState(**state_data)
+    if not isinstance(state_data, dict):
+        raise ValueError(
+            f"state.json must decode to a dict, got {type(state_data).__name__}"
+        )
+    # Filter to known TrainState fields (forward compat: future schema
+    # additions or hand-edited keys won't crash an older trainer).
+    known = {f.name for f in fields(TrainState)}
+    unknown = set(state_data) - known
+    if unknown:
+        _logger.warning("Ignoring unknown state.json keys: %s", sorted(unknown))
+    filtered = {k: v for k, v in state_data.items() if k in known}
+    return TrainState(**filtered)
+
+
+def _save_named_checkpoint(
+    model: PhotonModel,
+    state: TrainState,
+    checkpoint_dir: Path,
+    name: str,
+    *,
+    verbose: bool = True,
+) -> Path:
+    """Save a checkpoint under checkpoint_dir/name.
+
+    For name == "best", write to best.tmp/ first and then os.replace the
+    directory, so an interrupted save can never leave a partially-written
+    best/ around. Other names are written in-place (consistent with
+    historical behavior for step_XXXXXX/ and final/).
+    """
+    target = Path(checkpoint_dir) / name
+    if name == "best":
+        tmp = Path(checkpoint_dir) / "best.tmp"
+        if tmp.exists():
+            shutil.rmtree(tmp)
+        save_checkpoint(model, state, tmp)
+        if target.exists():
+            shutil.rmtree(target)
+        os.replace(tmp, target)
+    else:
+        save_checkpoint(model, state, target)
+    if verbose:
+        print(f"  [ckpt] saved -> {target}")
+    return target
 
 
 def load_model(
@@ -138,6 +198,58 @@ def evaluate(
     return total_loss / max(len(val_batches), 1)
 
 
+def _update_early_stopping(
+    state: TrainState,
+    val_loss: float,
+    es_cfg: EarlyStoppingConfig,
+) -> tuple[bool, bool]:
+    """Update state for the given val_loss and return (improved, should_stop).
+
+    Pure helper – no I/O – so unit tests can drive patience logic directly.
+    """
+    improved = val_loss < state.best_val_loss - es_cfg.min_delta
+    if improved:
+        state.best_val_loss = val_loss
+        state.best_step = state.step
+        state.patience_counter = 0
+    else:
+        state.patience_counter += 1
+    should_stop = bool(es_cfg.enabled) and state.patience_counter >= es_cfg.patience
+    return improved, should_stop
+
+
+def _write_train_log(log_path: Path, entry: dict) -> None:
+    """Append a train-only log record.
+
+    Invariant: train entries never contain eval-only keys (val_loss,
+    best, best_step, best_val_loss, patience_counter, early_stopped,
+    early_stop_reason).
+    """
+    eval_only = {
+        "val_loss",
+        "best",
+        "best_step",
+        "best_val_loss",
+        "patience_counter",
+        "early_stopped",
+        "early_stop_reason",
+    }
+    clean = {k: v for k, v in entry.items() if k not in eval_only}
+    with log_path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(clean, ensure_ascii=False) + "\n")
+
+
+def _write_eval_log(log_path: Path, entry: dict) -> None:
+    """Append an eval-only log record.
+
+    Invariant: eval entries must always include val_loss.
+    """
+    if "val_loss" not in entry:
+        raise ValueError("eval log entry must include val_loss")
+    with log_path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+
 def train(
     cfg: PhotonConfig,
     checkpoint_dir: str | Path,
@@ -149,6 +261,7 @@ def train(
 
     # Training config (use defaults if not provided)
     t_cfg = cfg.training if cfg.training is not None else TrainingConfig()
+    es_cfg = t_cfg.early_stopping
 
     # Build model
     model = PhotonModel(cfg)
@@ -221,6 +334,7 @@ def train(
     batch_idx = 0
     accumulated_grads = None
     micro_step = 0
+    early_stopped = False
 
     while state.step < max_steps:
         batch = train_batches[batch_idx % len(train_batches)]
@@ -274,32 +388,44 @@ def train(
                 "elapsed_s": round(elapsed, 1),
             }
             log_entry.update(breakdown)
-            with log_path.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(log_entry) + "\n")
+            _write_train_log(log_path, log_entry)
 
         # Eval
         if state.step % eval_every == 0:
             val_loss = evaluate(model, val_batches, rec_w)
             state.val_losses.append(val_loss)
-            improved = val_loss < state.best_val_loss
-            if improved:
-                state.best_val_loss = val_loss
+            improved, should_stop = _update_early_stopping(state, val_loss, es_cfg)
             print(
                 f"  [eval] step {state.step}  val_loss {val_loss:.4f}"
                 f"  best {state.best_val_loss:.4f}"
                 f"{'  *' if improved else ''}"
             )
-            with log_path.open("a", encoding="utf-8") as f:
-                f.write(
-                    json.dumps(
-                        {
-                            "step": state.step,
-                            "val_loss": val_loss,
-                            "best": improved,
-                        }
-                    )
-                    + "\n"
+            eval_entry = {
+                "step": state.step,
+                "val_loss": val_loss,
+                "best": improved,
+                "best_step": state.best_step,
+                "best_val_loss": state.best_val_loss,
+                "patience_counter": state.patience_counter,
+                "early_stopped": should_stop,
+            }
+            if should_stop:
+                eval_entry["early_stop_reason"] = "patience_exhausted"
+            _write_eval_log(log_path, eval_entry)
+
+            # Save best/ on improvement (only when early stopping is enabled;
+            # keeps disabled path 100% backward compatible with existing tests
+            # and on-disk layouts).
+            if es_cfg.enabled and improved:
+                _save_named_checkpoint(model, state, checkpoint_dir, "best")
+
+            if should_stop:
+                early_stopped = True
+                print(
+                    f"  [early stop] patience exhausted at step {state.step} "
+                    f"(best_step={state.best_step}, best_val_loss={state.best_val_loss:.4f})"
                 )
+                break
 
         # Checkpoint
         if state.step % save_every == 0:
@@ -307,9 +433,41 @@ def train(
             save_checkpoint(model, state, ckpt_path)
             print(f"  [ckpt] saved -> {ckpt_path}")
 
-    # Final checkpoint
+    # Final checkpoint: when early stopping is enabled with restore_best,
+    # reload best/ into the live model so final/ == best. Otherwise write
+    # the stop-time weights.
+    best_dir = checkpoint_dir / "best"
+    if es_cfg.enabled and es_cfg.restore_best and best_dir.exists():
+        try:
+            restored = load_checkpoint(model, best_dir)
+            state = restored
+            print(f"  [restore_best] loaded best/ at step {state.best_step}")
+        except (
+            FileNotFoundError,
+            json.JSONDecodeError,
+            OSError,
+            ValueError,
+            TypeError,
+        ) as exc:
+            _logger.warning("best/ restore failed: %s; keeping stop-time weights", exc)
+            # Emit a trailing eval-style entry so downstream log readers can
+            # surface the fallback reason.
+            _write_eval_log(
+                log_path,
+                {
+                    "step": state.step,
+                    "val_loss": state.best_val_loss,
+                    "best": False,
+                    "best_step": state.best_step,
+                    "best_val_loss": state.best_val_loss,
+                    "patience_counter": state.patience_counter,
+                    "early_stopped": early_stopped,
+                    "early_stop_reason": "best_restore_failed",
+                },
+            )
     save_checkpoint(model, state, checkpoint_dir / "final")
-    print(f"\nTraining complete. Final loss: {state.train_losses[-1]:.4f}")
+    final_loss = state.train_losses[-1] if state.train_losses else float("nan")
+    print(f"\nTraining complete. Final loss: {final_loss:.4f}")
     return state
 
 

@@ -194,6 +194,13 @@ training:
   save_every_steps: 100
   log_every_steps: 20
 
+  # Early stopping (Issue #60): enabled for production small config.
+  early_stopping:
+    enabled: true
+    patience: 3
+    min_delta: 0.001
+    restore_best: true
+
 inference:
   hierarchical_prefill: true
   recgen_enabled: true

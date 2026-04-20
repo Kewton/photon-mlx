@@ -7,11 +7,14 @@ Launch:
 from __future__ import annotations
 
 import json
+import logging
 import os
+import re
 import subprocess
+import sys
 import threading
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -23,6 +26,120 @@ STATE_FILE = PROJECT_ROOT / ".cache" / "photon_app_state.json"
 
 SYNC_INTERVAL_SECONDS = 30
 _LOG_TAIL_BYTES = 65536
+
+# Allowlist for repo_id / job_id path segments. Reject `/`, `\`, `..`,
+# spaces, and any other metacharacter so path composition stays safe.
+_SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+_logger = logging.getLogger(__name__)
+
+
+def _safe_id(value: str, *, label: str) -> str:
+    if not isinstance(value, str) or not _SAFE_ID_RE.match(value):
+        raise ValueError(f"Invalid {label}: {value!r}. Only [A-Za-z0-9_-]+ is allowed.")
+    return value
+
+
+def _filter_known_fields(dc_cls, raw: dict) -> dict:
+    """Return only keys that match dataclass fields of ``dc_cls``."""
+    known = {f.name for f in fields(dc_cls)}
+    unknown = set(raw) - known
+    if unknown:
+        _logger.warning(
+            "Ignoring unknown keys for %s: %s",
+            dc_cls.__name__,
+            sorted(unknown),
+        )
+    return {k: v for k, v in raw.items() if k in known}
+
+
+def _atomic_write_text(path: Path, data: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(data, encoding="utf-8")
+    os.replace(tmp, path)
+
+
+# Driver executed in a child ``python -c`` to chain the 4 index-build
+# phases with argv-list subprocess.run calls (shell=False). No user input
+# is interpolated into this string — every user value arrives via sys.argv.
+_INDEX_PIPELINE_DRIVER = """
+import subprocess, sys
+repo_dir, repo_id, embed_model, config_path = sys.argv[1:5]
+
+def run(argv, phase):
+    print(f'>>> {phase}: ' + ' '.join(argv), flush=True)
+    subprocess.run(argv, check=True)
+
+# Phase 0: resolve commit SHA
+out = subprocess.run(
+    ['git', '-C', repo_dir, 'rev-parse', 'HEAD'],
+    check=True, capture_output=True, text=True,
+)
+commit = out.stdout.strip()
+print(f'Phase 1: Ingest (commit={commit})', flush=True)
+run(
+    [
+        sys.executable, '-m', 'scripts.ingest_repo',
+        '--repo', repo_dir, '--repo-id', repo_id,
+        '--commit', commit, '--config', config_path,
+    ],
+    'ingest',
+)
+print(f'Phase 2: BM25 + Embedding ({embed_model})', flush=True)
+run(
+    [
+        sys.executable, '-m', 'scripts.build_indexes',
+        '--repo-id', repo_id, '--commit', commit,
+        '--embedding-model', embed_model, '--config', config_path,
+    ],
+    'build_indexes',
+)
+print('Phase 3: Symbol Graph', flush=True)
+run(
+    [
+        sys.executable, '-m', 'scripts.build_symbol_graph',
+        '--repo-id', repo_id, '--commit', commit, '--config', config_path,
+    ],
+    'build_symbol_graph',
+)
+print('DONE', flush=True)
+"""
+
+
+def _discover_checkpoints(ckpt_dir: Path) -> list[tuple[int, str, str]]:
+    """Discover checkpoint directories under ``ckpt_dir``.
+
+    Returns a list of ``(priority, path, label)`` tuples, sorted so that
+    ``best/`` entries come first, then ``final/``, then ``step_XXXXXX/``.
+    ``.tmp`` directories (e.g. the transient ``best.tmp/`` created during
+    atomic checkpoint replacement) are excluded so the UI never surfaces a
+    path that may vanish moments later.
+    """
+    entries: list[tuple[int, str, str]] = []
+    if not ckpt_dir.exists():
+        return entries
+    for weights in ckpt_dir.rglob("weights.npz"):
+        ck_path = weights.parent
+        name = ck_path.name
+        # Skip atomic-write scratch directories such as best.tmp.
+        if name.endswith(".tmp"):
+            continue
+        if name == "best":
+            priority = 0
+            label = f"[best] {ck_path}"
+        elif name == "final":
+            priority = 1
+            label = f"[final] {ck_path}"
+        elif name.startswith("step_"):
+            priority = 2
+            label = f"[{name}] {ck_path}"
+        else:
+            priority = 3
+            label = str(ck_path)
+        entries.append((priority, str(ck_path), label))
+    entries.sort(key=lambda t: (t[0], -len(t[1]), t[1]))
+    return entries
 
 
 # ================================================================
@@ -42,6 +159,10 @@ class TrainingJob:
     last_step: int = 0
     max_steps: int = 0
     val_loss: float = 0.0
+    # Issue #60: per-job progress log (`<log_dir>/train_log.jsonl`).
+    # Empty string means the job predates the run-namespaced layout; the
+    # UI will render "ログ未リンク" in that case.
+    progress_log_file: str = ""
 
 
 @dataclass
@@ -89,27 +210,28 @@ def _load_state() -> AppState:
             data = json.loads(STATE_FILE.read_text())
             state = AppState()
             for k, v in data.get("training_jobs", {}).items():
-                state.training_jobs[k] = TrainingJob(**v)
+                state.training_jobs[k] = TrainingJob(
+                    **_filter_known_fields(TrainingJob, v)
+                )
             for k, v in data.get("index_jobs", {}).items():
-                state.index_jobs[k] = IndexJob(**v)
+                state.index_jobs[k] = IndexJob(**_filter_known_fields(IndexJob, v))
             for k, v in data.get("projects", {}).items():
-                state.projects[k] = Project(**v)
+                state.projects[k] = Project(**_filter_known_fields(Project, v))
             state.chat_histories = data.get("chat_histories", {})
             return state
-        except Exception:
-            pass
+        except Exception as exc:
+            _logger.warning("Failed to load app state: %s", exc)
     return AppState()
 
 
 def _save_state(state: AppState) -> None:
-    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     data = {
         "training_jobs": {k: asdict(v) for k, v in state.training_jobs.items()},
         "index_jobs": {k: asdict(v) for k, v in state.index_jobs.items()},
         "projects": {k: asdict(v) for k, v in state.projects.items()},
         "chat_histories": state.chat_histories,
     }
-    STATE_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2))
+    _atomic_write_text(STATE_FILE, json.dumps(data, ensure_ascii=False, indent=2))
 
 
 def get_state() -> AppState:
@@ -138,24 +260,53 @@ def _is_process_running(pid: int | None) -> bool:
 
 
 def _read_training_progress(log_file: str) -> dict[str, Any]:
-    """Read last step and val_loss from training log."""
-    result: dict[str, Any] = {"last_step": 0, "val_loss": 0.0, "max_steps": 0}
+    """Read latest progress from a per-job training log.
+
+    Returns a default result dict with ``last_step``, ``val_loss``,
+    ``max_steps`` and Issue #60 early-stopping fields.  If ``log_file``
+    is empty or missing, the default (all zeros / False) is returned so
+    the UI can render "ログ未リンク" without crashing.
+    """
+    result: dict[str, Any] = {
+        "last_step": 0,
+        "val_loss": 0.0,
+        "max_steps": 0,
+        "best_step": 0,
+        "best_val_loss": 0.0,
+        "patience_counter": 0,
+        "early_stopped": False,
+    }
+    if not log_file:
+        return result
     log_path = Path(log_file)
     if not log_path.exists():
         return result
     try:
         lines = log_path.read_text().strip().split("\n")
+        seen_eval = False
         for line in reversed(lines):
             try:
                 rec = json.loads(line)
-                if "step" in rec:
-                    result["last_step"] = max(result["last_step"], rec["step"])
-                if "val_loss" in rec:
-                    result["val_loss"] = rec["val_loss"]
             except json.JSONDecodeError:
                 continue
-    except Exception:
-        pass
+            if "step" in rec:
+                result["last_step"] = max(result["last_step"], rec["step"])
+            # eval entries: grab all known fields from the most recent one
+            if "val_loss" in rec and not seen_eval:
+                result["val_loss"] = rec.get("val_loss", result["val_loss"])
+                result["best_step"] = rec.get("best_step", result["best_step"])
+                result["best_val_loss"] = rec.get(
+                    "best_val_loss", result["best_val_loss"]
+                )
+                result["patience_counter"] = rec.get(
+                    "patience_counter", result["patience_counter"]
+                )
+                result["early_stopped"] = rec.get(
+                    "early_stopped", result["early_stopped"]
+                )
+                seen_eval = True
+    except Exception as exc:
+        _logger.warning("progress read failed (%s): %s", log_file, exc)
     return result
 
 
@@ -339,6 +490,20 @@ def page_training():
             repo_name = Path(repo_dir).name
             repo_id = repo_name.replace("-", "_").replace(" ", "_")
 
+            try:
+                repo_id = _safe_id(repo_id, label="repo_id")
+                job_id = _safe_id(job_id, label="job_id")
+            except ValueError as exc:
+                st.error(str(exc))
+                st.stop()
+
+            # Run-specific checkpoint/log directories (Issue #60).
+            run_ckpt_dir = PROJECT_ROOT / "checkpoints" / repo_id / job_id
+            run_log_dir = PROJECT_ROOT / "logs" / job_id
+            run_ckpt_dir.mkdir(parents=True, exist_ok=True)
+            run_log_dir.mkdir(parents=True, exist_ok=True)
+            progress_log_file = str(run_log_dir / "train_log.jsonl")
+
             # Generate config
             config_path = str(PROJECT_ROOT / "configs" / f"photon_{repo_id}.yaml")
             _generate_photon_config(
@@ -388,13 +553,27 @@ def page_training():
             ]
             subprocess.run(corpus_cmd, cwd=str(PROJECT_ROOT), capture_output=True)
 
-            # Step 2: Start training in background
+            # Step 2: Start training in background (argv list + shell=False).
             train_log = str(PROJECT_ROOT / "logs" / f"{job_id}.log")
-            train_cmd = f"python -u -m scripts.train_photon --config {config_path} > {train_log} 2>&1"
+            train_cmd = [
+                "python",
+                "-u",
+                "-m",
+                "scripts.train_photon",
+                "--config",
+                config_path,
+                "--checkpoint-dir",
+                str(run_ckpt_dir),
+                "--log-dir",
+                str(run_log_dir),
+            ]
+            train_log_fp = open(train_log, "w", encoding="utf-8")
             proc = subprocess.Popen(
                 train_cmd,
-                shell=True,
+                shell=False,
                 cwd=str(PROJECT_ROOT),
+                stdout=train_log_fp,
+                stderr=subprocess.STDOUT,
             )
 
             job = TrainingJob(
@@ -406,6 +585,7 @@ def page_training():
                 status="running",
                 log_file=train_log,
                 max_steps=max_steps,
+                progress_log_file=progress_log_file,
             )
             state.training_jobs[job_id] = job
             save()
@@ -419,8 +599,13 @@ def page_training():
         st.info("学習ジョブはありません")
         return
 
-    progress = _read_training_progress(str(PROJECT_ROOT / "logs" / "train_log.jsonl"))
     for job_id, job in sorted(state.training_jobs.items(), reverse=True):
+        # Prefer the per-job progress log (Issue #60). Legacy jobs without
+        # progress_log_file fall back to the global train_log.jsonl.
+        job_log = job.progress_log_file or str(
+            PROJECT_ROOT / "logs" / "train_log.jsonl"
+        )
+        progress = _read_training_progress(job_log)
         if _sync_training_job(job, progress):
             save()
 
@@ -445,6 +630,25 @@ def page_training():
 
             if job.val_loss > 0:
                 st.metric("最新 val_loss", f"{job.val_loss:.4f}")
+
+            # Early stopping status (Issue #60)
+            if progress.get("best_step", 0) > 0:
+                es_col1, es_col2, es_col3 = st.columns(3)
+                es_col1.metric("best_step", str(progress.get("best_step", 0)))
+                bvl = progress.get("best_val_loss", 0.0)
+                es_col2.metric(
+                    "best_val_loss",
+                    f"{bvl:.4f}" if bvl else "—",
+                )
+                es_col3.metric(
+                    "patience",
+                    str(progress.get("patience_counter", 0)),
+                )
+            if progress.get("early_stopped"):
+                st.warning("Early stopping が発動しました")
+
+            if not job.progress_log_file:
+                st.caption("ログ未リンク (旧ジョブのため run 別パスなし)")
 
             st.text(f"Config: {job.config_path}")
             st.text(f"リポジトリ: {job.repo_dir}")
@@ -476,9 +680,11 @@ def _generate_photon_config(
     cfg["training"]["train_corpus"] = "./data/processed/train_tiny.jsonl"
     cfg["training"]["val_corpus"] = "./data/processed/val_tiny.jsonl"
 
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w") as f:
-        yaml.dump(cfg, f, default_flow_style=False, allow_unicode=True)
+    # Atomic write: serialize to a string and hand off to the shared
+    # temp-file + os.replace helper so a crash mid-write cannot leave a
+    # partial YAML behind for scripts.train_photon to load.
+    payload = yaml.dump(cfg, default_flow_style=False, allow_unicode=True)
+    _atomic_write_text(Path(path), payload)
 
 
 # ================================================================
@@ -522,26 +728,49 @@ def page_index():
         if not Path(repo_dir).is_dir():
             st.error(f"ディレクトリが見つかりません: {repo_dir}")
         else:
-            job_id = f"idx_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-            log_file = str(PROJECT_ROOT / "logs" / f"{job_id}.log")
+            # Validate repo_id with allowlist before passing to argv.
+            try:
+                repo_id = _safe_id(repo_id, label="repo_id")
+            except ValueError as exc:
+                st.error(str(exc))
+                st.stop()
 
-            # Run all 3 steps in background
-            # Get actual commit SHA so build_indexes/symbol_graph use it
-            cmd = (
-                f"REPO_COMMIT=$(git -C {repo_dir} rev-parse HEAD) && "
-                f'echo "Phase 1: Ingest (commit=$REPO_COMMIT)" && '
-                f"python -m scripts.ingest_repo --repo {repo_dir} --repo-id {repo_id} --commit $REPO_COMMIT --config configs/baseline.yaml && "
-                f"echo 'Phase 2: BM25 + Embedding ({embedding_model_id})' && "
-                f"python -m scripts.build_indexes --repo-id {repo_id} --commit $REPO_COMMIT --embedding-model {embedding_model_id} --config configs/baseline.yaml && "
-                f"echo 'Phase 3: Symbol Graph' && "
-                f"python -m scripts.build_symbol_graph --repo-id {repo_id} --commit $REPO_COMMIT --config configs/baseline.yaml && "
-                f"echo 'DONE'"
-            )
+            job_id = f"idx_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            try:
+                job_id = _safe_id(job_id, label="job_id")
+            except ValueError as exc:
+                st.error(str(exc))
+                st.stop()
+
+            log_file = str(PROJECT_ROOT / "logs" / f"{job_id}.log")
+            Path(log_file).parent.mkdir(parents=True, exist_ok=True)
+
+            # Chain the 4 phases (git rev-parse, ingest, build_indexes,
+            # build_symbol_graph) in a Python driver that spawns each phase
+            # with ``subprocess.run([...], shell=False)``. We pass the driver
+            # to a background ``python -c`` so the Streamlit UI returns
+            # immediately while the pipeline runs in the background. All
+            # user-controlled values (repo_dir, repo_id, embedding_model_id,
+            # config_path) arrive as argv and are never interpolated into a
+            # shell string.
+            driver = _INDEX_PIPELINE_DRIVER
+            config_path = "configs/baseline.yaml"
+            cmd_argv = [
+                sys.executable,
+                "-u",
+                "-c",
+                driver,
+                repo_dir,
+                repo_id,
+                embedding_model_id,
+                config_path,
+            ]
+            log_fp = open(log_file, "w", encoding="utf-8")
             proc = subprocess.Popen(
-                cmd,
-                shell=True,
+                cmd_argv,
+                shell=False,
                 cwd=str(PROJECT_ROOT),
-                stdout=open(log_file, "w"),
+                stdout=log_fp,
                 stderr=subprocess.STDOUT,
             )
 
@@ -549,7 +778,7 @@ def page_index():
                 job_id=job_id,
                 repo_dir=repo_dir,
                 repo_id=repo_id,
-                config_path="configs/baseline.yaml",
+                config_path=config_path,
                 pid=proc.pid,
                 started_at=datetime.now().isoformat(),
                 status="running",
@@ -621,16 +850,19 @@ def page_projects():
         options=available_indexes if available_indexes else ["(なし — 先にDB作成)"],
     )
 
-    # Available checkpoints
+    # Available checkpoints: recursively discover any dir containing weights.npz
+    # (supports the new layout checkpoints/<repo>/<job>/{best,final,step_XXXXXX}).
+    # ``.tmp`` scratch dirs created during atomic replacement are excluded.
     ckpt_dir = PROJECT_ROOT / "checkpoints"
-    available_ckpts = ["(なし — baseline のみ)"]
-    if ckpt_dir.exists():
-        for d in sorted(ckpt_dir.iterdir()):
-            if d.is_dir() and (d / "weights.npz").exists():
-                available_ckpts.append(str(d))
+    none_label = "(なし — baseline のみ)"
+    ckpt_entries = _discover_checkpoints(ckpt_dir)
+    available_ckpts = [none_label] + [t[2] for t in ckpt_entries]
+    # Map display label back to path for selection.
+    label_to_path = {t[2]: t[1] for t in ckpt_entries}
 
-    checkpoint = st.selectbox("PHOTON モデル (checkpoint)", options=available_ckpts)
-    use_photon = checkpoint != "(なし — baseline のみ)"
+    selected_label = st.selectbox("PHOTON モデル (checkpoint)", options=available_ckpts)
+    checkpoint = label_to_path.get(selected_label, selected_label)
+    use_photon = selected_label != none_label
 
     # Config selection
     available_configs = sorted(
