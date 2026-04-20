@@ -977,3 +977,256 @@ class TestEvidencePruningTurn2:
         assert isinstance(result, QueryResult)
         assert result.drift_metrics is not None
         assert result.confidence is not None
+
+
+# ---------------------------------------------------------------------------
+# TDD Cycle 10: Safe RecGen fallback integration (Issue #57)
+# ---------------------------------------------------------------------------
+
+
+def _make_fallback_chunks_and_store(baseline_deps, n: int = 16):
+    """Populate the mock store with n chunks and return expanded_ids."""
+    from baseline_reporag.ingestion.chunker import Chunk
+
+    chunks = [
+        Chunk(
+            chunk_id=f"chunk_{i}",
+            repo_id="test-repo",
+            repo_commit="abc123",
+            rel_path=f"file{i}.py",
+            language="python",
+            start_line=1,
+            end_line=10,
+            content=f"def func_{i}(): pass",
+            symbols=[f"func_{i}"],
+            section_header="",
+            file_header="",
+        )
+        for i in range(n)
+    ]
+
+    def mock_get_many(ids):
+        by_id = {c.chunk_id: c for c in chunks}
+        return [by_id[cid] for cid in ids if cid in by_id]
+
+    baseline_deps["store"].get_many.side_effect = mock_get_many
+    return [f"chunk_{i}" for i in range(n)]
+
+
+def _configure_fallback_decision(photon_deps, *, should_fallback: bool, actions=None):
+    """Configure safe_recgen.evaluate to return a fallback decision."""
+    mock_decision = MagicMock()
+    mock_decision.should_fallback = should_fallback
+    mock_decision.actions = list(actions or [])
+    mock_decision.as_dict.return_value = {
+        "should_fallback": should_fallback,
+        "actions": list(actions or []),
+        "reasons": [],
+    }
+    photon_deps["safe_recgen"].evaluate.return_value = mock_decision
+
+
+class TestSafeRecGenFallbackIntegration:
+    """fallback_dict from safe_recgen must steer reranker / pruning / session state."""
+
+    def test_fallback_forces_reranker_on_follow_up(self):
+        """should_fallback=True must run reranker even on follow-up turns."""
+        cfg = _make_pruning_cfg()
+        pipeline, baseline_deps, photon_deps, mock_session, mock_results = (
+            _setup_pipeline_for_pruning(cfg, session_turns=1)
+        )
+
+        reranker = MagicMock()
+        reranker.rerank.return_value = mock_results
+        pipeline.baseline.reranker = reranker
+
+        expanded_ids = _make_fallback_chunks_and_store(baseline_deps)
+        _configure_fallback_decision(
+            photon_deps,
+            should_fallback=True,
+            actions=["re_retrieve", "strengthen_local_refresh"],
+        )
+
+        with (
+            patch(
+                "baseline_reporag.photon_pipeline.hybrid_search",
+                return_value=mock_results,
+            ),
+            patch(
+                "baseline_reporag.photon_pipeline.expand_with_graph",
+                return_value=expanded_ids,
+            ),
+        ):
+            baseline_deps["generator"].generate.return_value = "Answer [C:1]"
+            pipeline.query("security question", session_id="s1", repo_id="test-repo")
+
+        reranker.rerank.assert_called_once()
+
+    def test_fallback_skips_pruning_on_follow_up(self):
+        """should_fallback=True must skip PHOTON pruning on follow-up turns."""
+        cfg = _make_pruning_cfg()
+        pipeline, baseline_deps, photon_deps, mock_session, mock_results = (
+            _setup_pipeline_for_pruning(cfg, session_turns=1)
+        )
+
+        expanded_ids = _make_fallback_chunks_and_store(baseline_deps)
+        _configure_fallback_decision(
+            photon_deps,
+            should_fallback=True,
+            actions=["fallback_to_baseline_path"],
+        )
+
+        with (
+            patch(
+                "baseline_reporag.photon_pipeline.hybrid_search",
+                return_value=mock_results,
+            ),
+            patch(
+                "baseline_reporag.photon_pipeline.expand_with_graph",
+                return_value=expanded_ids,
+            ),
+        ):
+            baseline_deps["generator"].generate.return_value = "Answer [C:1]"
+            pipeline.query("delete user account", session_id="s1", repo_id="test-repo")
+
+        photon_deps["photon_inference"].prune_evidence.assert_not_called()
+
+    def test_reprefill_hierarchy_resets_photon_session_state(self):
+        """reprefill_hierarchy action must clear current_state/prev_state."""
+        from photon_mlx.session import HierarchicalState, PhotonSessionState
+
+        import mlx.core as mx
+
+        cfg = _make_pruning_cfg()
+        pipeline, baseline_deps, photon_deps, mock_session, mock_results = (
+            _setup_pipeline_for_pruning(cfg, session_turns=1)
+        )
+
+        real_state = PhotonSessionState("s1", "test-repo", "abc123")
+        real_state.current_state = HierarchicalState(level_states=[mx.zeros((1, 4, 8))])
+        real_state.prev_state = HierarchicalState(level_states=[mx.zeros((1, 4, 8))])
+        photon_deps["photon_inference"]._sessions = {"s1": real_state}
+
+        expanded_ids = _make_fallback_chunks_and_store(baseline_deps)
+        _configure_fallback_decision(
+            photon_deps,
+            should_fallback=True,
+            actions=["reprefill_hierarchy", "re_retrieve"],
+        )
+
+        with (
+            patch(
+                "baseline_reporag.photon_pipeline.hybrid_search",
+                return_value=mock_results,
+            ),
+            patch(
+                "baseline_reporag.photon_pipeline.expand_with_graph",
+                return_value=expanded_ids,
+            ),
+        ):
+            baseline_deps["generator"].generate.return_value = "Answer [C:1]"
+            pipeline.query("topic shifted", session_id="s1", repo_id="test-repo")
+
+        assert real_state.current_state is None
+        assert real_state.prev_state is None
+
+    def test_fallback_to_baseline_path_resets_photon_session_state(self):
+        """fallback_to_baseline_path action must clear PHOTON session state."""
+        from photon_mlx.session import HierarchicalState, PhotonSessionState
+
+        import mlx.core as mx
+
+        cfg = _make_pruning_cfg()
+        pipeline, baseline_deps, photon_deps, mock_session, mock_results = (
+            _setup_pipeline_for_pruning(cfg, session_turns=1)
+        )
+
+        real_state = PhotonSessionState("s1", "test-repo", "abc123")
+        real_state.current_state = HierarchicalState(level_states=[mx.zeros((1, 4, 8))])
+        real_state.prev_state = HierarchicalState(level_states=[mx.zeros((1, 4, 8))])
+        photon_deps["photon_inference"]._sessions = {"s1": real_state}
+
+        expanded_ids = _make_fallback_chunks_and_store(baseline_deps)
+        _configure_fallback_decision(
+            photon_deps,
+            should_fallback=True,
+            actions=["fallback_to_baseline_path", "strengthen_local_refresh"],
+        )
+
+        with (
+            patch(
+                "baseline_reporag.photon_pipeline.hybrid_search",
+                return_value=mock_results,
+            ),
+            patch(
+                "baseline_reporag.photon_pipeline.expand_with_graph",
+                return_value=expanded_ids,
+            ),
+        ):
+            baseline_deps["generator"].generate.return_value = "Answer [C:1]"
+            pipeline.query("security audit", session_id="s1", repo_id="test-repo")
+
+        assert real_state.current_state is None
+        assert real_state.prev_state is None
+
+    def test_normal_follow_up_still_runs_pruning(self):
+        """should_fallback=False on follow-up must still prune (regression guard)."""
+        cfg = _make_pruning_cfg()
+        pipeline, baseline_deps, photon_deps, mock_session, mock_results = (
+            _setup_pipeline_for_pruning(cfg, session_turns=1)
+        )
+
+        expanded_ids = _make_fallback_chunks_and_store(baseline_deps)
+        _configure_fallback_decision(photon_deps, should_fallback=False, actions=[])
+        photon_deps["photon_inference"].prune_evidence.return_value = list(range(8))
+
+        with (
+            patch(
+                "baseline_reporag.photon_pipeline.hybrid_search",
+                return_value=mock_results,
+            ),
+            patch(
+                "baseline_reporag.photon_pipeline.expand_with_graph",
+                return_value=expanded_ids,
+            ),
+        ):
+            baseline_deps["generator"].generate.return_value = "Answer [C:1]"
+            pipeline.query("follow-up", session_id="s1", repo_id="test-repo")
+
+        photon_deps["photon_inference"].prune_evidence.assert_called_once()
+
+    def test_normal_follow_up_does_not_reset_photon_session_state(self):
+        """Without fallback, PHOTON session state must be preserved across turns."""
+        from photon_mlx.session import HierarchicalState, PhotonSessionState
+
+        import mlx.core as mx
+
+        cfg = _make_pruning_cfg()
+        pipeline, baseline_deps, photon_deps, mock_session, mock_results = (
+            _setup_pipeline_for_pruning(cfg, session_turns=1)
+        )
+
+        real_state = PhotonSessionState("s1", "test-repo", "abc123")
+        real_state.current_state = HierarchicalState(level_states=[mx.zeros((1, 4, 8))])
+        real_state.prev_state = HierarchicalState(level_states=[mx.zeros((1, 4, 8))])
+        photon_deps["photon_inference"]._sessions = {"s1": real_state}
+
+        expanded_ids = _make_fallback_chunks_and_store(baseline_deps)
+        _configure_fallback_decision(photon_deps, should_fallback=False, actions=[])
+        photon_deps["photon_inference"].prune_evidence.return_value = list(range(8))
+
+        with (
+            patch(
+                "baseline_reporag.photon_pipeline.hybrid_search",
+                return_value=mock_results,
+            ),
+            patch(
+                "baseline_reporag.photon_pipeline.expand_with_graph",
+                return_value=expanded_ids,
+            ),
+        ):
+            baseline_deps["generator"].generate.return_value = "Answer [C:1]"
+            pipeline.query("follow-up", session_id="s1", repo_id="test-repo")
+
+        assert real_state.current_state is not None
+        assert real_state.prev_state is not None
