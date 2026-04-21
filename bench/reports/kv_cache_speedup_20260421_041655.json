@@ -1,0 +1,55 @@
+{
+  "config": "/Users/maenokota/share/work/github_kewton/photon-mlx-feature-issue-55-context-length-65k/configs/photon_long_context.yaml",
+  "prompt_len": 1024,
+  "max_new_tokens": 4,
+  "n_runs": 1,
+  "cached": {
+    "avg_sec": 0.216,
+    "per_token_ms": 54.012,
+    "tokens_per_sec": 18.51,
+    "peak_mb": 2940.89,
+    "runs_sec": [
+      0.216
+    ],
+    "phases": {
+      "prefill": {
+        "count": 1,
+        "mean_ms": 50.6598,
+        "p50_ms": 50.6598,
+        "p95_ms": 50.6598,
+        "total_ms": 50.6598
+      },
+      "encoder_replay": {
+        "count": 3,
+        "mean_ms": 4.9584,
+        "p50_ms": 4.9734,
+        "p95_ms": 4.9843,
+        "total_ms": 14.8751
+      },
+      "top_level_increment": {
+        "count": 3,
+        "mean_ms": 24.0389,
+        "p50_ms": 20.0423,
+        "p95_ms": 32.1101,
+        "total_ms": 72.1168
+      },
+      "local_tail_decode": {
+        "count": 3,
+        "mean_ms": 25.5911,
+        "p50_ms": 25.5553,
+        "p95_ms": 25.7892,
+        "total_ms": 76.7732
+      }
+    }
+  },
+  "nocache": {
+    "avg_sec": 0.2016,
+    "per_token_ms": 50.409,
+    "tokens_per_sec": 19.84,
+    "peak_mb": 3162.43,
+    "runs_sec": [
+      0.2016
+    ]
+  },
+  "speedup_x": 0.93
+}

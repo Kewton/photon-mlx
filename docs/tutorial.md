@@ -170,6 +170,40 @@ tail -f logs/<job_id>/train_log.jsonl
 
 ---
 
+## 長コンテキスト推論 (Issue #55)
+
+`configs/photon_long_context.yaml` を指定すると、NTK-aware RoPE scaling により 2048 で学習済みのチェックポイントのまま最大 65,536 トークンの入力を受け取れます。**MLX 経路のみ** — `torch_ref` (PyTorch リファレンス) は従来通り 128 位置までしか扱えません（`scaling != "none"` で `NotImplementedError`）。
+
+```yaml
+# configs/photon_long_context.yaml (抜粋)
+model:
+  max_position_embeddings: 65536
+  rope_theta: 10000000.0          # YAML 互換な数値リテラル。`10_000_000.0` は不可
+  rope_scaling: ntk                # v1 は {"none", "ntk"} のみ
+  rope_scale_factor: 32.0          # 2048 → 65536 で 32 倍
+training:
+  context_length: 32768
+```
+
+### ピーク メモリの実測値（ランダム重み、学習済みなしの参考値）
+
+| prompt_len | KV cache あり | KV cache なし | 速度比 (cache / nocache) |
+|---|---|---|---|
+| 1,024 | 2.9 GB | 3.2 GB | 0.93x |
+| 16,384 | **20.8 GB** | **13.1 GB** | **0.89x** |
+
+- 長 prompt では **`use_kv_cache=False` の方が速くメモリも少なく消費**する場合があります（`top_level_increment` と `local_tail_decode` の累積が nocache の prefill を上回るため）
+- 設計見積りより実測が大幅に大きいため、小メモリ環境（~32GB）では `use_kv_cache=False` を推奨
+- 32,768 / 65,536 の実測は学習済みチェックポイントが整った段階で bench 再実行予定
+
+詳細は `reports/issue-55-long-context.md` を参照。
+
+### トラブルシュート
+
+メモリ不足・速度劣化が起きた場合は `docs/troubleshooting.md` の「長コンテキストで RAM 不足」節を参照。
+
+---
+
 ## Step 7: PHOTON-RAG で使う
 
 ### サーバモード

@@ -1552,3 +1552,84 @@ class TestPruneEvidenceFailureFailsClosed:
             "(fail-closed, CB-002); returning a ranked prefix of the input "
             "list is a bug."
         )
+
+
+# ---------------------------------------------------------------------------
+# Issue #55: RoPE scaling propagates through _build_photon_deps
+# ---------------------------------------------------------------------------
+
+
+class TestBuildPhotonDepsWiresRopeScaling:
+    """_build_photon_deps must wire rope_scaling / rope_scale_factor from the
+    baseline config into the ModelConfig passed to PhotonModel (Issue #55).
+    """
+
+    def test_build_deps_wires_rope_scaling(self, tmp_path):
+        """When baseline YAML specifies rope_scaling='ntk', the constructed
+        ModelConfig.rope_scaling must equal 'ntk'."""
+        from baseline_reporag.config import load_config
+        from baseline_reporag.photon_pipeline import _build_photon_deps
+
+        cfg_file = tmp_path / "photon_long.yaml"
+        cfg_file.write_text(
+            "model:\n"
+            "  provider: photon\n"
+            "  architecture: photon_decoder\n"
+            "  base_embed_dim: 64\n"
+            "  hidden_size: 128\n"
+            "  intermediate_size: 256\n"
+            "  num_heads: 4\n"
+            "  vocab_size: 1000\n"
+            "  head_dim: 32\n"
+            "  max_position_embeddings: 8192\n"
+            "  rope_theta: 10000000.0\n"
+            "  rope_scaling: ntk\n"
+            "  rope_scale_factor: 4.0\n"
+            "hierarchy:\n"
+            "  levels: 2\n"
+            "  chunk_sizes: [4, 4]\n"
+            "  encoder_layers_per_level: [2, 2]\n"
+            "  decoder_layers_per_level: [2, 2]\n"
+            "inference:\n"
+            "  hierarchical_prefill: true\n"
+            "  safe_recgen_enabled: false\n"
+        )
+        cfg = load_config(str(cfg_file))
+        deps = _build_photon_deps(cfg)
+        photon_cfg = deps["photon_cfg"]
+        assert photon_cfg.model.rope_scaling == "ntk"
+        assert photon_cfg.model.rope_scale_factor == 4.0
+        assert photon_cfg.model.max_position_embeddings == 8192
+        assert photon_cfg.model.rope_theta == 10000000.0
+
+    def test_build_deps_defaults_when_rope_scaling_missing(self, tmp_path):
+        """Without rope_scaling in YAML, ModelConfig must fall back to 'none'."""
+        from baseline_reporag.config import load_config
+        from baseline_reporag.photon_pipeline import _build_photon_deps
+
+        cfg_file = tmp_path / "photon_vanilla.yaml"
+        cfg_file.write_text(
+            "model:\n"
+            "  provider: photon\n"
+            "  architecture: photon_decoder\n"
+            "  base_embed_dim: 64\n"
+            "  hidden_size: 128\n"
+            "  intermediate_size: 256\n"
+            "  num_heads: 4\n"
+            "  vocab_size: 1000\n"
+            "hierarchy:\n"
+            "  levels: 2\n"
+            "  chunk_sizes: [4, 4]\n"
+            "  encoder_layers_per_level: [2, 2]\n"
+            "  decoder_layers_per_level: [2, 2]\n"
+            "inference:\n"
+            "  hierarchical_prefill: true\n"
+            "  safe_recgen_enabled: false\n"
+        )
+        cfg = load_config(str(cfg_file))
+        deps = _build_photon_deps(cfg)
+        photon_cfg = deps["photon_cfg"]
+        # Legacy fallback: ModelConfig defaults apply.
+        assert photon_cfg.model.rope_scaling == "none"
+        assert photon_cfg.model.rope_scale_factor == 1.0
+        assert photon_cfg.model.max_position_embeddings == 2048

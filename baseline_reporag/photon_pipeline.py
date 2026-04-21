@@ -166,6 +166,11 @@ def _build_photon_deps(cfg: Config) -> dict[str, Any]:
         TokenizerConfig,
     )
 
+    # Issue #55: wire long-context RoPE fields from baseline cfg so
+    # `photon_long_context.yaml` reaches PhotonModel unchanged.  When the
+    # baseline cfg lacks these keys (e.g. legacy 2048 profiles), we fall
+    # back to ModelConfig defaults via ``rope_scaling_from``.
+    scaling, factor = ModelConfig.rope_scaling_from(cfg.model)
     model_cfg = ModelConfig(
         architecture=cfg.model.get("architecture", "photon_decoder"),
         base_embed_dim=cfg.model.base_embed_dim,
@@ -173,6 +178,11 @@ def _build_photon_deps(cfg: Config) -> dict[str, Any]:
         intermediate_size=cfg.model.intermediate_size,
         num_attention_heads=cfg.model.get("num_heads", 4),
         num_key_value_heads=cfg.model.get("num_heads", 4),
+        head_dim=getattr(cfg.model, "head_dim", 64),
+        max_position_embeddings=getattr(cfg.model, "max_position_embeddings", 2048),
+        rope_theta=getattr(cfg.model, "rope_theta", 1_000_000.0),
+        rope_scaling=scaling,
+        rope_scale_factor=factor,
     )
     hierarchy_cfg = HierarchyConfig(
         levels=cfg.hierarchy.levels,

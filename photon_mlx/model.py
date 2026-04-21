@@ -31,7 +31,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from torch_ref.config import PhotonConfig  # noqa: E402
+from torch_ref.config import ModelConfig, PhotonConfig  # noqa: E402
 
 
 # ================================================================
@@ -152,8 +152,16 @@ class PhotonModel(nn.Module):
 
         # ── Pre-computed RoPE ───────────────────────────────────
         max_local = max(c * (p + 1) for c, p in zip(CS, PL))
+        # Issue #55: top-level RoPE supports NTK-aware scaling for long
+        # contexts. Local RoPE deliberately stays vanilla — max_local is
+        # well within the training range so scaling would only add drift.
+        scaling, factor = ModelConfig.rope_scaling_from(m)
         self._rope_cos, self._rope_sin = precompute_rope(
-            m.head_dim, m.max_position_embeddings, m.rope_theta
+            m.head_dim,
+            m.max_position_embeddings,
+            m.rope_theta,
+            scaling=scaling,
+            scale_factor=factor,
         )
         self._local_cos, self._local_sin = precompute_rope(
             m.head_dim, max_local, m.rope_theta
