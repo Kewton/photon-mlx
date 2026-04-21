@@ -13,19 +13,14 @@ Usage (interactive):
 from __future__ import annotations
 
 import argparse
-import time
-from pathlib import Path
 
 from .config import load_config
-from .generation.generator import Generator
-from .indexing.embedding import EmbeddingIndex
-from .indexing.lexical import LexicalIndex
-from .indexing.symbol_graph import SymbolGraph
-from .ingestion.store import ChunkStore
-from .logger import RunLogger
-from .memory.session import SessionManager
-from .pipeline import RepoRAGPipeline
-from .retrieval.reranker import CrossEncoderReranker
+
+# CB-004 (codex-fix): import from the lightweight factory so baseline-only
+# environments without MLX do not fail at ``python -m baseline_reporag.cli``
+# load time.  The factory lazy-imports the PHOTON pipeline (and thus MLX)
+# only when ``cfg.model.provider == "photon"``.
+from .pipeline_factory import build_pipeline
 
 
 def main() -> None:
@@ -38,35 +33,12 @@ def main() -> None:
 
     cfg = load_config(args.config)
     repo_id = args.repo_id or cfg.repo.repo_id
-    idx_dir = Path(cfg.paths.data_root) / "indexes" / repo_id
-    run_id = f"baseline_{repo_id}_{time.strftime('%Y%m%d')}_{cfg.repo.repo_commit[:7]}"
 
-    reranker_cfg = cfg.retrieval.reranker
-    reranker = (
-        CrossEncoderReranker(
-            model_id=reranker_cfg.get(
-                "model_id", "cross-encoder/ms-marco-MiniLM-L-6-v2"
-            )
-        )
-        if reranker_cfg.get("enabled", False)
-        else None
-    )
-    pipeline = RepoRAGPipeline(
-        config=cfg,
-        store=ChunkStore(idx_dir / "chunks.db"),
-        lexical=LexicalIndex.load(idx_dir / "lexical.pkl"),
-        embedding=EmbeddingIndex.load(idx_dir / "embedding"),
-        graph=SymbolGraph.load(idx_dir / "symbol_graph.json"),
-        sessions=SessionManager(log_dir=Path(cfg.paths.log_root) / "sessions"),
-        generator=Generator(
-            model_id=cfg.model.model_id,
-            max_new_tokens=cfg.generation.max_new_tokens,
-            temperature=cfg.generation.temperature,
-            top_p=cfg.generation.top_p,
-        ),
-        logger=RunLogger(cfg.paths.log_root, run_id),
-        reranker=reranker,
-    )
+    # Route via ``build_pipeline`` so ``model.provider`` (baseline vs
+    # photon) is honoured end-to-end — Issue #62 Phase 1 Stage 3 DR3-001:
+    # without this switch, ``inference.photon_generation_enabled=true``
+    # would have no effect when invoked from the CLI.
+    pipeline = build_pipeline(cfg)
 
     def run_query(question: str) -> None:
         result = pipeline.query(

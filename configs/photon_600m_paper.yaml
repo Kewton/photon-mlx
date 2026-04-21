@@ -187,6 +187,10 @@ inference:
   recgen_enabled: true
   safe_recgen_enabled: false
 
+  # Issue #62 Phase 1: opt-in PHOTON single-path generation (default false).
+  photon_generation_enabled: false
+  generation_fallback_policy: "qwen"
+
   answer_max_new_tokens: 768
   temperature: 0.2
   top_p: 0.9
