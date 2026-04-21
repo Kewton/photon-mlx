@@ -520,6 +520,62 @@ class PhotonSessionState:
         mx.eval(aggregated)
         return aggregated
 
+    def find_relevant_past_turn(
+        self, current_state: HierarchicalState | None
+    ) -> TurnState | None:
+        """現在の質問に最も関連する過去ターンを検索.
+
+        現在のターンを除く過去ターンそれぞれとコサイン類似度を計算し、
+        閾値 ``self.working_memory_cfg.relevant_turn_threshold``
+        （デフォルト ``0.7``）以上であれば最も近い ``TurnState`` を返す。
+        working memory が無効、``current_state`` が ``None``、または比較対象が
+        無い場合は ``None`` を fail-closed で返す（``PhotonSessionState.current_state``
+        自体が ``HierarchicalState | None`` なのでこの契約が必要）。
+
+        Contract (design §4):
+            * 呼び出し元は ``session.update()`` の後で呼ぶ想定。``turn_history``
+              には既に現ターンが append 済みなので、比較ループでは
+              ``turn_history[:-1]`` を走査して現ターンを除外する。
+            * ``current_state.level_states[-1]`` は単一サンプル前提
+              （``(T, D)`` / ``(1, T, D)``）。``B > 1`` の batched state は
+              本 API のサポート対象外。
+            * 非有限類似度（NaN / Inf）のターンはランキング対象から除外し、
+              全滅時は ``None`` を返す（fail-closed）。
+            * 同点類似度は最新 ``turn_id`` 優先。
+            * 戻り値 ``TurnState`` は ``turn_history`` 内部参照の借用であり、
+              consumer 側が mutate すると session state を破壊するため
+              read-only として扱うこと（設計 §10）。
+
+        Refs: Issue #78, design policy §4.4 / §4.5.
+        """
+        if not self.working_memory_cfg.enabled:  # step 1
+            return None
+        if len(self.turn_history) <= 1:  # step 2
+            return None
+        if current_state is None or not current_state.level_states:  # step 3
+            return None
+
+        curr_top = current_state.level_states[-1]
+
+        scores: list[tuple[TurnState, float]] = []
+        for past_turn in self.turn_history[:-1]:  # step 4
+            past_levels = past_turn.hierarchical_state.level_states
+            if not past_levels:
+                continue
+            sim = 1.0 - cosine_distance(curr_top, past_levels[-1])
+            if not math.isfinite(sim):
+                continue
+            scores.append((past_turn, sim))
+
+        if not scores:  # step 5
+            return None
+
+        scores.sort(key=lambda x: (x[1], x[0].turn_id), reverse=True)  # step 6-1
+        best_turn, best_sim = scores[0]
+        if best_sim >= self.working_memory_cfg.relevant_turn_threshold:  # step 6-2
+            return best_turn
+        return None
+
     def reset_working_memory(self) -> None:
         """Clear stale latents and turn history for fail-closed recovery.
 

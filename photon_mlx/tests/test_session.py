@@ -945,6 +945,254 @@ class TestWorkingMemory:
             assert abs(d_on.latent_cosine_drift - d_off.latent_cosine_drift) < 1e-6
             assert abs(d_on.logit_kl - d_off.logit_kl) < 1e-6
 
+    # ----------------------------------------------------------------
+    # Issue #78 — find_relevant_past_turn()
+    # ----------------------------------------------------------------
+    #
+    # T1..T11 cover the reference implementation in the design doc §4.5.
+    # ``_mk_state(v)`` (defined above) yields a constant top-level vector and
+    # therefore only produces cosine similarities of sign(v1)*sign(v2); tests
+    # that need fractional similarities or non-finite values build the
+    # ``HierarchicalState`` directly via ``_mk_state_vec`` / ``_mk_state_nan``.
+
+    @staticmethod
+    def _mk_state_vec(vec: list[float]) -> HierarchicalState:
+        """Build a HierarchicalState whose top-level state is the given 1-D vector.
+
+        The vector is wrapped to ``(1, 1, D)`` so ``mean_pool`` produces the
+        same ``(D,)`` values back — giving tests deterministic control over the
+        cosine similarity between states.
+        """
+        arr = mx.array([[vec]], dtype=mx.float32)
+        return HierarchicalState(level_states=[arr])
+
+    @staticmethod
+    def _mk_state_nan() -> HierarchicalState:
+        """Build a HierarchicalState guaranteed to yield a non-finite similarity."""
+        import math as _math
+
+        arr = mx.array([[[_math.nan, 0.0, 0.0, 0.0]]], dtype=mx.float32)
+        return HierarchicalState(level_states=[arr])
+
+    def test_find_relevant_past_turn_empty_history(self) -> None:
+        """T1: turn_history is empty → None (no update() has been called)."""
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(enabled=True),
+        )
+        assert session.turn_history == []
+        assert session.find_relevant_past_turn(_mk_state(1.0)) is None
+
+    def test_find_relevant_past_turn_single_turn(self) -> None:
+        """T2: only the current turn is recorded (len == 1) → None."""
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(enabled=True),
+        )
+        session.update(_mk_state(1.0), question_text="q1")
+        assert len(session.turn_history) == 1
+        # current_state is the just-updated state, so this emulates the
+        # production call pattern (update() then find_relevant_past_turn()).
+        assert session.find_relevant_past_turn(session.current_state) is None
+
+    def test_find_relevant_past_turn_returns_best_match(self) -> None:
+        """T3: multiple past turns above threshold → highest similarity wins."""
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True, relevant_turn_threshold=0.7
+            ),
+        )
+        # past turn 1: identical direction to current → sim = 1.0
+        session.update(self._mk_state_vec([1.0, 0.0, 0.0, 0.0]), question_text="past1")
+        # past turn 2: cos_sim = 4/5 = 0.8 against current (above threshold)
+        session.update(self._mk_state_vec([4.0, 3.0, 0.0, 0.0]), question_text="past2")
+        # current turn (turn_history[-1])
+        current = self._mk_state_vec([1.0, 0.0, 0.0, 0.0])
+        session.update(current, question_text="current")
+
+        result = session.find_relevant_past_turn(current)
+        assert result is not None
+        # past1 (turn_id=1) has sim=1.0, past2 (turn_id=2) has sim=0.8.
+        assert result.turn_id == 1
+        assert result.question_text == "past1"
+
+    def test_find_relevant_past_turn_below_threshold(self) -> None:
+        """T4: no past turn clears the threshold → None."""
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True, relevant_turn_threshold=0.7
+            ),
+        )
+        # past1: sim = 3/5 = 0.6 vs current [1, 0, 0, 0] (below 0.7)
+        session.update(self._mk_state_vec([3.0, 4.0, 0.0, 0.0]), question_text="p1")
+        # past2: sim = 0.0 (orthogonal)
+        session.update(self._mk_state_vec([0.0, 1.0, 0.0, 0.0]), question_text="p2")
+        current = self._mk_state_vec([1.0, 0.0, 0.0, 0.0])
+        session.update(current, question_text="current")
+
+        assert session.find_relevant_past_turn(current) is None
+
+    def test_find_relevant_past_turn_at_threshold_boundary(self) -> None:
+        """T5: sim exactly equal to threshold → returned (>= admits equality)."""
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True, relevant_turn_threshold=1.0
+            ),
+        )
+        # past1 and current share the same unit direction → sim == 1.0 == threshold
+        session.update(_mk_state(1.0), question_text="past1")
+        current = _mk_state(1.0)
+        session.update(current, question_text="current")
+
+        result = session.find_relevant_past_turn(current)
+        assert result is not None
+        assert result.turn_id == 1
+        assert result.question_text == "past1"
+
+    def test_find_relevant_past_turn_disabled_returns_none(self) -> None:
+        """T6: enabled=False → None, without mutating session state."""
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(enabled=False),
+        )
+        # Real update() won't populate turn_history when disabled. We manually
+        # append two TurnStates to prove the enabled-gate fires independently
+        # of the len(turn_history) guard.
+        session.turn_history.append(
+            TurnState(turn_id=1, hierarchical_state=_mk_state(1.0), question_text="p1")
+        )
+        session.turn_history.append(
+            TurnState(turn_id=2, hierarchical_state=_mk_state(1.0), question_text="cur")
+        )
+        before_len = len(session.turn_history)
+
+        assert session.find_relevant_past_turn(_mk_state(1.0)) is None
+        # No side effects on turn_history.
+        assert len(session.turn_history) == before_len
+        assert [t.turn_id for t in session.turn_history] == [1, 2]
+
+    def test_find_relevant_past_turn_skips_non_finite(self) -> None:
+        """T7: non-finite sim on one past turn is skipped, best finite wins."""
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True, relevant_turn_threshold=0.5
+            ),
+        )
+        # past1: contains NaN → cos_sim produces NaN → skipped
+        session.update(self._mk_state_nan(), question_text="nan_turn")
+        # past2: sim = 1.0 with current (same direction)
+        session.update(_mk_state(1.0), question_text="finite_turn")
+        current = _mk_state(1.0)
+        session.update(current, question_text="current")
+
+        result = session.find_relevant_past_turn(current)
+        assert result is not None
+        # Only the finite past turn (turn_id=2) is eligible.
+        assert result.turn_id == 2
+        assert result.question_text == "finite_turn"
+
+    def test_find_relevant_past_turn_tiebreak_by_latest_turn_id(self) -> None:
+        """T8: identical similarities → latest turn_id wins."""
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True, relevant_turn_threshold=0.7
+            ),
+        )
+        # Two past turns with the same direction as the current turn.
+        session.update(_mk_state(1.0), question_text="older")
+        session.update(_mk_state(1.0), question_text="newer")
+        current = _mk_state(1.0)
+        session.update(current, question_text="current")
+
+        result = session.find_relevant_past_turn(current)
+        assert result is not None
+        # Latest past turn (turn_id=2) wins over older past (turn_id=1).
+        assert result.turn_id == 2
+        assert result.question_text == "newer"
+
+    def test_find_relevant_past_turn_skips_empty_level_states(self) -> None:
+        """T9: one past turn with empty level_states is skipped, others evaluated."""
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True, relevant_turn_threshold=0.7
+            ),
+        )
+        # past1: normal turn with sim = 1.0
+        session.update(_mk_state(1.0), question_text="normal_past")
+        # past2 with empty level_states (hand-crafted to bypass update()'s own
+        # invariant — we replace the HierarchicalState on an existing turn).
+        session.update(_mk_state(1.0), question_text="empty_past")
+        session.turn_history[-1].hierarchical_state = HierarchicalState(level_states=[])
+        current = _mk_state(1.0)
+        session.update(current, question_text="current")
+
+        result = session.find_relevant_past_turn(current)
+        assert result is not None
+        # The empty-level_states turn must be skipped.
+        assert result.turn_id == 1
+        assert result.question_text == "normal_past"
+
+    def test_find_relevant_past_turn_all_past_level_states_empty(self) -> None:
+        """T10: every past turn has empty level_states → None (scores empty)."""
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True, relevant_turn_threshold=0.7
+            ),
+        )
+        session.update(_mk_state(1.0), question_text="p1")
+        session.update(_mk_state(1.0), question_text="p2")
+        # Blank out the level_states of every *past* turn (leave current alone).
+        current = _mk_state(1.0)
+        session.update(current, question_text="current")
+        for past in session.turn_history[:-1]:
+            past.hierarchical_state = HierarchicalState(level_states=[])
+
+        assert session.find_relevant_past_turn(current) is None
+
+    def test_find_relevant_past_turn_all_non_finite_returns_none(self) -> None:
+        """T11: every past turn yields non-finite sim → None (fail-closed)."""
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True, relevant_turn_threshold=0.5
+            ),
+        )
+        session.update(self._mk_state_nan(), question_text="nan_a")
+        session.update(self._mk_state_nan(), question_text="nan_b")
+        current = _mk_state(1.0)
+        session.update(current, question_text="current")
+
+        assert session.find_relevant_past_turn(current) is None
+
 
 class TestSessionStateReset:
     """Issue #64 — reset_working_memory() preserves telemetry only."""
