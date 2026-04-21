@@ -1,11 +1,16 @@
 version: 1
 
+# Issue #62 Phase 1: opt-in PHOTON single-path generation variant.
+# Mirrors ``configs/photon_tiny.yaml`` but enables
+# ``inference.photon_generation_enabled=true`` so benchmarks can exercise
+# the PHOTON-only generation path end-to-end.
+
 project:
   name: "photon-reporag"
-  mode: "photon_tiny"
+  mode: "photon_tiny_recgen"
 
 run:
-  name_prefix: "photon_tiny"
+  name_prefix: "photon_tiny_recgen"
   seed: 42
   deterministic: true
 
@@ -83,9 +88,9 @@ retrieval:
     max_nodes: 24
 
   two_pass_search:
-    enabled: false       # Issue #56: enable to add Pass 1 PHOTON scoring on Turn 1
-    pass1_top_k: 64      # candidates fetched by retrieval for Pass 1
-    pass2_top_k: 16      # top-K passed to evidence pack (keep aligned with evidence_pack.max_chunks)
+    enabled: false
+    pass1_top_k: 64
+    pass2_top_k: 16
 
 evidence_pack:
   max_chunks: 16
@@ -113,12 +118,9 @@ tokenizer:
   vocab_size: 32000
 
 model:
+  provider: "photon"
   architecture: "photon_decoder"
 
-  # PHOTON-specific:
-  # - base_embed_dim = encoder bottom embed dim (paper Table 10: 416 for 600M)
-  # - hidden_size    = main model width used by enc/dec blocks and LM head
-  # Tiny: paper-conformal downscale (~80M)
   base_embed_dim: 160
   hidden_size: 640
   intermediate_size: 1664
@@ -137,7 +139,6 @@ model:
 hierarchy:
   levels: 2
 
-  # Paper-conformal default
   chunk_sizes: [4, 4]
   converter_prefix_lengths: [2, 2]
 
@@ -152,7 +153,7 @@ hierarchy:
   context_decoder_arch: "llama_decoder_style"
   context_converter_type: "conv1d"
 
-  recursive_loss_weight: 0.0   # v1: 0.0 固定。0.1/0.3 は v2 で ablation
+  recursive_loss_weight: 0.0
   bottleneck_consistency_target: "top_level"
 
 training:
@@ -177,7 +178,6 @@ training:
   save_every_steps: 500
   log_every_steps: 20
 
-  # Early stopping (Issue #60): explicit opt-out for the dev config.
   early_stopping:
     enabled: false
 
@@ -186,11 +186,8 @@ inference:
   recgen_enabled: false
   safe_recgen_enabled: false
 
-  # Issue #62 Phase 1: opt-in PHOTON single-path generation.
-  # Default false preserves the existing Qwen-only generation pipeline.
-  photon_generation_enabled: false
-  # "qwen" → auto fallback to Qwen on PHOTON failure (default).
-  # "abort" → sanitized error for deployments that forbid cross-model fallback.
+  # Issue #62 Phase 1: this variant opts IN to PHOTON single-path generation.
+  photon_generation_enabled: true
   generation_fallback_policy: "qwen"
 
   answer_max_new_tokens: 768

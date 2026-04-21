@@ -45,9 +45,13 @@ class TestBuildPipeline:
             "memory:\n  log_dir: null\n"
         )
         cfg = load_config(str(cfg_file))
-        # build_pipeline should not fail for baseline (mock heavy deps)
+        # build_pipeline should not fail for baseline (mock heavy deps).
+        # CB-004 (codex-fix): baseline deps are now built in
+        # ``baseline_reporag.pipeline_factory._build_baseline_deps_no_mlx``
+        # so baseline-only envs never need MLX at import time. Patch
+        # that target rather than the old location.
         with patch(
-            "baseline_reporag.photon_pipeline._build_baseline_deps"
+            "baseline_reporag.pipeline_factory._build_baseline_deps_no_mlx"
         ) as mock_deps:
             mock_deps.return_value = _make_mock_deps()
             pipeline = build_pipeline(cfg)
@@ -68,6 +72,10 @@ class TestBuildPipeline:
             "memory:\n  log_dir: null\n"
         )
         cfg = load_config(str(cfg_file))
+        # CB-004 (codex-fix): the PHOTON branch of ``build_pipeline`` now
+        # lazy-imports ``_build_baseline_deps`` / ``_build_photon_deps``
+        # from ``baseline_reporag.photon_pipeline`` so the patch targets
+        # are unchanged for this branch.
         with (
             patch("baseline_reporag.photon_pipeline._build_baseline_deps") as mock_deps,
             patch("baseline_reporag.photon_pipeline._build_photon_deps") as mock_photon,
@@ -91,8 +99,10 @@ class TestBuildPipeline:
             "memory:\n  log_dir: null\n"
         )
         cfg = load_config(str(cfg_file))
+        # CB-004 (codex-fix): baseline deps are now built via the MLX-free
+        # mirror in ``pipeline_factory``; patch the new target.
         with patch(
-            "baseline_reporag.photon_pipeline._build_baseline_deps"
+            "baseline_reporag.pipeline_factory._build_baseline_deps_no_mlx"
         ) as mock_deps:
             mock_deps.return_value = _make_mock_deps()
             pipeline = build_pipeline(cfg)
@@ -1499,6 +1509,94 @@ class TestTokenizeEvidencePackFailureFailsClosed:
         log_payload = log_call.args[0] if log_call.args else log_call.kwargs["entry"]
         assert log_payload["photon_tokenization_failed"] is True
 
+    def test_tokenize_evidence_pack_failure_logs_without_exception_text(self, caplog):
+        """CB-002 (codex-fix): ``tokenize_evidence_pack`` failure path must
+        emit a warning containing only ``type(exc).__name__``. Raw exception
+        body (which may carry prompt fragments / tokenizer internals / model
+        paths) must never appear in the log record.
+        """
+        import logging
+
+        import mlx.core as mx
+        from baseline_reporag.ingestion.chunker import Chunk
+
+        cfg = _make_pruning_cfg_disabled()
+        pipeline, baseline_deps, photon_deps, _mock_session, mock_results = (
+            _setup_pipeline_for_pruning(cfg, session_turns=1)
+        )
+
+        secret_marker = "SECRET_PROMPT_LEAK_abc123xyz"
+
+        class _BrokenTokenizer:
+            vocab_size = 256
+            pad_token_id = 0
+
+            def encode(self, text):
+                raise RuntimeError(secret_marker)
+
+        pipeline.tokenizer = _BrokenTokenizer()
+        pipeline.photon_cfg = MagicMock()
+        pipeline.photon_cfg.model.max_position_embeddings = 4096
+        pipeline.photon_cfg.hierarchy.chunk_sizes = [4, 4]
+
+        chunks = [
+            Chunk(
+                chunk_id=f"chunk_{i}",
+                repo_id="test-repo",
+                repo_commit="abc123",
+                rel_path=f"file{i}.py",
+                language="python",
+                start_line=1,
+                end_line=10,
+                content=f"def func_{i}(): pass",
+                symbols=[f"func_{i}"],
+                section_header="",
+                file_header="",
+            )
+            for i in range(4)
+        ]
+
+        def mock_get_many(ids):
+            by_id = {c.chunk_id: c for c in chunks}
+            return [by_id[cid] for cid in ids if cid in by_id]
+
+        baseline_deps["store"].get_many.side_effect = mock_get_many
+        expanded_ids = [f"chunk_{i}" for i in range(4)]
+
+        # mx import is needed by the helper above to build the state, even
+        # though this test does not use it directly.  Silence the linter
+        # by referencing it in an assertion.
+        assert mx is not None
+
+        with (
+            patch(
+                "baseline_reporag.photon_pipeline.hybrid_search",
+                return_value=mock_results,
+            ),
+            patch(
+                "baseline_reporag.photon_pipeline.expand_with_graph",
+                return_value=expanded_ids,
+            ),
+        ):
+            baseline_deps["generator"].generate.return_value = "answer [C:1]"
+            with caplog.at_level(
+                logging.WARNING, logger="baseline_reporag.photon_pipeline"
+            ):
+                pipeline.query("follow-up?", session_id="s1", repo_id="test-repo")
+
+        warning_records = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert warning_records, "expected a warning for tokenize_evidence_pack failure"
+        for rec in warning_records:
+            msg = rec.getMessage()
+            assert secret_marker not in msg, (
+                "raw exception body leaked into warning log (CB-002)"
+            )
+        # Positive assertion: the closed-enum class name appears in at least
+        # one warning message.
+        assert any("RuntimeError" in r.getMessage() for r in warning_records), (
+            "exception class name must appear in warning log"
+        )
+
 
 class TestPruneEvidenceFailureFailsClosed:
     """CB-002: when prune_evidence's tokenizer.encode raises, the call must
@@ -2025,3 +2123,331 @@ class TestTwoPassSearchConfig:
         assert p1 == 16  # clamped up
         assert p2 == 4
         assert any("clamping pass1_top_k" in rec.message for rec in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# Issue #62 Phase 1: PhotonRAGPipeline generation branch
+# ---------------------------------------------------------------------------
+
+
+def _make_photon_gen_cfg(
+    *,
+    photon_generation_enabled: bool = False,
+    generation_fallback_policy: str | None = None,
+    answer_max_new_tokens: int | None = None,
+):
+    """Build a minimal cfg exercising the generation branch added in Issue #62."""
+    from baseline_reporag.config import Config
+
+    inference: dict = {
+        "evidence_pruning_enabled": False,
+        "pruned_max_chunks": 8,
+        "photon_generation_enabled": photon_generation_enabled,
+    }
+    if generation_fallback_policy is not None:
+        inference["generation_fallback_policy"] = generation_fallback_policy
+    if answer_max_new_tokens is not None:
+        inference["answer_max_new_tokens"] = answer_max_new_tokens
+
+    return Config(
+        {
+            "model": {
+                "provider": "photon",
+                "model_id": "test-model",
+            },
+            "repo": {
+                "repo_id": "test-repo",
+                "repo_commit": "abc123",
+            },
+            "hierarchy": {
+                "chunk_sizes": [4, 4],
+            },
+            "retrieval": {
+                "lexical_top_k": 20,
+                "embedding_top_k": 20,
+                "fused_top_k": 16,
+                "rerank_top_k": 12,
+                "weights": {
+                    "lexical": 0.45,
+                    "embedding": 0.45,
+                },
+                "query_expansion": {"enabled": False},
+                "graph_expansion": {"max_hops": 1, "max_nodes": 24},
+                "neighborhood_expansion": {"before": 1, "after": 1},
+                "file_type_boost": 0.0,
+            },
+            "evidence_pack": {
+                "max_chunks": 16,
+                "max_tokens": 16000,
+            },
+            "inference": inference,
+        }
+    )
+
+
+def _run_generation_branch_query(
+    cfg,
+    *,
+    photon_answer="PHOTON generated [C:1]",
+    photon_side_effect=None,
+    qwen_answer="Qwen answer [C:1]",
+):
+    """Drive PhotonRAGPipeline.query end-to-end with mocked retrieval.
+
+    Returns ``(result, baseline_deps, photon_deps, log_payload)``.
+    """
+    from baseline_reporag.ingestion.chunker import Chunk
+
+    pipeline, baseline_deps, photon_deps, _mock_session, mock_results = (
+        _setup_pipeline_for_pruning(cfg, session_turns=0)
+    )
+
+    # Configure the PHOTON generator — either a return value or a side_effect.
+    if photon_side_effect is not None:
+        photon_deps["photon_inference"].generate_answer.side_effect = photon_side_effect
+    else:
+        photon_deps["photon_inference"].generate_answer.return_value = photon_answer
+    baseline_deps["generator"].generate.return_value = qwen_answer
+
+    chunks = [
+        Chunk(
+            chunk_id=f"chunk_{i}",
+            repo_id="test-repo",
+            repo_commit="abc123",
+            rel_path=f"file{i}.py",
+            language="python",
+            start_line=1,
+            end_line=10,
+            content=f"def func_{i}(): pass",
+            symbols=[f"func_{i}"],
+            section_header="",
+            file_header="",
+        )
+        for i in range(4)
+    ]
+
+    def mock_get_many(ids):
+        by_id = {c.chunk_id: c for c in chunks}
+        return [by_id[cid] for cid in ids if cid in by_id]
+
+    baseline_deps["store"].get_many.side_effect = mock_get_many
+    expanded_ids = [f"chunk_{i}" for i in range(4)]
+
+    with (
+        patch(
+            "baseline_reporag.photon_pipeline.hybrid_search",
+            return_value=mock_results,
+        ),
+        patch(
+            "baseline_reporag.photon_pipeline.expand_with_graph",
+            return_value=expanded_ids,
+        ),
+    ):
+        result = pipeline.query("question?", session_id="s1", repo_id="test-repo")
+
+    log_call = baseline_deps["logger"].log_turn.call_args
+    log_payload = log_call.args[0] if log_call.args else log_call.kwargs["entry"]
+    return result, baseline_deps, photon_deps, log_payload
+
+
+class TestPhotonGenerationBranch:
+    """PhotonRAGPipeline.query routes generation via photon_generation_enabled."""
+
+    def test_query_uses_qwen_when_flag_disabled(self):
+        """Default off → Qwen generator is called, PHOTON is not, log says qwen."""
+        cfg = _make_photon_gen_cfg(photon_generation_enabled=False)
+        result, baseline_deps, photon_deps, log_payload = _run_generation_branch_query(
+            cfg
+        )
+        assert result.answer == "Qwen answer [C:1]"
+        baseline_deps["generator"].generate.assert_called_once()
+        photon_deps["photon_inference"].generate_answer.assert_not_called()
+        assert log_payload["generator_used"] == "qwen"
+        assert log_payload["generator_fallback_reason"] is None
+
+    def test_query_uses_photon_when_flag_enabled(self):
+        """Flag on → PHOTON.generate_answer is called, Qwen is not."""
+        cfg = _make_photon_gen_cfg(photon_generation_enabled=True)
+        result, baseline_deps, photon_deps, log_payload = _run_generation_branch_query(
+            cfg
+        )
+        assert result.answer == "PHOTON generated [C:1]"
+        photon_deps["photon_inference"].generate_answer.assert_called_once()
+        baseline_deps["generator"].generate.assert_not_called()
+        assert log_payload["generator_used"] == "photon"
+        assert log_payload["generator_fallback_reason"] is None
+
+    def test_query_falls_back_to_qwen_on_photon_value_error(self):
+        """PHOTON raising ValueError → Qwen fallback + closed-enum reason."""
+        cfg = _make_photon_gen_cfg(photon_generation_enabled=True)
+        result, baseline_deps, photon_deps, log_payload = _run_generation_branch_query(
+            cfg,
+            photon_side_effect=ValueError("length guard"),
+        )
+        assert result.answer == "Qwen answer [C:1]"
+        photon_deps["photon_inference"].generate_answer.assert_called_once()
+        baseline_deps["generator"].generate.assert_called_once()
+        assert log_payload["generator_used"] == "qwen"
+        assert log_payload["generator_fallback_reason"] == "ValueError"
+
+    def test_query_falls_back_to_qwen_on_photon_runtime_error(self):
+        """PHOTON raising RuntimeError → Qwen fallback + closed-enum reason."""
+        cfg = _make_photon_gen_cfg(photon_generation_enabled=True)
+        result, baseline_deps, photon_deps, log_payload = _run_generation_branch_query(
+            cfg,
+            photon_side_effect=RuntimeError("oom"),
+        )
+        assert result.answer == "Qwen answer [C:1]"
+        assert log_payload["generator_used"] == "qwen"
+        assert log_payload["generator_fallback_reason"] == "RuntimeError"
+
+    def test_query_falls_back_to_qwen_on_tokenizer_encode_failure(self):
+        """PHOTON raising _TokenizerEncodeFailure → Qwen fallback + closed enum."""
+        from photon_mlx.inference import _TokenizerEncodeFailure
+
+        cfg = _make_photon_gen_cfg(photon_generation_enabled=True)
+        result, baseline_deps, photon_deps, log_payload = _run_generation_branch_query(
+            cfg,
+            photon_side_effect=_TokenizerEncodeFailure("bad bytes"),
+        )
+        assert result.answer == "Qwen answer [C:1]"
+        assert log_payload["generator_used"] == "qwen"
+        assert log_payload["generator_fallback_reason"] == "_TokenizerEncodeFailure"
+
+    def test_query_logs_fallback_reason_on_empty_photon_output(self):
+        """PHOTON returning '' / whitespace → Qwen fallback + empty_output."""
+        cfg = _make_photon_gen_cfg(photon_generation_enabled=True)
+        result, baseline_deps, photon_deps, log_payload = _run_generation_branch_query(
+            cfg,
+            photon_answer="   ",
+        )
+        assert result.answer == "Qwen answer [C:1]"
+        assert log_payload["generator_used"] == "qwen"
+        assert log_payload["generator_fallback_reason"] == "empty_output"
+
+    def test_query_rejects_non_bool_photon_generation_enabled(self):
+        """Non-bool flag value must raise ValueError before generation runs."""
+        import pytest
+
+        cfg = _make_photon_gen_cfg(photon_generation_enabled=False)
+        # Force a non-bool value through direct attribute mutation so we
+        # exercise the strict type guard.
+        cfg.inference.photon_generation_enabled = "false"
+        with pytest.raises(ValueError, match="photon_generation_enabled"):
+            _run_generation_branch_query(cfg)
+
+    def test_query_rejects_non_int_max_new_tokens(self):
+        """answer_max_new_tokens = bool / negative / str must raise ValueError."""
+        import pytest
+
+        cfg = _make_photon_gen_cfg(
+            photon_generation_enabled=True, answer_max_new_tokens=-1
+        )
+        with pytest.raises(ValueError, match="max_new_tokens"):
+            _run_generation_branch_query(cfg)
+
+        cfg2 = _make_photon_gen_cfg(photon_generation_enabled=True)
+        cfg2.inference.answer_max_new_tokens = True  # bool is a Python int
+        with pytest.raises(ValueError, match="max_new_tokens"):
+            _run_generation_branch_query(cfg2)
+
+        cfg3 = _make_photon_gen_cfg(photon_generation_enabled=True)
+        cfg3.inference.answer_max_new_tokens = "512"
+        with pytest.raises(ValueError, match="max_new_tokens"):
+            _run_generation_branch_query(cfg3)
+
+    def test_generation_fallback_policy_abort_does_not_call_qwen(self):
+        """policy=abort + PHOTON failure → RuntimeError, Qwen NOT called."""
+        import pytest
+
+        cfg = _make_photon_gen_cfg(
+            photon_generation_enabled=True,
+            generation_fallback_policy="abort",
+        )
+        # _run_generation_branch_query calls query() — expect it to raise.
+        from baseline_reporag.ingestion.chunker import Chunk
+
+        pipeline, baseline_deps, photon_deps, _mock_session, mock_results = (
+            _setup_pipeline_for_pruning(cfg, session_turns=0)
+        )
+        photon_deps["photon_inference"].generate_answer.side_effect = RuntimeError(
+            "oom"
+        )
+        baseline_deps["generator"].generate.return_value = "Qwen (should not be called)"
+
+        chunks = [
+            Chunk(
+                chunk_id=f"chunk_{i}",
+                repo_id="test-repo",
+                repo_commit="abc123",
+                rel_path=f"file{i}.py",
+                language="python",
+                start_line=1,
+                end_line=10,
+                content=f"def func_{i}(): pass",
+                symbols=[f"func_{i}"],
+                section_header="",
+                file_header="",
+            )
+            for i in range(4)
+        ]
+
+        def mock_get_many(ids):
+            by_id = {c.chunk_id: c for c in chunks}
+            return [by_id[cid] for cid in ids if cid in by_id]
+
+        baseline_deps["store"].get_many.side_effect = mock_get_many
+        expanded_ids = [f"chunk_{i}" for i in range(4)]
+
+        with (
+            patch(
+                "baseline_reporag.photon_pipeline.hybrid_search",
+                return_value=mock_results,
+            ),
+            patch(
+                "baseline_reporag.photon_pipeline.expand_with_graph",
+                return_value=expanded_ids,
+            ),
+            pytest.raises(RuntimeError, match="fallback policy=abort"),
+        ):
+            pipeline.query("question?", session_id="s1", repo_id="test-repo")
+
+        # Qwen must NOT have been called when policy=abort.
+        baseline_deps["generator"].generate.assert_not_called()
+
+    def test_generation_failure_logs_reason_without_exception_text(self, caplog):
+        """Warning log must expose the closed-enum reason only, never raw exc text.
+
+        Stage 4 DR4-002 contract: exception body / stack / prompt must not
+        leak via the warning line.
+        """
+        import logging
+
+        cfg = _make_photon_gen_cfg(photon_generation_enabled=True)
+        secret_marker = "TOP_SECRET_STACK_FRAME_kjh5f8"
+        with caplog.at_level(
+            logging.WARNING, logger="baseline_reporag.photon_pipeline"
+        ):
+            _run_generation_branch_query(
+                cfg,
+                photon_side_effect=RuntimeError(secret_marker),
+            )
+        # Warning was emitted, but NO warning record may contain the raw
+        # exception body.
+        warning_records = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert warning_records, "expected at least one warning for fallback"
+        for rec in warning_records:
+            assert secret_marker not in rec.getMessage(), (
+                "raw exception body must not be logged (Stage 4 DR4-002)"
+            )
+
+    def test_generation_fallback_policy_rejects_invalid_value(self):
+        """policy not in {'qwen','abort'} must raise ValueError."""
+        import pytest
+
+        cfg = _make_photon_gen_cfg(
+            photon_generation_enabled=True,
+            generation_fallback_policy="silent",
+        )
+        with pytest.raises(ValueError, match="generation_fallback_policy"):
+            _run_generation_branch_query(cfg)

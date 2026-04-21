@@ -51,6 +51,16 @@ variants:
       safe_recgen:
         enabled: true
 
+  # Issue #62 Phase 1 — PHOTON single-path generation (opt-in).
+  - id: "photon_rag_recgen"
+    label: "PHOTON-RAG+RecGen"
+    kind: "photon"
+    config_path: "./configs/photon_small.yaml"
+    override:
+      inference:
+        photon_generation_enabled: true
+        generation_fallback_policy: "qwen"
+
 fairness:
   fix_repo_snapshot: true
   fix_generation_params: true

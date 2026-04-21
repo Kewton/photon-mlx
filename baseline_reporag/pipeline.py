@@ -8,11 +8,17 @@ generation → citation with profiling and logging.
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass
-from typing import Any
 
 from .citation import CitationResult, resolve_citations
 from .config import Config
+
+# CB2-001 (codex-fix): ``QueryResult`` moved to the MLX-free
+# ``baseline_reporag.contracts`` module so ``pipeline_factory`` and other
+# baseline-only callers can reference it without transitively pulling
+# in ``mlx_lm`` via ``.generation.generator``.  Re-exported here for
+# backward compatibility — existing imports (``from baseline_reporag.
+# pipeline import QueryResult``) keep working.
+from .contracts import QueryResult
 from .generation.evidence_pack import EvidencePack, build_evidence_pack
 from .generation.generator import Generator
 from .generation.prompt import ABSTAIN_MARKER, _EVIDENCE_HEADER, build_messages
@@ -22,27 +28,17 @@ from .indexing.symbol_graph import SymbolGraph
 from .ingestion.store import ChunkStore
 from .logger import RunLogger
 from .memory.session import SessionManager
-from .profiler import LatencyBreakdown, MemorySnapshot, TurnProfiler
+from .profiler import TurnProfiler
 from .retrieval.graph_expansion import expand_with_graph
 from .retrieval.hybrid import apply_file_type_boost, hybrid_search
 from .retrieval.query_expansion import expand_query
 from .retrieval.reranker import CrossEncoderReranker
 
-
-@dataclass
-class QueryResult:
-    answer: str
-    session_id: str
-    turn_id: int
-    cited_chunk_ids: list[str]
-    wrong_citation_indices: list[int]
-    no_citation: bool
-    latency: LatencyBreakdown
-    memory: MemorySnapshot
-    drift_metrics: dict[str, Any] | None = None
-    confidence: float | None = None
-    fallback_decision: dict[str, Any] | None = None
-    citation_postprocessed: bool = False
+__all__ = [
+    "QueryResult",
+    "RepoRAGPipeline",
+    "apply_citation_postprocess",
+]
 
 
 def apply_citation_postprocess(
@@ -272,4 +268,10 @@ class RepoRAGPipeline:
             latency=latency,
             memory=memory,
             citation_postprocessed=citation_postprocessed,
+            # CB-003 (codex-fix): RepoRAGPipeline always uses the Qwen
+            # generator; PhotonRAGPipeline overrides this when PHOTON
+            # produces the answer and propagates the closed-enum fallback
+            # reason when it falls back.
+            generator_used="qwen",
+            generator_fallback_reason=None,
         )

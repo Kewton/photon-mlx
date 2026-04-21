@@ -19,7 +19,11 @@ import mlx.core as mx
 from .citation import resolve_citations
 from .config import Config
 from .generation.evidence_pack import build_evidence_pack
-from .generation.prompt import _EVIDENCE_HEADER, build_messages
+from .generation.prompt import (
+    _EVIDENCE_HEADER,
+    build_messages,
+    flatten_messages_for_plain_lm,
+)
 from .pipeline import QueryResult, RepoRAGPipeline, apply_citation_postprocess
 from .profiler import TurnProfiler
 from .retrieval.graph_expansion import expand_with_graph
@@ -164,55 +168,19 @@ def compute_confidence(logits: mx.array) -> float:
 
 
 def _build_baseline_deps(cfg: Config) -> dict[str, Any]:
-    """Construct real baseline pipeline dependencies from config."""
-    from pathlib import Path
-    import uuid
+    """Construct real baseline pipeline dependencies from config.
 
-    from .generation.generator import Generator
-    from .indexing.embedding import EmbeddingIndex
-    from .indexing.lexical import LexicalIndex
-    from .indexing.symbol_graph import SymbolGraph
-    from .ingestion.store import ChunkStore
-    from .logger import RunLogger
-    from .memory.session import SessionManager
-    from .retrieval.reranker import CrossEncoderReranker
+    The canonical implementation lives in
+    :func:`baseline_reporag.pipeline_factory._build_baseline_deps_no_mlx`
+    so the factory module can stay MLX-free at import time. This wrapper
+    is preserved as a module attribute so existing tests that patch
+    ``baseline_reporag.photon_pipeline._build_baseline_deps`` keep working
+    (Issue #62 Phase 1 refactor R-1: single source of truth, no
+    lockstep-drift risk).
+    """
+    from .pipeline_factory import _build_baseline_deps_no_mlx
 
-    idx_dir = Path(cfg.paths.data_root) / "indexes" / cfg.repo.repo_id
-    store = ChunkStore(idx_dir / "chunks.db")
-    lexical = LexicalIndex.load(idx_dir / "lexical.pkl")
-    embedding = EmbeddingIndex.load(idx_dir / "embedding")
-    graph = SymbolGraph.load(idx_dir / "symbol_graph.json")
-    sessions = SessionManager(log_dir=Path(cfg.paths.log_root) / "sessions")
-    generator = Generator(
-        model_id=cfg.model.model_id,
-        max_new_tokens=cfg.generation.max_new_tokens,
-        temperature=cfg.generation.temperature,
-        top_p=cfg.generation.top_p,
-    )
-    run_id = f"bench_variant_{uuid.uuid4().hex[:8]}"
-    logger = RunLogger(cfg.paths.log_root, run_id)
-
-    reranker_cfg = cfg.retrieval.reranker
-    reranker = (
-        CrossEncoderReranker(
-            model_id=reranker_cfg.get(
-                "model_id", "cross-encoder/ms-marco-MiniLM-L-6-v2"
-            )
-        )
-        if reranker_cfg.get("enabled", False)
-        else None
-    )
-
-    return {
-        "store": store,
-        "lexical": lexical,
-        "embedding": embedding,
-        "graph": graph,
-        "sessions": sessions,
-        "generator": generator,
-        "logger": logger,
-        "reranker": reranker,
-    }
+    return _build_baseline_deps_no_mlx(cfg)
 
 
 def _build_photon_deps(cfg: Config) -> dict[str, Any]:
@@ -371,25 +339,17 @@ def _clear_photon_session_state(photon_inference: Any, session_id: str) -> None:
 
 
 def build_pipeline(cfg: Config) -> RepoRAGPipeline | PhotonRAGPipeline:
-    """Factory: create the right pipeline based on cfg.model.provider."""
-    provider = getattr(cfg.model, "provider", None) or "baseline"
-    deps = _build_baseline_deps(cfg)
+    """Factory: create the right pipeline based on cfg.model.provider.
 
-    if provider == "photon":
-        photon_deps = _build_photon_deps(cfg)
-        return PhotonRAGPipeline(cfg=cfg, baseline_deps=deps, photon_deps=photon_deps)
+    CB-004 (codex-fix): the canonical factory lives in
+    ``baseline_reporag.pipeline_factory`` so baseline-only entry points can
+    route via a module that does not import MLX at load time.  This
+    function is a thin backward-compat re-export; prefer importing from
+    ``baseline_reporag.pipeline_factory`` directly.
+    """
+    from .pipeline_factory import build_pipeline as _factory_build_pipeline
 
-    return RepoRAGPipeline(
-        config=cfg,
-        store=deps["store"],
-        lexical=deps["lexical"],
-        embedding=deps["embedding"],
-        graph=deps["graph"],
-        sessions=deps["sessions"],
-        generator=deps["generator"],
-        logger=deps["logger"],
-        reranker=deps["reranker"],
-    )
+    return _factory_build_pipeline(cfg)
 
 
 # ---------------------------------------------------------------------------
@@ -422,6 +382,117 @@ class PhotonRAGPipeline:
         self.safe_recgen = photon_deps["safe_recgen"]
         self.photon_cfg = photon_deps["photon_cfg"]
         self.tokenizer = photon_deps["tokenizer"]
+
+    # ---------------------------------------------------------------
+    # Issue #62 Phase 1: opt-in PHOTON single-path generation
+    # ---------------------------------------------------------------
+
+    @staticmethod
+    def _resolve_photon_max_new_tokens(
+        followup_tokens: int | None,
+        inference_cfg: Any,
+        cfg: Config,
+    ) -> int:
+        """Resolve the Phase 1 ``max_new_tokens`` contract (DR-62-005 / DR1-004).
+
+        Precedence:
+        1. ``followup_tokens`` when non-None (multi-turn cap).
+        2. ``inference.answer_max_new_tokens`` when set.
+        3. ``generation.max_new_tokens`` when a top-level generation section
+           exists (non-photon configs).
+        4. Hard default ``512`` (matches Qwen first-turn behaviour).
+
+        Strict type enforcement (DR4-003): rejects ``bool`` and non-``int``,
+        rejects values < 1.
+        """
+        if followup_tokens is not None:
+            raw_value: Any = followup_tokens
+        else:
+            raw_value = getattr(inference_cfg, "answer_max_new_tokens", None)
+            if raw_value is None:
+                generation_cfg = cfg.get("generation")
+                if generation_cfg is not None:
+                    raw_value = getattr(generation_cfg, "max_new_tokens", 512)
+                else:
+                    raw_value = 512
+
+        if isinstance(raw_value, bool) or not isinstance(raw_value, int):
+            raise ValueError(
+                "PHOTON max_new_tokens must be a positive int, "
+                f"got {type(raw_value).__name__}"
+            )
+        if raw_value < 1:
+            raise ValueError(f"PHOTON max_new_tokens must be >= 1, got {raw_value}")
+        return raw_value
+
+    def _run_photon_generation(
+        self,
+        *,
+        messages: list[dict],
+        bl: RepoRAGPipeline,
+        cfg: Config,
+        inference_cfg: Any,
+        followup_tokens: int | None,
+        fallback_policy: str,
+    ) -> tuple[str, str, str | None]:
+        """Execute the PHOTON generation branch with fail-closed semantics.
+
+        Returns ``(answer, generator_used, generator_fallback_reason)``.
+
+        Contract (design §8.2 + §9):
+
+        - ``_TokenizerEncodeFailure`` / ``ValueError`` / ``RuntimeError`` →
+          fall back to Qwen unless ``fallback_policy == "abort"`` in which
+          case a ``RuntimeError`` is raised with a sanitized message.
+        - Empty PHOTON output → fall back with ``generator_fallback_reason
+          == "empty_output"``.
+        - Security logging: warning message uses ``type(exc).__name__``
+          only; the raw exception body is never logged (Stage 4 DR4-002).
+        """
+        from photon_mlx.inference import _TokenizerEncodeFailure
+
+        prompt_text = flatten_messages_for_plain_lm(messages)  # DR-62-003
+        photon_max_new = self._resolve_photon_max_new_tokens(
+            followup_tokens, inference_cfg, cfg
+        )
+
+        try:
+            photon_answer = self.photon_inference.generate_answer(
+                prompt_text,
+                max_new_tokens=photon_max_new,
+            )
+        except (_TokenizerEncodeFailure, ValueError, RuntimeError) as exc:
+            reason = type(exc).__name__
+            if fallback_policy == "abort":
+                # Sanitized error — do NOT include exc body in the message.
+                raise RuntimeError(
+                    "PHOTON generation failed and fallback policy=abort"
+                ) from None
+            # Stage 4 DR4-002: log the closed-enum reason only; the raw
+            # exception body must not appear in the warning.
+            _logger.warning(
+                "PHOTON generation failed; falling back to Qwen (reason=%s)",
+                reason,
+            )
+            qwen_answer = bl.generator.generate(
+                messages, max_new_tokens=followup_tokens
+            )
+            return qwen_answer, "qwen", reason
+
+        # DR1-001: empty / whitespace-only output is fail-closed.
+        if not photon_answer or not photon_answer.strip():
+            _logger.warning(
+                "PHOTON returned empty answer; falling back to Qwen (reason=%s)",
+                "empty_output",
+            )
+            if fallback_policy == "abort":
+                raise RuntimeError("PHOTON generation failed and fallback policy=abort")
+            qwen_answer = bl.generator.generate(
+                messages, max_new_tokens=followup_tokens
+            )
+            return qwen_answer, "qwen", "empty_output"
+
+        return photon_answer, "photon", None
 
     def query(
         self,
@@ -587,11 +658,15 @@ class PhotonRAGPipeline:
                 self.photon_cfg,
             )
         except Exception as exc:
+            # Security logging (CB-002 codex-fix): log the closed-enum
+            # exception class name only; the raw exception body may carry
+            # prompt fragments / tokenizer internals and must never appear
+            # in warning logs.
             _logger.warning(
                 "tokenize_evidence_pack failed; clearing PHOTON session "
                 "state and falling back to baseline path for this turn "
-                "(fail-closed, CB-001): %s",
-                exc,
+                "(fail-closed, CB-001, reason=%s)",
+                type(exc).__name__,
             )
             tokenization_failed = True
             evidence_tokens = mx.array([], dtype=mx.int32)
@@ -629,7 +704,35 @@ class PhotonRAGPipeline:
         if fallback_actions & {"reprefill_hierarchy", "fallback_to_baseline_path"}:
             _clear_photon_session_state(self.photon_inference, photon_session_id)
 
-        # --- Generation ---
+        # --- Generation (Issue #62 Phase 1: opt-in PHOTON single-path) ---
+        # DR-62-001 / DR4-003: strict bool validation for the opt-in flag.
+        raw_photon_gen_enabled = (
+            getattr(inference_cfg, "photon_generation_enabled", False)
+            if inference_cfg is not None
+            else False
+        )
+        if not isinstance(raw_photon_gen_enabled, bool):
+            raise ValueError(
+                "inference.photon_generation_enabled must be bool, "
+                f"got {type(raw_photon_gen_enabled).__name__}"
+            )
+        photon_gen_enabled = raw_photon_gen_enabled
+
+        # DR4-004: closed-enum validation for the deployment policy knob.
+        fallback_policy = (
+            getattr(inference_cfg, "generation_fallback_policy", "qwen")
+            if inference_cfg is not None
+            else "qwen"
+        )
+        if fallback_policy not in {"qwen", "abort"}:
+            raise ValueError(
+                "inference.generation_fallback_policy must be 'qwen' or 'abort', "
+                f"got {fallback_policy!r}"
+            )
+
+        generator_used = "qwen"
+        generator_fallback_reason: str | None = None
+
         with prof.phase("generation"):
             evidence_text = pack.format_for_prompt()
             is_first_turn = len(session.turns) == 0
@@ -642,7 +745,22 @@ class PhotonRAGPipeline:
                 include_few_shot=is_first_turn,
             )
             followup_tokens = 512 if not is_first_turn else None
-            answer = bl.generator.generate(messages, max_new_tokens=followup_tokens)
+
+            if photon_gen_enabled:
+                (
+                    answer,
+                    generator_used,
+                    generator_fallback_reason,
+                ) = self._run_photon_generation(
+                    messages=messages,
+                    bl=bl,
+                    cfg=cfg,
+                    inference_cfg=inference_cfg,
+                    followup_tokens=followup_tokens,
+                    fallback_policy=fallback_policy,
+                )
+            else:
+                answer = bl.generator.generate(messages, max_new_tokens=followup_tokens)
 
         # --- Citation ---
         with prof.phase("citation"):
@@ -696,6 +814,13 @@ class PhotonRAGPipeline:
                 ),
                 "evidence_pruning_applied": (pruning_enabled and is_follow_up),
                 "photon_tokenization_failed": tokenization_failed,
+                # Issue #62 Phase 1: generation-level observability.
+                # ``generator_used`` ∈ {"photon", "qwen"} and
+                # ``generator_fallback_reason`` is a closed enum (§7.2):
+                # None | "_TokenizerEncodeFailure" | "ValueError"
+                #      | "RuntimeError" | "empty_output".
+                "generator_used": generator_used,
+                "generator_fallback_reason": generator_fallback_reason,
             }
         )
 
@@ -709,6 +834,12 @@ class PhotonRAGPipeline:
             latency=latency,
             memory=memory,
             citation_postprocessed=citation_postprocessed,
+            # Issue #62 Phase 1 (CB-003 codex-fix): expose the generator
+            # that produced ``answer`` on the structured result so
+            # comparison tools can distinguish a real PHOTON answer from
+            # a Qwen fallback without having to parse the log stream.
+            generator_used=generator_used,
+            generator_fallback_reason=generator_fallback_reason,
         )
 
         # Attach PHOTON metadata

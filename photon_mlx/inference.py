@@ -223,10 +223,14 @@ class PhotonInference:
         try:
             token_ids = list(self.tokenizer.encode(text))
         except Exception as exc:
+            # Security logging (CB-002 codex-fix): log the closed-enum
+            # exception class name only; the raw exception body may carry
+            # prompt fragments / tokenizer internals and must never appear
+            # in warning logs.
             _logger.warning(
                 "tokenizer.encode failed; disabling pruning (fail-closed, "
-                "Issue #58 CB-002): %s",
-                exc,
+                "Issue #58 CB-002, reason=%s)",
+                type(exc).__name__,
             )
             raise _TokenizerEncodeFailure(str(exc)) from exc
         if not token_ids:
@@ -528,6 +532,99 @@ class PhotonInference:
         ranked = sorted(raw_scores, key=lambda x: x[1], reverse=True)
         selected = sorted(idx for idx, _ in ranked[:max_chunks])
         return selected
+
+    # ────────────────────────────────────────────────────────────
+    # PHOTON single-path generation (Issue #62 Phase 1)
+    # ────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _validate_max_new_tokens(max_new_tokens: int) -> None:
+        """Validation contract for ``generate_answer.max_new_tokens``.
+
+        Mirrors ``_validate_micro_batch_size``: reject ``bool`` before ``int``
+        (Python ``bool`` is an ``int`` subclass) and reject non-positive
+        values. Stage 4 DR4-003 / DR-62-005 fail-fast guard.
+        """
+        if isinstance(max_new_tokens, bool) or not isinstance(max_new_tokens, int):
+            raise ValueError(
+                "max_new_tokens must be a positive int, "
+                f"got type {type(max_new_tokens).__name__}"
+            )
+        if max_new_tokens < 1:
+            raise ValueError(f"max_new_tokens must be >= 1, got {max_new_tokens}")
+
+    def generate_answer(
+        self,
+        prompt_text: str,
+        *,
+        max_new_tokens: int,
+    ) -> str:
+        """Generate an answer string using the PHOTON model (Issue #62 Phase 1).
+
+        Contract (design §8.1, DR-62-002..005):
+
+        - Tokenizes ``prompt_text`` via ``self.tokenizer`` (shared with
+          ``prune_evidence`` / ``session_forward``).
+        - Calls ``self.model.generate(input_ids, max_new_tokens=...)``.
+        - Decodes the newly generated tokens back to a string via
+          ``self.tokenizer.decode`` (prompt tokens stripped).
+
+        Fail-fast behaviour (API is fail-fast, pipeline is fail-closed):
+
+        - ``_TokenizerEncodeFailure`` / ``RuntimeError`` raised by the real
+          tokenizer propagate to the caller unchanged.
+        - ``ValueError`` from :meth:`PhotonModel.generate`'s DR4-002 length
+          guard propagates unchanged.
+        - ``max_new_tokens`` must be a positive ``int`` (``bool`` rejected).
+
+        Session handling (Phase 1): stateless. Each call re-prefills the
+        prompt from scratch; no KV cache is reused from ``session_forward``.
+        Phase 2 may add session parameters additively (YAGNI per DR1-002).
+        """
+        self._validate_max_new_tokens(max_new_tokens)
+
+        # Encode — propagate failures as _TokenizerEncodeFailure so the
+        # pipeline layer can fall back to Qwen with a stable fallback_reason
+        # (§7.2 closed enum).
+        try:
+            token_ids = list(self.tokenizer.encode(prompt_text))
+        except Exception as exc:
+            raise _TokenizerEncodeFailure(str(exc)) from exc
+
+        if not token_ids:
+            # An empty prompt cannot be decoded meaningfully.  Surface this
+            # as a ValueError so the pipeline records it under the closed
+            # enum ``ValueError`` (§7.2) and falls back to Qwen.
+            raise ValueError("prompt_text produced zero tokens after encoding")
+
+        # Preflight context-window guard (CB-001 codex-fix): reject prompts
+        # that cannot fit with ``max_new_tokens`` *before* allocating the
+        # ``mx.array`` input_ids buffer. ``PhotonModel.generate`` already
+        # has the same guard at ``model.py`` (DR4-002) but allocating a
+        # large array only to raise afterwards is wasteful and widens a
+        # DoS window when oversize evidence packs hit a small PHOTON
+        # window. Belt-and-suspenders: the deeper guard remains in place.
+        max_pos = self.cfg.model.max_position_embeddings
+        if len(token_ids) + max_new_tokens > max_pos:
+            raise ValueError(
+                f"prompt_len={len(token_ids)} + max_new_tokens={max_new_tokens} "
+                f"exceeds max_position_embeddings={max_pos}"
+            )
+
+        input_ids = mx.array([token_ids], dtype=mx.int32)
+        prompt_len = input_ids.shape[1]
+
+        # Call the real PhotonModel.generate — its DR4-002 length guard and
+        # MLX-level errors (RuntimeError, etc.) propagate unchanged.
+        generated, _step_logits = self.model.generate(
+            input_ids,
+            max_new_tokens=max_new_tokens,
+        )
+        mx.eval(generated)
+
+        # Strip the prompt prefix; decode only the newly-generated tokens.
+        new_token_ids = generated[0, prompt_len:].tolist()
+        return self.tokenizer.decode(new_token_ids)
 
     def get_drift_history(self, session_id: str) -> list[dict]:
         session = self._sessions.get(session_id)
