@@ -108,13 +108,15 @@ session_memory:
   pin_cited_chunks_max: 12
   track_topic_state: true
 
-  # Issue #64: cross-turn hierarchical working memory.
+  # Issue #64 / #79: cross-turn hierarchical working memory.
+  # storage_mode="full" keeps the whole HierarchicalState per turn with
+  # automatic mean-pool compression of overflowed turns (Issue #79 §3.7).
   working_memory:
     enabled: true
     max_turns: 8
     decay_factor: 0.5
     relevant_turn_threshold: 0.7
-    compress_old_turns: true
+    storage_mode: "full"
 
 tokenizer:
   tokenizer_id: "meta-llama/Llama-2-7b-hf"

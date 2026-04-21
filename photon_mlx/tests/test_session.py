@@ -1223,6 +1223,8 @@ class TestSessionStateReset:
         assert session.prev_state is None
         assert session.prev_logits is None
         assert session.turn_history == []
+        # Issue #79 DR1-010: compressed_history also cleared atomically.
+        assert session.compressed_history == []
         # Preserved
         assert len(session.drift_history) == drift_len_before
         assert session.turn_count == turn_count_before
@@ -1446,3 +1448,682 @@ class TestMeanPool:
         mx.eval(v)
         assert v.shape == (3,)
         assert v.tolist() == [1.0, 2.0, 3.0]
+
+
+# ---------------------------------------------------------------
+# Issue #79: storage_mode (full / top_level_only / summary_only)
+# ---------------------------------------------------------------
+
+
+class TestWorkingMemoryStorageMode:
+    """Issue #79 — ``WorkingMemoryConfig.storage_mode`` closed enum."""
+
+    def test_storage_mode_default_full(self) -> None:
+        cfg = WorkingMemoryConfig()
+        assert cfg.storage_mode == "full"
+
+    @pytest.mark.parametrize("bad", [42, None, True, 1.5])
+    def test_storage_mode_validation_type(self, bad: object) -> None:
+        with pytest.raises(TypeError, match="storage_mode must be str"):
+            WorkingMemoryConfig(storage_mode=bad)  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize("bad", ["Full", "FULL", "invalid", "full ", "", "Summary"])
+    def test_storage_mode_validation_enum(self, bad: str) -> None:
+        """Enum rejection does NOT leak the raw value into the exception text.
+
+        Design §4 / DR4 / DR6 — the raw value must never appear in the
+        ValueError message so attacker-controlled YAML cannot leak via
+        exception traces.
+        """
+        with pytest.raises(ValueError) as exc_info:
+            WorkingMemoryConfig(storage_mode=bad)
+        # Closed-enum message text only — no echo of the raw value.
+        msg = str(exc_info.value)
+        assert "storage_mode must be one of" in msg
+        assert "'full'" in msg and "'top_level_only'" in msg and "'summary_only'" in msg
+        # Skip the empty-string case (vacuously contained in any string).
+        if bad:
+            assert bad not in msg
+
+    @pytest.mark.parametrize("mode", ["full", "top_level_only", "summary_only"])
+    def test_storage_mode_accepts_enum_values(self, mode: str) -> None:
+        cfg = WorkingMemoryConfig(storage_mode=mode)
+        assert cfg.storage_mode == mode
+
+
+class TestDeprecationWarning:
+    """Issue #79 DR1-004 — ``compress_old_turns`` DeprecationWarning policy."""
+
+    def test_silent_when_only_compress_old_turns_specified(self) -> None:
+        """Existing YAML (compress_old_turns=True, storage_mode omitted) must
+        stay silent — otherwise every ``_build_photon_deps()`` call would
+        spam DeprecationWarnings (design §3.1 DR1-004 repo YAML exemption).
+        """
+        import warnings as _warnings
+
+        with _warnings.catch_warnings(record=True) as captured:
+            _warnings.simplefilter("always")
+            WorkingMemoryConfig(compress_old_turns=True)
+        for rec in captured:
+            assert not issubclass(rec.category, DeprecationWarning)
+
+    def test_silent_when_only_storage_mode_specified(self) -> None:
+        """storage_mode alone (the forward-looking form) must stay silent."""
+        import warnings as _warnings
+
+        with _warnings.catch_warnings(record=True) as captured:
+            _warnings.simplefilter("always")
+            WorkingMemoryConfig(storage_mode="top_level_only")
+        for rec in captured:
+            assert not issubclass(rec.category, DeprecationWarning)
+
+    def test_silent_when_storage_mode_is_full_even_if_compress_specified(self) -> None:
+        """Mixing compress_old_turns with storage_mode="full" is unambiguous
+        (``full`` is the default) so no warning fires."""
+        import warnings as _warnings
+
+        with _warnings.catch_warnings(record=True) as captured:
+            _warnings.simplefilter("always")
+            WorkingMemoryConfig(compress_old_turns=True, storage_mode="full")
+        for rec in captured:
+            assert not issubclass(rec.category, DeprecationWarning)
+
+    def test_warns_when_storage_mode_and_compress_old_turns_both_specified(
+        self,
+    ) -> None:
+        with pytest.warns(DeprecationWarning, match="compress_old_turns is deprecated"):
+            WorkingMemoryConfig(
+                compress_old_turns=True,
+                storage_mode="top_level_only",
+            )
+
+    def test_warns_for_summary_only_mode(self) -> None:
+        with pytest.warns(DeprecationWarning, match="compress_old_turns is deprecated"):
+            WorkingMemoryConfig(
+                compress_old_turns=False,
+                storage_mode="summary_only",
+            )
+
+
+def _mk_two_level_state(value: float, hidden: int = 4) -> HierarchicalState:
+    """Two-level state with a distinct top/mid so the DR1-007 invariant
+    (``top_level_only`` must not mutate) can be checked on ``level_states``.
+    """
+    mid = mx.ones((1, 4, hidden)) * value
+    top = mx.ones((1, 2, hidden)) * (value + 0.5)
+    return HierarchicalState(
+        level_states=[mid, top],
+        token_proj=mx.ones((1, 4, hidden)) * (value - 0.25),
+    )
+
+
+class TestWorkingMemoryFullMode:
+    """Issue #79 — ``storage_mode="full"``: oldest turn is compressed."""
+
+    def test_compress_oldest_turn_on_overflow(self) -> None:
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True, max_turns=3, storage_mode="full"
+            ),
+        )
+        for i in range(4):
+            session.update(_mk_state(float(i + 1)), question_text=f"q{i + 1}")
+
+        # max_turns=3 → one turn compressed (turn_id=1).
+        assert len(session.turn_history) == 3
+        assert [t.turn_id for t in session.turn_history] == [2, 3, 4]
+        assert len(session.compressed_history) == 1
+        assert session.compressed_history[0].turn_id == 1
+        # summary_vec is a (hidden,) float32 vector.
+        assert session.compressed_history[0].summary_vec.shape == (4,)
+        assert session.compressed_history[0].summary_vec.dtype == mx.float32
+
+    def test_compressed_history_upper_bound(self) -> None:
+        """``max_turns * 4`` cap: silent pop(0) per DR1-009 D5."""
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True, max_turns=2, storage_mode="full"
+            ),
+        )
+        # max_turns=2 → cap = 8. Push 12 turns → cap capped at 8, each
+        # turn beyond max_turns compresses one entry.
+        for i in range(12):
+            session.update(_mk_state(float(i + 1)))
+        assert len(session.turn_history) == 2
+        assert len(session.compressed_history) == 8  # max_turns * 4
+
+    def test_full_mode_compresses_not_drops(self) -> None:
+        """Contrast with Phase 1 (pop(0) without retention)."""
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True, max_turns=2, storage_mode="full"
+            ),
+        )
+        session.update(_mk_state(1.0))
+        session.update(_mk_state(2.0))
+        session.update(_mk_state(3.0))  # turn 1 compressed
+        assert len(session.compressed_history) == 1
+        assert session.compressed_history[0].turn_id == 1
+
+    def test_full_mode_coarse_state_mixes_compressed_history(self) -> None:
+        """D7 — full-mode coarse state concatenates compressed + live."""
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True,
+                max_turns=2,
+                decay_factor=0.5,
+                storage_mode="full",
+            ),
+        )
+        # 4 turns with values 1, 2, 4, 8 → after max_turns=2:
+        #   compressed: turn1(1) + turn2(2), turn_history: turn3(4) + turn4(8)
+        for v in (1.0, 2.0, 4.0, 8.0):
+            session.update(_mk_state(v))
+        coarse = session.get_session_coarse_state()
+        assert coarse is not None
+        mx.eval(coarse)
+
+        # Derive the same aggregated value with 4 decayed entries chronologically:
+        # weights = [0.5^3, 0.5^2, 0.5^1, 0.5^0] = [0.125, 0.25, 0.5, 1.0]
+        # values  = [1, 2, 4, 8]
+        # weighted sum = 0.125 + 0.5 + 2.0 + 8.0 = 10.625
+        # weight_sum   = 1.875
+        # expected     = 10.625 / 1.875 ≈ 5.666666...
+        vals = coarse.tolist()
+        for v in vals:
+            assert abs(v - 10.625 / 1.875) < 1e-4
+
+
+class TestWorkingMemoryTopLevelOnly:
+    """Issue #79 — ``storage_mode="top_level_only"``: keeps only level_states[-1]."""
+
+    def test_level_states_single_element(self) -> None:
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True, max_turns=3, storage_mode="top_level_only"
+            ),
+        )
+        input_state = _mk_two_level_state(1.0)
+        session.update(input_state)
+        stored = session.turn_history[-1].hierarchical_state
+        assert len(stored.level_states) == 1
+
+    def test_token_proj_none(self) -> None:
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True, max_turns=3, storage_mode="top_level_only"
+            ),
+        )
+        session.update(_mk_two_level_state(1.0))
+        stored = session.turn_history[-1].hierarchical_state
+        assert stored.token_proj is None
+
+    def test_does_not_mutate_input_state(self) -> None:
+        """DR1-007 invariant — update() must leave ``new_state`` unchanged."""
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True, max_turns=3, storage_mode="top_level_only"
+            ),
+        )
+        input_state = _mk_two_level_state(1.0)
+        n_levels_before = len(input_state.level_states)
+        token_proj_before = input_state.token_proj
+        level_states_obj_id = id(input_state.level_states)
+
+        session.update(input_state)
+
+        # Reference identity + length preserved; token_proj still populated.
+        assert len(input_state.level_states) == n_levels_before
+        assert input_state.token_proj is token_proj_before
+        assert id(input_state.level_states) == level_states_obj_id
+        # Stored state is a different HierarchicalState instance.
+        stored = session.turn_history[-1].hierarchical_state
+        assert stored is not input_state
+
+    def test_sanitizes_question_text(self) -> None:
+        """DR4-002 — sanitize contract must fire in top_level_only too."""
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True, max_turns=3, storage_mode="top_level_only"
+            ),
+        )
+        # Control char should be stripped; NUL / bell.
+        session.update(_mk_two_level_state(1.0), question_text="abc\x07def\x00ghi")
+        stored_q = session.turn_history[-1].question_text
+        # No raw control chars retained.
+        assert "\x07" not in stored_q and "\x00" not in stored_q
+        assert stored_q == "abcdefghi"
+
+    def test_pops_on_overflow(self) -> None:
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True, max_turns=2, storage_mode="top_level_only"
+            ),
+        )
+        for i in range(5):
+            session.update(_mk_two_level_state(float(i + 1)))
+        # Oldest turns popped, compressed_history not populated (top_level_only).
+        assert len(session.turn_history) == 2
+        assert session.compressed_history == []
+
+
+class TestWorkingMemorySummaryOnly:
+    """Issue #79 — ``storage_mode="summary_only"``: compressed_history only."""
+
+    def test_turn_history_stays_empty(self) -> None:
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True, max_turns=3, storage_mode="summary_only"
+            ),
+        )
+        for v in (1.0, 2.0, 3.0):
+            session.update(_mk_state(v))
+        assert session.turn_history == []
+        assert len(session.compressed_history) == 3
+
+    def test_compressed_history_populated(self) -> None:
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True, max_turns=3, storage_mode="summary_only"
+            ),
+        )
+        session.update(_mk_state(2.0))
+        assert len(session.compressed_history) == 1
+        entry = session.compressed_history[0]
+        assert entry.turn_id == 1
+        assert entry.summary_vec.shape == (4,)
+        assert entry.summary_vec.dtype == mx.float32
+
+    def test_sanitizes_question_text(self) -> None:
+        """DR1-003 — sanitize contract fires even though value is discarded."""
+        # Use a question that exceeds MAX_LEN and contains control chars.
+        long_q = "x" * 4096 + "\x07malicious"
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True, max_turns=3, storage_mode="summary_only"
+            ),
+        )
+        # Must not raise and must not leak question_text anywhere visible.
+        session.update(_mk_state(1.0), question_text=long_q)
+        assert session.compressed_history and session.turn_history == []
+        # CompressedTurnState does not expose question_text (DR1-005).
+        assert not hasattr(session.compressed_history[0], "question_text")
+
+    def test_compressed_history_upper_bound(self) -> None:
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True, max_turns=2, storage_mode="summary_only"
+            ),
+        )
+        for i in range(20):
+            session.update(_mk_state(float(i + 1)))
+        assert len(session.compressed_history) == 8  # max_turns * 4
+
+
+class TestGetSessionCoarseStateAcrossModes:
+    """Issue #79 — parametric same-API contract for all three modes."""
+
+    @pytest.mark.parametrize("mode", ["full", "top_level_only", "summary_only"])
+    def test_returns_shape_d(self, mode: str) -> None:
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True, max_turns=3, storage_mode=mode
+            ),
+        )
+        for v in (1.0, 2.0):
+            session.update(_mk_state(v))
+        coarse = session.get_session_coarse_state()
+        assert coarse is not None
+        assert coarse.shape == (4,)
+        assert coarse.dtype == mx.float32
+
+    @pytest.mark.parametrize("mode", ["full", "top_level_only", "summary_only"])
+    def test_returns_none_when_empty(self, mode: str) -> None:
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True, max_turns=3, storage_mode=mode
+            ),
+        )
+        assert session.get_session_coarse_state() is None
+
+    def test_summary_only_uses_compressed_history(self) -> None:
+        """turn_history empty but compressed_history populated → non-None."""
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True, max_turns=3, storage_mode="summary_only"
+            ),
+        )
+        session.update(_mk_state(1.0))
+        assert session.turn_history == []
+        assert session.compressed_history
+        assert session.get_session_coarse_state() is not None
+
+    def test_top_level_only_ignores_compressed_history(self) -> None:
+        """DR1-008 — top_level_only never reads compressed_history."""
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True, max_turns=3, storage_mode="top_level_only"
+            ),
+        )
+        # Manually seed compressed_history to prove it is not consulted.
+        from photon_mlx.session import CompressedTurnState
+
+        session.compressed_history.append(
+            CompressedTurnState(turn_id=0, summary_vec=mx.ones((4,)) * 999.0)
+        )
+        assert session.get_session_coarse_state() is None
+
+    def test_full_mode_uses_compressed_history_when_non_empty(self) -> None:
+        """D7 — full-mode coarse reflects both buckets."""
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True,
+                max_turns=2,
+                decay_factor=0.5,
+                storage_mode="full",
+            ),
+        )
+        # Two turns fit exactly in turn_history.
+        session.update(_mk_state(10.0))
+        session.update(_mk_state(20.0))
+        coarse_before = session.get_session_coarse_state()
+        assert coarse_before is not None
+
+        # Extra turn bumps turn 1 (value=10) into compressed_history.
+        session.update(_mk_state(30.0))
+        coarse_after = session.get_session_coarse_state()
+        assert coarse_after is not None
+        # Values differ: compressed_history entry changes the aggregation.
+        mx.eval(coarse_before)
+        mx.eval(coarse_after)
+        assert coarse_before.tolist() != coarse_after.tolist()
+
+
+class TestMakeTurnSummary:
+    """Issue #79 A-3 — ``_make_turn_summary`` helper contract."""
+
+    def test_returns_shape_d(self) -> None:
+        session = PhotonSessionState("s1", "repo", "abc")
+        state = _mk_state(1.0, hidden=8)
+        summary = session._make_turn_summary(state)
+        assert summary.shape == (8,)
+
+    def test_dtype_float32(self) -> None:
+        session = PhotonSessionState("s1", "repo", "abc")
+        state = _mk_state(1.0)
+        summary = session._make_turn_summary(state)
+        assert summary.dtype == mx.float32
+
+    def test_empty_level_states_returns_zero_length(self) -> None:
+        session = PhotonSessionState("s1", "repo", "abc")
+        summary = session._make_turn_summary(HierarchicalState(level_states=[]))
+        assert summary.shape == (0,)
+
+
+class TestResetClearsCompressedHistory:
+    """Issue #79 — reset_working_memory() clears compressed_history atomically."""
+
+    def test_reset_working_memory_clears_compressed_history(self) -> None:
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True, max_turns=2, storage_mode="full"
+            ),
+        )
+        for i in range(4):
+            session.update(_mk_state(float(i + 1)))
+        assert len(session.compressed_history) >= 1
+        session.reset_working_memory()
+        assert session.compressed_history == []
+        assert session.turn_history == []
+
+    def test_reset_working_memory_clears_summary_only_compressed_history(self) -> None:
+        """summary_only: reset leaves compressed_history empty even when
+        turn_history was always empty."""
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True, max_turns=3, storage_mode="summary_only"
+            ),
+        )
+        session.update(_mk_state(1.0))
+        session.update(_mk_state(2.0))
+        assert len(session.compressed_history) == 2
+        session.reset_working_memory()
+        assert session.compressed_history == []
+
+
+class TestCompressedHistoryRejectsZeroLengthSummaries:
+    """CB-001 regression — ``_append_summary_only`` /
+    ``_compress_oldest_turn`` must not store a ``shape=(0,)`` summary from
+    an empty ``HierarchicalState.level_states``, and
+    ``get_session_coarse_state()`` must not return a zero-length vector.
+
+    ``_make_turn_summary()`` still returns ``mx.zeros((0,))`` for empty
+    ``level_states`` (existing API contract, see
+    ``TestMakeTurnSummary.test_empty_level_states_returns_zero_length``);
+    the fix is to filter at the save / aggregate sites (design §3.8,
+    defense-in-depth).
+    """
+
+    def test_summary_only_skips_empty_level_states(self) -> None:
+        """update() with an empty HierarchicalState must NOT push a
+        zero-length summary onto ``compressed_history``."""
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True, max_turns=3, storage_mode="summary_only"
+            ),
+        )
+        # Valid update populates one entry.
+        session.update(_mk_state(1.0))
+        assert len(session.compressed_history) == 1
+
+        # Pathological update with empty level_states must be a no-op for
+        # compressed_history (save skipped — design §3.8 option A).
+        session.update(HierarchicalState(level_states=[]))
+        assert len(session.compressed_history) == 1
+        # And the stored entry is the valid one, unchanged.
+        assert session.compressed_history[0].summary_vec.shape == (4,)
+
+    def test_full_mode_compress_oldest_skips_empty_level_states(self) -> None:
+        """``_compress_oldest_turn`` must not leak a zero-length summary
+        into ``compressed_history`` when the oldest turn's
+        ``level_states`` is empty (belt-and-braces — ``_append_full``
+        normally pushes populated states, but hand-constructed fixtures
+        or forward-pass oddities could expose this)."""
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True, max_turns=1, storage_mode="full"
+            ),
+        )
+        # Seed turn_history directly with an empty state so
+        # _compress_oldest_turn is exercised in isolation.
+        session.turn_history.append(
+            TurnState(
+                turn_id=0,
+                hierarchical_state=HierarchicalState(level_states=[]),
+                question_text=None,
+            )
+        )
+        session._compress_oldest_turn()
+        # Oldest was popped from turn_history (existing contract).
+        assert session.turn_history == []
+        # But the zero-length summary must NOT have been stored.
+        assert session.compressed_history == []
+
+    def test_get_session_coarse_state_excludes_zero_length_summary_only(
+        self,
+    ) -> None:
+        """``summary_only`` path must filter zero-length entries; a
+        non-empty valid entry still produces a ``(D,)`` coarse state."""
+        from photon_mlx.session import CompressedTurnState
+
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True, max_turns=3, storage_mode="summary_only"
+            ),
+        )
+        # Seed a zero-length entry directly to simulate a legacy state
+        # that might have slipped through.
+        session.compressed_history.append(
+            CompressedTurnState(
+                turn_id=0,
+                summary_vec=mx.zeros((0,), dtype=mx.float32),
+                timestamp=0.0,
+            )
+        )
+        # Also add a valid entry.
+        session.compressed_history.append(
+            CompressedTurnState(
+                turn_id=1,
+                summary_vec=mx.ones((4,), dtype=mx.float32),
+                timestamp=1.0,
+            )
+        )
+        coarse = session.get_session_coarse_state()
+        assert coarse is not None
+        assert coarse.shape == (4,)
+        assert coarse.dtype == mx.float32
+
+    def test_get_session_coarse_state_excludes_zero_length_full_mode(
+        self,
+    ) -> None:
+        """``full`` path must also filter zero-length compressed entries
+        when mixing with ``turn_history`` (design §3.7 D7)."""
+        from photon_mlx.session import CompressedTurnState
+
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True, max_turns=3, storage_mode="full"
+            ),
+        )
+        # Populate turn_history with a valid turn.
+        session.update(_mk_state(2.0))
+        # Seed a zero-length entry into compressed_history (legacy state).
+        session.compressed_history.append(
+            CompressedTurnState(
+                turn_id=99,
+                summary_vec=mx.zeros((0,), dtype=mx.float32),
+                timestamp=0.0,
+            )
+        )
+        coarse = session.get_session_coarse_state()
+        assert coarse is not None
+        assert coarse.shape == (4,)
+        assert coarse.dtype == mx.float32
+
+    def test_compressed_history_only_zero_length_returns_none(self) -> None:
+        """If compressed_history contains ONLY zero-length entries
+        (summary_only) and turn_history is empty, get_session_coarse_state
+        must return ``None`` rather than a ``shape=(0,)`` array (API
+        contract: mx.array or None)."""
+        from photon_mlx.session import CompressedTurnState
+
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True, max_turns=3, storage_mode="summary_only"
+            ),
+        )
+        session.compressed_history.append(
+            CompressedTurnState(
+                turn_id=0,
+                summary_vec=mx.zeros((0,), dtype=mx.float32),
+                timestamp=0.0,
+            )
+        )
+        assert session.get_session_coarse_state() is None
+
+    def test_full_mode_all_zero_length_returns_none(self) -> None:
+        """``full`` mode: if turn_history is empty and compressed_history
+        has only zero-length entries, coarse must be ``None``."""
+        from photon_mlx.session import CompressedTurnState
+
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True, max_turns=3, storage_mode="full"
+            ),
+        )
+        session.compressed_history.append(
+            CompressedTurnState(
+                turn_id=0,
+                summary_vec=mx.zeros((0,), dtype=mx.float32),
+                timestamp=0.0,
+            )
+        )
+        assert session.get_session_coarse_state() is None
