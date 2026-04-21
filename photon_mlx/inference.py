@@ -128,56 +128,21 @@ class PhotonInference:
 
         The state captures encoder outputs at each hierarchy level
         for reuse in follow-up turns.
+
+        Uses ``PhotonModel._encode_bottom_up`` / ``_decode_from_enc_outputs``
+        shared helpers (DR1-003) to avoid duplicating the top-down stack.
         """
-        h = self.cfg.hierarchy
-        L = h.levels
         model = self.model
 
-        B, T = input_ids.shape
+        # Bottom-up (shared helper — chunk-aligned input required)
+        enc_outputs = model._encode_bottom_up(input_ids)
 
-        # Embed + project
-        tok = model.token_proj(model.token_embed(input_ids))
-
-        # Bottom-up
-        enc_outputs = [tok]
-        x = tok
-        for lv in range(L):
-            x = model.chunkers[lv](x)
-            from .blocks import causal_mask
-
-            mask = causal_mask(x.shape[1])
-            for block in model.encoders[lv]:
-                x = block(x, model._rope_cos, model._rope_sin, mask)
-            enc_outputs.append(x)
-
-        # Top-down
-        h_dec = enc_outputs[L]
-        mask = causal_mask(h_dec.shape[1])
-        for block in model.decoders[L - 1]:
-            h_dec = block(h_dec, model._rope_cos, model._rope_sin, mask)
-
-        for lv in reversed(range(1, L)):
-            h_dec = model._decode_level(
-                h_dec,
-                enc_outputs[lv],
-                model.converters[lv],
-                model.decoders[lv - 1],
-                h.chunk_sizes[lv],
-            )
-
-        h_dec = model._decode_level(
-            h_dec,
-            enc_outputs[0],
-            model.converters[0],
-            model.local_decoder,
-            h.chunk_sizes[0],
-        )
-
-        logits = model.lm_head(model.output_norm(h_dec))
+        # Top-down (shared helper; prefill path, cache disabled)
+        logits, _ = model._decode_from_enc_outputs(enc_outputs, top_kv_cache=None)
 
         state = HierarchicalState(
             level_states=[mx.array(e) for e in enc_outputs[1:]],
-            token_proj=tok,
+            token_proj=enc_outputs[0],
         )
 
         return logits, state
