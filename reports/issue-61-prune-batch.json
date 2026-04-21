@@ -1,0 +1,58 @@
+{
+  "config": {
+    "n_chunks": 64,
+    "max_len": 2048,
+    "max_chunks": 8,
+    "warmup": 3,
+    "measure": 10,
+    "seed": 42
+  },
+  "environment": {
+    "python": "3.12.3",
+    "platform": "macOS-26.4.1-arm64-arm-64bit",
+    "machine": "arm64",
+    "processor": "arm",
+    "mlx_version": "0.31.1"
+  },
+  "legacy": {
+    "min_ms": 55.428542000299785,
+    "p50_ms": 56.34918750365614,
+    "p95_ms": 61.17791699944064,
+    "max_ms": 64.37108399404678,
+    "mean_ms": 57.8957541998534,
+    "n": 10
+  },
+  "batched": {
+    "min_ms": 8.322250003402587,
+    "p50_ms": 8.524124998075422,
+    "p95_ms": 8.937625003454741,
+    "max_ms": 9.501166998234112,
+    "mean_ms": 8.644304199697217,
+    "n": 10
+  },
+  "speedup": {
+    "p50": 6.611,
+    "mean": 6.698
+  },
+  "selection_match": true,
+  "selection_legacy": [
+    11,
+    18,
+    22,
+    35,
+    47,
+    50,
+    51,
+    63
+  ],
+  "selection_batched": [
+    11,
+    18,
+    22,
+    35,
+    47,
+    50,
+    51,
+    63
+  ]
+}
