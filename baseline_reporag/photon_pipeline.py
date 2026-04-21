@@ -9,6 +9,7 @@ Provides:
 
 from __future__ import annotations
 
+import logging
 import uuid
 from math import prod
 from typing import Any
@@ -25,6 +26,8 @@ from .retrieval.graph_expansion import expand_with_graph
 from .retrieval.hybrid import apply_file_type_boost, hybrid_search
 from .retrieval.query_expansion import expand_query
 
+_logger = logging.getLogger(__name__)
+
 
 # ---------------------------------------------------------------------------
 # Utility functions
@@ -35,19 +38,29 @@ def tokenize_evidence_pack(
     text: str,
     tokenizer: Any,
     cfg: Any,
-    max_tokens: int = 2048,
+    max_tokens: int | None = None,
 ) -> mx.array:
     """Tokenize evidence text with chunk-aligned padding.
 
     Args:
         text: raw evidence text.
-        tokenizer: tokenizer with encode() and pad_token_id.
-        cfg: config with hierarchy.chunk_sizes.
-        max_tokens: hard cap on token count.
+        tokenizer: tokenizer with ``encode()`` and ``pad_token_id``.
+        cfg: a :class:`torch_ref.config.PhotonConfig` instance.  The baseline
+            ``Config`` (from ``configs/baseline.yaml``) does **not** define
+            ``model.max_position_embeddings`` and must not be passed here.
+        max_tokens: hard cap on token count.  When ``None`` (default), the
+            cap is taken from ``cfg.model.max_position_embeddings``.  Must be
+            positive; a :class:`ValueError` is raised otherwise (DR1-001).
 
     Returns:
         mx.array of token ids, length is a multiple of prod(chunk_sizes).
     """
+    if max_tokens is None:
+        max_tokens = cfg.model.max_position_embeddings
+
+    if max_tokens <= 0:
+        raise ValueError(f"max_tokens must be positive, got {max_tokens}")
+
     ids = tokenizer.encode(text)
     if not ids:
         return mx.array([], dtype=mx.int32)
@@ -176,8 +189,12 @@ def _build_photon_deps(cfg: Config) -> dict[str, Any]:
         tokenizer=tok_cfg,
     )
 
+    # Build the tokenizer before PhotonInference so both paths (question+evidence
+    # prefill in PhotonRAGPipeline and chunk scoring in prune_evidence) share
+    # the same stub instance (Issue #58).
+    tokenizer = _get_stub_tokenizer(photon_cfg.tokenizer.vocab_size)
     model = PhotonModel(photon_cfg)
-    photon_inference = PhotonInference(model, photon_cfg)
+    photon_inference = PhotonInference(model, photon_cfg, tokenizer)
 
     safe_recgen_enabled = getattr(cfg.get("inference"), "safe_recgen_enabled", True)
     if safe_recgen_enabled:
@@ -228,8 +245,6 @@ def _build_photon_deps(cfg: Config) -> dict[str, Any]:
     else:
         safe_recgen = None
 
-    tokenizer = _get_stub_tokenizer(photon_cfg.tokenizer.vocab_size)
-
     return {
         "photon_inference": photon_inference,
         "safe_recgen": safe_recgen,
@@ -254,6 +269,28 @@ class _StubTokenizer:
 
 def _get_stub_tokenizer(vocab_size: int) -> _StubTokenizer:
     return _StubTokenizer(vocab_size)
+
+
+def _clear_photon_session_state(photon_inference: Any, session_id: str) -> None:
+    """Drop PHOTON coarse/prev state and cached logits for ``session_id``.
+
+    Centralised fail-closed reset used in three places (design §8):
+    - ``tokenize_evidence_pack`` failure in the pipeline (CB-001).
+    - ``reprefill_hierarchy`` Safe RecGen action.
+    - ``fallback_to_baseline_path`` Safe RecGen action.
+
+    ``prev_logits`` must be cleared alongside ``current_state`` /
+    ``prev_state`` because ``PhotonSessionState.update()`` derives
+    ``token_agreement`` / ``logit_kl`` from ``prev_logits`` independently
+    of the hierarchy; leaving it set would leak stale drift into the next
+    turn (Codex CB-004).
+    """
+    photon_session = photon_inference._sessions.get(session_id)
+    if photon_session is None:
+        return
+    photon_session.current_state = None
+    photon_session.prev_state = None
+    photon_session.prev_logits = None
 
 
 def build_pipeline(cfg: Config) -> RepoRAGPipeline | PhotonRAGPipeline:
@@ -334,43 +371,7 @@ class PhotonRAGPipeline:
             cfg.repo.repo_commit,
         )
 
-        # --- PHOTON prefill for drift / confidence ---
         photon_session_id = session_id or "default"
-        evidence_tokens = tokenize_evidence_pack(question, self.tokenizer, cfg)
-        if evidence_tokens.size > 0:
-            input_ids = evidence_tokens.reshape(1, -1)
-            logits, drift = self.photon_inference.session_forward(
-                input_ids,
-                session_id=photon_session_id,
-                repo_id=repo_id or "unknown",
-                repo_commit="HEAD",
-            )
-            confidence = compute_confidence(logits)
-            drift_dict = drift.as_dict() if drift else None
-        else:
-            confidence = 1.0
-            drift = None
-            drift_dict = None
-
-        # --- Safe RecGen evaluation ---
-        fallback_dict = None
-        if self.safe_recgen is not None and drift is not None:
-            decision = self.safe_recgen.evaluate(
-                question, drift=drift, confidence=confidence
-            )
-            fallback_dict = decision.as_dict()
-        should_fallback = bool(fallback_dict and fallback_dict.get("should_fallback"))
-        fallback_actions = (
-            set(fallback_dict.get("actions", [])) if fallback_dict else set()
-        )
-
-        # A fallback that invalidates the PHOTON hierarchy must clear the session
-        # state so subsequent turns do not reuse a coarse state from a stale topic.
-        if fallback_actions & {"reprefill_hierarchy", "fallback_to_baseline_path"}:
-            photon_session = self.photon_inference._sessions.get(photon_session_id)
-            if photon_session is not None:
-                photon_session.current_state = None
-                photon_session.prev_state = None
 
         # --- Query expansion ---
         qe_cfg = cfg.retrieval.query_expansion
@@ -396,10 +397,14 @@ class PhotonRAGPipeline:
 
         is_follow_up = len(session.turns) > 0
 
-        # --- Reranking (skip on follow-up: PHOTON pruning handles selection,
-        # unless Safe RecGen demands fallback to the baseline path) ---
+        # --- Reranking ---
+        # On follow-up turns, PHOTON pruning handles chunk selection.  On turn
+        # 1 (or when no reranker is configured), reranking runs as usual.  The
+        # current-turn Safe RecGen fallback decision is now computed *after*
+        # the evidence pack is built (see design §5.3 / Issue #58), so it no
+        # longer gates reranking or pruning within this turn.
         with prof.phase("reranking"):
-            if bl.reranker is not None and (not is_follow_up or should_fallback):
+            if bl.reranker is not None and not is_follow_up:
                 raw = bl.reranker.rerank(
                     query=question,
                     results=raw,
@@ -428,6 +433,7 @@ class PhotonRAGPipeline:
             )
 
         # --- Evidence pruning (PHOTON-guided, follow-up turns only) ---
+        # Uses the *previous* turn's coarse state (1-pass constraint, design §4).
         inference_cfg = cfg.get("inference")
         pruning_enabled = (
             getattr(inference_cfg, "evidence_pruning_enabled", False)
@@ -440,9 +446,7 @@ class PhotonRAGPipeline:
             else 8
         )
         effective_max_chunks = cfg.evidence_pack.max_chunks
-        # Skip PHOTON pruning when Safe RecGen demanded fallback: the coarse
-        # state it relies on is not trustworthy for this turn.
-        if pruning_enabled and is_follow_up and not should_fallback:
+        if pruning_enabled and is_follow_up:
             # Fetch chunk texts for scoring
             chunks_for_scoring = bl.store.get_many(expanded_ids)
             chunk_texts = [c.content for c in chunks_for_scoring]
@@ -467,6 +471,69 @@ class PhotonRAGPipeline:
                 max_chunks=effective_max_chunks,
                 max_tokens=cfg.evidence_pack.max_tokens,
             )
+
+        # --- PHOTON prefill on question + evidence (new coarse state) ---
+        # Issue #58: the coarse state is now built from the concatenation of
+        # the question and the evidence text so drift, Safe RecGen, and the
+        # next turn's prune_evidence operate in a richer semantic space.
+        # Fail-closed: if tokenization fails we clear the PHOTON session
+        # state and fall through to the baseline generation path rather than
+        # silently reusing a stale coarse state on the next turn (design §8
+        # + CB-001).
+        evidence_text_for_photon = pack.format_for_prompt()
+        photon_input_text = question + "\n\n" + evidence_text_for_photon
+        drift = None
+        drift_dict = None
+        confidence = 1.0
+        tokenization_failed = False
+        try:
+            evidence_tokens = tokenize_evidence_pack(
+                photon_input_text,
+                self.tokenizer,
+                self.photon_cfg,
+            )
+        except Exception as exc:
+            _logger.warning(
+                "tokenize_evidence_pack failed; clearing PHOTON session "
+                "state and falling back to baseline path for this turn "
+                "(fail-closed, CB-001): %s",
+                exc,
+            )
+            tokenization_failed = True
+            evidence_tokens = mx.array([], dtype=mx.int32)
+            # Explicit fail-closed: drop any prior coarse/prev state so the
+            # next turn cannot reuse a stale hierarchy.  No raw input text,
+            # token ids, or latents are retained (design §8).
+            _clear_photon_session_state(self.photon_inference, photon_session_id)
+
+        if evidence_tokens.size > 0:
+            input_ids = evidence_tokens.reshape(1, -1)
+            logits, drift = self.photon_inference.session_forward(
+                input_ids,
+                session_id=photon_session_id,
+                repo_id=repo_id or "unknown",
+                repo_commit="HEAD",
+            )
+            confidence = compute_confidence(logits)
+            drift_dict = drift.as_dict() if drift else None
+
+        # --- Safe RecGen evaluation (uses new coarse state) ---
+        fallback_dict = None
+        if self.safe_recgen is not None and drift is not None:
+            decision = self.safe_recgen.evaluate(
+                question, drift=drift, confidence=confidence
+            )
+            fallback_dict = decision.as_dict()
+        fallback_actions = (
+            set(fallback_dict.get("actions", [])) if fallback_dict else set()
+        )
+
+        # A fallback that invalidates the PHOTON hierarchy must clear the
+        # session state (including prev_logits) so subsequent turns do not
+        # reuse a coarse state or drift reference from a stale topic
+        # (design §8 fail-closed; Codex CB-004).
+        if fallback_actions & {"reprefill_hierarchy", "fallback_to_baseline_path"}:
+            _clear_photon_session_state(self.photon_inference, photon_session_id)
 
         # --- Generation ---
         with prof.phase("generation"):
@@ -533,9 +600,8 @@ class PhotonRAGPipeline:
                 "fallback_reason": (
                     fallback_dict.get("reasons") if fallback_dict else None
                 ),
-                "evidence_pruning_applied": (
-                    pruning_enabled and is_follow_up and not should_fallback
-                ),
+                "evidence_pruning_applied": (pruning_enabled and is_follow_up),
+                "photon_tokenization_failed": tokenization_failed,
             }
         )
 
