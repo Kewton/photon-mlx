@@ -10,7 +10,9 @@ Wraps the PhotonModel for multi-turn session usage:
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
+from typing import Any
 
 import mlx.core as mx
 
@@ -22,6 +24,8 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from torch_ref.config import PhotonConfig  # noqa: E402
 
+_logger = logging.getLogger(__name__)
+
 
 class PhotonInference:
     """
@@ -30,9 +34,18 @@ class PhotonInference:
     Manages per-session hierarchical state and drift metrics.
     """
 
-    def __init__(self, model: PhotonModel, cfg: PhotonConfig) -> None:
+    def __init__(
+        self,
+        model: PhotonModel,
+        cfg: PhotonConfig,
+        tokenizer: Any,
+    ) -> None:
         self.model = model
         self.cfg = cfg
+        # Shared tokenizer instance used by both the pipeline (question+evidence
+        # prefill) and ``prune_evidence`` (chunk scoring).  Required so both
+        # paths live in the same semantic space (Issue #58).
+        self.tokenizer = tokenizer
         self._sessions: dict[str, PhotonSessionState] = {}
 
     def get_session(
@@ -180,10 +193,24 @@ class PhotonInference:
                 scores.append((idx, -1.0))
                 continue
 
-            # Tokenize chunk text using stub tokenizer byte encoding
-            token_ids = [
-                b % self.cfg.tokenizer.vocab_size for b in text.encode("utf-8")
-            ]
+            # Tokenize chunk text via the pipeline-held tokenizer so the chunk
+            # and question paths share a single semantic space (Issue #58).
+            # Fail-closed (CB-002): if ``encode`` raises we cannot produce a
+            # trustworthy ranking — ``scores[:max_chunks]`` would otherwise
+            # surface an arbitrary prefix of the input list.  Abandon pruning
+            # entirely and return all indices so the caller keeps every
+            # chunk instead of silently dropping evidence (design §8).
+            try:
+                token_ids = list(self.tokenizer.encode(text))
+            except Exception as exc:
+                _logger.warning(
+                    "tokenizer.encode failed for chunk %d; disabling "
+                    "pruning for this call and returning all indices "
+                    "(fail-closed, CB-002): %s",
+                    idx,
+                    exc,
+                )
+                return all_indices
             if not token_ids:
                 scores.append((idx, -1.0))
                 continue

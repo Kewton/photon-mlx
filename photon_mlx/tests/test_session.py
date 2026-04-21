@@ -154,11 +154,12 @@ class TestSessionState:
 
 class TestInference:
     @pytest.fixture
-    def engine(self) -> PhotonInference:
+    def engine(self, stub_tokenizer_for_cfg) -> PhotonInference:
         mx.random.seed(42)
         cfg = _tiny_cfg()
         model = PhotonModel(cfg)
-        return PhotonInference(model, cfg)
+        tokenizer = stub_tokenizer_for_cfg(cfg)
+        return PhotonInference(model, cfg, tokenizer)
 
     def test_hierarchical_prefill_shape(self, engine: PhotonInference) -> None:
         ids = mx.random.randint(0, 256, (1, 16))
@@ -204,11 +205,12 @@ class TestPruneEvidence:
     """prune_evidence selects top-K chunks using PHOTON coarse state."""
 
     @pytest.fixture
-    def engine(self) -> PhotonInference:
+    def engine(self, stub_tokenizer_for_cfg) -> PhotonInference:
         mx.random.seed(42)
         cfg = _tiny_cfg()
         model = PhotonModel(cfg)
-        return PhotonInference(model, cfg)
+        tokenizer = stub_tokenizer_for_cfg(cfg)
+        return PhotonInference(model, cfg, tokenizer)
 
     def test_turn1_no_pruning(self, engine: PhotonInference) -> None:
         """On turn 1 (no session state), all indices are returned."""

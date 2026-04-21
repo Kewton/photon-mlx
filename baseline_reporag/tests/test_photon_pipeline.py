@@ -120,6 +120,7 @@ class TestTokenizeEvidencePack:
 
         cfg = MagicMock()
         cfg.hierarchy.chunk_sizes = [4, 4]  # prod = 16
+        cfg.model.max_position_embeddings = 2048
 
         result = tokenize_evidence_pack("hello world", tokenizer, cfg)
         assert isinstance(result, mx.array)
@@ -135,6 +136,7 @@ class TestTokenizeEvidencePack:
 
         cfg = MagicMock()
         cfg.hierarchy.chunk_sizes = [4, 4]
+        cfg.model.max_position_embeddings = 2048
 
         result = tokenize_evidence_pack("long text", tokenizer, cfg, max_tokens=2048)
         assert result.shape[0] == 2048  # 2048 is already multiple of 16
@@ -148,6 +150,7 @@ class TestTokenizeEvidencePack:
 
         cfg = MagicMock()
         cfg.hierarchy.chunk_sizes = [4, 4]
+        cfg.model.max_position_embeddings = 2048
 
         result = tokenize_evidence_pack("", tokenizer, cfg)
         # Empty → pad to padding_multiple (16)
@@ -162,9 +165,30 @@ class TestTokenizeEvidencePack:
 
         cfg = MagicMock()
         cfg.hierarchy.chunk_sizes = [4, 4]
+        cfg.model.max_position_embeddings = 2048
 
         result = tokenize_evidence_pack("text", tokenizer, cfg)
         assert result.shape[0] == 32  # no extra padding needed
+
+    def test_raises_on_non_positive_max_tokens(self):
+        """max_tokens <= 0 must raise ValueError (DR1-001)."""
+        import pytest
+
+        from baseline_reporag.photon_pipeline import tokenize_evidence_pack
+
+        tokenizer = MagicMock()
+        tokenizer.encode.return_value = list(range(10))
+        tokenizer.pad_token_id = 0
+
+        cfg = MagicMock()
+        cfg.hierarchy.chunk_sizes = [4, 4]
+        cfg.model.max_position_embeddings = 2048
+
+        with pytest.raises(ValueError, match="max_tokens must be positive"):
+            tokenize_evidence_pack("text", tokenizer, cfg, max_tokens=0)
+
+        with pytest.raises(ValueError, match="max_tokens must be positive"):
+            tokenize_evidence_pack("text", tokenizer, cfg, max_tokens=-1)
 
 
 # ---------------------------------------------------------------------------
@@ -378,11 +402,20 @@ def _make_mock_deps():
 
 def _make_mock_photon_deps():
     """Create mocked PHOTON pipeline dependencies."""
+    photon_cfg = MagicMock()
+    # tokenize_evidence_pack reads cfg.model.max_position_embeddings and
+    # cfg.hierarchy.chunk_sizes; make both deterministic so the PHOTON
+    # prefill branch exercises real arithmetic.
+    photon_cfg.model.max_position_embeddings = 2048
+    photon_cfg.hierarchy.chunk_sizes = [4, 4]
+    tokenizer = MagicMock()
+    tokenizer.encode.return_value = list(range(32))
+    tokenizer.pad_token_id = 0
     return {
         "photon_inference": MagicMock(),
         "safe_recgen": MagicMock(),
-        "photon_cfg": MagicMock(),
-        "tokenizer": MagicMock(),
+        "photon_cfg": photon_cfg,
+        "tokenizer": tokenizer,
     }
 
 
@@ -738,6 +771,129 @@ class TestPhotonQueryFlow:
 
 
 # ---------------------------------------------------------------------------
+# Issue #58: PHOTON prefill receives question + evidence text
+# ---------------------------------------------------------------------------
+
+
+class TestPhotonInputContainsQuestionPlusEvidence:
+    """session_forward must receive more tokens than the question alone.
+
+    After Issue #58, PhotonRAGPipeline.query concatenates the question and
+    the evidence pack text before running the PHOTON prefill.  The resulting
+    ``input_ids`` passed to ``session_forward`` therefore must be strictly
+    larger than what the question alone would produce; this test exercises
+    that contract with a controlled, injectable tokenizer.
+    """
+
+    def test_query_passes_question_plus_evidence_to_photon_prefill(self):
+        from baseline_reporag.ingestion.chunker import Chunk
+        import mlx.core as mx
+
+        cfg = _make_pruning_cfg_disabled()
+        pipeline, baseline_deps, photon_deps, _mock_session, mock_results = (
+            _setup_pipeline_for_pruning(cfg, session_turns=0)
+        )
+
+        # Install a deterministic byte-level tokenizer so we can compare
+        # "question only" vs "question + evidence" token counts reliably.
+        class _ByteTokenizer:
+            vocab_size = 256
+            pad_token_id = 0
+
+            def encode(self, text):
+                return list(text.encode("utf-8"))
+
+        pipeline.tokenizer = _ByteTokenizer()
+        pipeline.photon_cfg = MagicMock()
+        pipeline.photon_cfg.model.max_position_embeddings = 4096
+        pipeline.photon_cfg.hierarchy.chunk_sizes = [4, 4]
+
+        question = "What does func_0 return?"
+
+        chunks = [
+            Chunk(
+                chunk_id=f"chunk_{i}",
+                repo_id="test-repo",
+                repo_commit="abc123",
+                rel_path=f"file{i}.py",
+                language="python",
+                start_line=1,
+                end_line=10,
+                content=(
+                    f"def func_{i}(x):\n    # evidence body with some bytes\n"
+                    f"    return x + {i}"
+                ),
+                symbols=[f"func_{i}"],
+                section_header="",
+                file_header="",
+            )
+            for i in range(4)
+        ]
+
+        def mock_get_many(ids):
+            by_id = {c.chunk_id: c for c in chunks}
+            return [by_id[cid] for cid in ids if cid in by_id]
+
+        baseline_deps["store"].get_many.side_effect = mock_get_many
+        expanded_ids = [f"chunk_{i}" for i in range(4)]
+
+        mock_drift = MagicMock()
+        mock_drift.as_dict.return_value = {"latent_cosine_drift": 0.02}
+        photon_deps["photon_inference"].session_forward.return_value = (
+            mx.zeros((1, 16, 256)),
+            mock_drift,
+        )
+
+        with (
+            patch(
+                "baseline_reporag.photon_pipeline.hybrid_search",
+                return_value=mock_results,
+            ),
+            patch(
+                "baseline_reporag.photon_pipeline.expand_with_graph",
+                return_value=expanded_ids,
+            ),
+        ):
+            baseline_deps["generator"].generate.return_value = "answer [C:1]"
+            pipeline.query(question, session_id="s1", repo_id="test-repo")
+
+        # session_forward must have been called with the concatenated
+        # question + evidence input.  Raw byte-length comparisons are unsafe
+        # because ``tokenize_evidence_pack`` pads to a chunk-aligned length
+        # (CB-003); a question-only regression would still pad up (e.g. a
+        # 24-byte question with chunk_sizes=[4,4] pads to 32 tokens) and slip
+        # through such an assertion.  Instead compare against the actual
+        # chunk-aligned length that ``tokenize_evidence_pack(question, ...)``
+        # would produce under the same config.
+        from baseline_reporag.photon_pipeline import tokenize_evidence_pack
+
+        call_args = photon_deps["photon_inference"].session_forward.call_args
+        assert call_args is not None, "session_forward was not invoked"
+        input_ids = (
+            call_args.args[0] if call_args.args else call_args.kwargs["input_ids"]
+        )
+        total_tokens = int(input_ids.shape[-1])
+
+        question_only_tokens = int(
+            tokenize_evidence_pack(
+                question,
+                pipeline.tokenizer,
+                pipeline.photon_cfg,
+            ).shape[-1]
+        )
+        assert total_tokens > question_only_tokens, (
+            f"input_ids ({total_tokens} tokens) must exceed the chunk-aligned "
+            f"question-only length ({question_only_tokens} tokens) because "
+            "the evidence pack must be concatenated in before PHOTON prefill."
+        )
+        # The total length must also be a multiple of prod(chunk_sizes)=16,
+        # which is a structural invariant of tokenize_evidence_pack.
+        assert total_tokens % 16 == 0, (
+            f"input_ids length {total_tokens} must be aligned to prod(chunk_sizes)=16."
+        )
+
+
+# ---------------------------------------------------------------------------
 # TDD Cycle 9: Evidence pruning (Issue #37)
 # ---------------------------------------------------------------------------
 
@@ -1029,8 +1185,12 @@ def _configure_fallback_decision(photon_deps, *, should_fallback: bool, actions=
 class TestSafeRecGenFallbackIntegration:
     """fallback_dict from safe_recgen must steer reranker / pruning / session state."""
 
-    def test_fallback_forces_reranker_on_follow_up(self):
-        """should_fallback=True must run reranker even on follow-up turns."""
+    def test_fallback_does_not_force_reranker_on_follow_up(self):
+        """After Issue #58 the Safe RecGen decision is computed after the
+        evidence pack is built, so a current-turn fallback can no longer gate
+        reranking within the same turn.  Reranker therefore does NOT run on
+        follow-up turns, regardless of the fallback decision; reranking
+        quality on the fallback path is covered by the baseline pipeline."""
         cfg = _make_pruning_cfg()
         pipeline, baseline_deps, photon_deps, mock_session, mock_results = (
             _setup_pipeline_for_pruning(cfg, session_turns=1)
@@ -1060,14 +1220,20 @@ class TestSafeRecGenFallbackIntegration:
             baseline_deps["generator"].generate.return_value = "Answer [C:1]"
             pipeline.query("security question", session_id="s1", repo_id="test-repo")
 
-        reranker.rerank.assert_called_once()
+        # New contract: follow-up turns skip the reranker; fallback cannot
+        # influence that decision from within the same turn.
+        reranker.rerank.assert_not_called()
 
-    def test_fallback_skips_pruning_on_follow_up(self):
-        """should_fallback=True must skip PHOTON pruning on follow-up turns."""
+    def test_fallback_does_not_skip_pruning_on_follow_up(self):
+        """After Issue #58 prune_evidence runs before the PHOTON prefill and
+        therefore before Safe RecGen evaluation; the current-turn fallback
+        decision can no longer skip pruning.  Pruning always runs on
+        follow-up turns when enabled."""
         cfg = _make_pruning_cfg()
         pipeline, baseline_deps, photon_deps, mock_session, mock_results = (
             _setup_pipeline_for_pruning(cfg, session_turns=1)
         )
+        photon_deps["photon_inference"].prune_evidence.return_value = list(range(8))
 
         expanded_ids = _make_fallback_chunks_and_store(baseline_deps)
         _configure_fallback_decision(
@@ -1089,10 +1255,11 @@ class TestSafeRecGenFallbackIntegration:
             baseline_deps["generator"].generate.return_value = "Answer [C:1]"
             pipeline.query("delete user account", session_id="s1", repo_id="test-repo")
 
-        photon_deps["photon_inference"].prune_evidence.assert_not_called()
+        photon_deps["photon_inference"].prune_evidence.assert_called_once()
 
     def test_reprefill_hierarchy_resets_photon_session_state(self):
-        """reprefill_hierarchy action must clear current_state/prev_state."""
+        """reprefill_hierarchy action must clear current_state/prev_state
+        and prev_logits (Codex CB-004: stale logits leak drift otherwise)."""
         from photon_mlx.session import HierarchicalState, PhotonSessionState
 
         import mlx.core as mx
@@ -1105,6 +1272,7 @@ class TestSafeRecGenFallbackIntegration:
         real_state = PhotonSessionState("s1", "test-repo", "abc123")
         real_state.current_state = HierarchicalState(level_states=[mx.zeros((1, 4, 8))])
         real_state.prev_state = HierarchicalState(level_states=[mx.zeros((1, 4, 8))])
+        real_state.prev_logits = mx.zeros((1, 4, 16))
         photon_deps["photon_inference"]._sessions = {"s1": real_state}
 
         expanded_ids = _make_fallback_chunks_and_store(baseline_deps)
@@ -1129,9 +1297,11 @@ class TestSafeRecGenFallbackIntegration:
 
         assert real_state.current_state is None
         assert real_state.prev_state is None
+        assert real_state.prev_logits is None
 
     def test_fallback_to_baseline_path_resets_photon_session_state(self):
-        """fallback_to_baseline_path action must clear PHOTON session state."""
+        """fallback_to_baseline_path action must clear PHOTON session state
+        including prev_logits (Codex CB-004: stale logits leak drift)."""
         from photon_mlx.session import HierarchicalState, PhotonSessionState
 
         import mlx.core as mx
@@ -1144,6 +1314,7 @@ class TestSafeRecGenFallbackIntegration:
         real_state = PhotonSessionState("s1", "test-repo", "abc123")
         real_state.current_state = HierarchicalState(level_states=[mx.zeros((1, 4, 8))])
         real_state.prev_state = HierarchicalState(level_states=[mx.zeros((1, 4, 8))])
+        real_state.prev_logits = mx.zeros((1, 4, 16))
         photon_deps["photon_inference"]._sessions = {"s1": real_state}
 
         expanded_ids = _make_fallback_chunks_and_store(baseline_deps)
@@ -1168,6 +1339,7 @@ class TestSafeRecGenFallbackIntegration:
 
         assert real_state.current_state is None
         assert real_state.prev_state is None
+        assert real_state.prev_logits is None
 
     def test_normal_follow_up_still_runs_pruning(self):
         """should_fallback=False on follow-up must still prune (regression guard)."""
@@ -1230,3 +1402,153 @@ class TestSafeRecGenFallbackIntegration:
 
         assert real_state.current_state is not None
         assert real_state.prev_state is not None
+
+
+# ---------------------------------------------------------------------------
+# Issue #58 Codex review fixes: fail-closed regression tests
+# ---------------------------------------------------------------------------
+
+
+class TestTokenizeEvidencePackFailureFailsClosed:
+    """CB-001: when tokenize_evidence_pack raises, PHOTON session state must
+    be cleared and generation must still complete via the baseline path."""
+
+    def test_tokenization_failure_clears_photon_session_state(self):
+        """A tokenizer.encode exception at question+evidence time must (a)
+        continue generation via the baseline path, (b) leave drift_metrics
+        unset (None), (c) drop any prior coarse state so the next turn is
+        not polluted, and (d) surface the failure in the turn log."""
+        import mlx.core as mx
+        from baseline_reporag.ingestion.chunker import Chunk
+        from photon_mlx.session import HierarchicalState, PhotonSessionState
+
+        cfg = _make_pruning_cfg_disabled()
+        pipeline, baseline_deps, photon_deps, _mock_session, mock_results = (
+            _setup_pipeline_for_pruning(cfg, session_turns=1)
+        )
+
+        # Seed a stale PHOTON session state that must be cleared when
+        # tokenization fails.
+        real_state = PhotonSessionState("s1", "test-repo", "abc123")
+        real_state.current_state = HierarchicalState(level_states=[mx.zeros((1, 4, 8))])
+        real_state.prev_state = HierarchicalState(level_states=[mx.zeros((1, 4, 8))])
+        photon_deps["photon_inference"]._sessions = {"s1": real_state}
+
+        # Install a tokenizer whose encode() always raises.
+        class _BrokenTokenizer:
+            vocab_size = 256
+            pad_token_id = 0
+
+            def encode(self, text):
+                raise RuntimeError("simulated tokenizer failure")
+
+        pipeline.tokenizer = _BrokenTokenizer()
+        pipeline.photon_cfg = MagicMock()
+        pipeline.photon_cfg.model.max_position_embeddings = 4096
+        pipeline.photon_cfg.hierarchy.chunk_sizes = [4, 4]
+
+        chunks = [
+            Chunk(
+                chunk_id=f"chunk_{i}",
+                repo_id="test-repo",
+                repo_commit="abc123",
+                rel_path=f"file{i}.py",
+                language="python",
+                start_line=1,
+                end_line=10,
+                content=f"def func_{i}(): pass",
+                symbols=[f"func_{i}"],
+                section_header="",
+                file_header="",
+            )
+            for i in range(4)
+        ]
+
+        def mock_get_many(ids):
+            by_id = {c.chunk_id: c for c in chunks}
+            return [by_id[cid] for cid in ids if cid in by_id]
+
+        baseline_deps["store"].get_many.side_effect = mock_get_many
+        expanded_ids = [f"chunk_{i}" for i in range(4)]
+
+        with (
+            patch(
+                "baseline_reporag.photon_pipeline.hybrid_search",
+                return_value=mock_results,
+            ),
+            patch(
+                "baseline_reporag.photon_pipeline.expand_with_graph",
+                return_value=expanded_ids,
+            ),
+        ):
+            baseline_deps["generator"].generate.return_value = "answer [C:1]"
+            result = pipeline.query("follow-up?", session_id="s1", repo_id="test-repo")
+
+        # (a) Generation still produced an answer via baseline path.
+        assert result.answer == "answer [C:1]"
+        # (b) PHOTON drift/confidence were not applied.
+        assert result.drift_metrics is None
+        # (c) Session state was explicitly cleared (fail-closed).
+        assert real_state.current_state is None
+        assert real_state.prev_state is None
+        assert real_state.prev_logits is None
+        # session_forward must not run on the broken tokens.
+        photon_deps["photon_inference"].session_forward.assert_not_called()
+        # (d) Failure surfaces in the turn log for observability.
+        log_call = baseline_deps["logger"].log_turn.call_args
+        log_payload = log_call.args[0] if log_call.args else log_call.kwargs["entry"]
+        assert log_payload["photon_tokenization_failed"] is True
+
+
+class TestPruneEvidenceFailureFailsClosed:
+    """CB-002: when prune_evidence's tokenizer.encode raises, the call must
+    fail-closed by returning ALL chunk indices (pruning disabled) rather
+    than silently surfacing an arbitrary prefix of the input list."""
+
+    def test_prune_evidence_encode_exception_returns_all_indices(self):
+        """If tokenizer.encode raises inside prune_evidence, the function
+        must abandon ranking and return every index so the caller retains
+        all evidence chunks."""
+        import mlx.core as mx
+        from photon_mlx.inference import PhotonInference
+        from photon_mlx.session import HierarchicalState, PhotonSessionState
+        from torch_ref.config import PhotonConfig
+
+        photon_cfg = PhotonConfig()
+        photon_cfg.hierarchy.chunk_sizes = [4, 4]
+        photon_cfg.hierarchy.levels = 2
+
+        class _BrokenTokenizer:
+            vocab_size = 256
+            pad_token_id = 0
+
+            def encode(self, text):
+                raise RuntimeError("simulated encode failure")
+
+        # Build an inference that has a prior coarse state so pruning would
+        # otherwise be attempted (rather than short-circuited by "turn 1").
+        mock_model = MagicMock()
+        inference = PhotonInference(mock_model, photon_cfg, _BrokenTokenizer())
+        session = PhotonSessionState("s1", "test-repo", "abc")
+        session.current_state = HierarchicalState(level_states=[mx.zeros((1, 4, 8))])
+        inference._sessions["s1"] = session
+
+        chunk_texts = [f"def func_{i}(): pass" for i in range(10)]
+        chunk_ids = [f"chunk_{i}" for i in range(10)]
+        max_chunks = 4
+
+        indices = inference.prune_evidence(
+            chunk_texts=chunk_texts,
+            chunk_ids=chunk_ids,
+            session_id="s1",
+            max_chunks=max_chunks,
+        )
+
+        # Fail-closed: return ALL indices (not just the first max_chunks).
+        # The pre-fix behaviour would have returned indices [0, 1, 2, 3]
+        # (arbitrary prefix); the post-fix behaviour returns the full list.
+        assert indices == list(range(10)), (
+            "prune_evidence must return all chunk indices when encode fails "
+            "(fail-closed, CB-002); returning a ranked prefix of the input "
+            "list is a bug."
+        )

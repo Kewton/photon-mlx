@@ -149,9 +149,9 @@ reports/                # ベンチマークレポート
 ## プロダクトライン
 
 - **プロダクトライン**: baseline_rag (Gate 2 v2 判定: No-Go → PHOTON 凍結)
-- **現在のメトリクス** (2026-04-17):
-  - Static no-citation: 17.5% (True NC: 12.4%)
-  - MT no-citation: 13.3%
+- **現在のメトリクス** (Gate 2 v4, 出典: `reports/gate2_judgment_v4_final.md`):
+  - Static no-citation: baseline 21.7% / PHOTON 20.0%
+  - MT no-citation: 6.7%
   - Retrieval noise: 0%
 - **運用ドキュメント**: `docs/deployment.md`, `docs/troubleshooting.md`
 
