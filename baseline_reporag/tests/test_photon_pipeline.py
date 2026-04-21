@@ -1269,8 +1269,14 @@ class TestSafeRecGenFallbackIntegration:
 
     def test_reprefill_hierarchy_resets_photon_session_state(self):
         """reprefill_hierarchy action must clear current_state/prev_state
-        and prev_logits (Codex CB-004: stale logits leak drift otherwise)."""
-        from photon_mlx.session import HierarchicalState, PhotonSessionState
+        and prev_logits (Codex CB-004: stale logits leak drift otherwise).
+        Issue #64 extends the contract to also empty ``turn_history``."""
+        from photon_mlx.session import (
+            HierarchicalState,
+            PhotonSessionState,
+            TurnState,
+            WorkingMemoryConfig,
+        )
 
         import mlx.core as mx
 
@@ -1279,10 +1285,18 @@ class TestSafeRecGenFallbackIntegration:
             _setup_pipeline_for_pruning(cfg, session_turns=1)
         )
 
-        real_state = PhotonSessionState("s1", "test-repo", "abc123")
+        real_state = PhotonSessionState(
+            "s1",
+            "test-repo",
+            "abc123",
+            working_memory_cfg=WorkingMemoryConfig(enabled=True),
+        )
         real_state.current_state = HierarchicalState(level_states=[mx.zeros((1, 4, 8))])
         real_state.prev_state = HierarchicalState(level_states=[mx.zeros((1, 4, 8))])
         real_state.prev_logits = mx.zeros((1, 4, 16))
+        real_state.turn_history.append(
+            TurnState(turn_id=1, hierarchical_state=real_state.current_state)
+        )
         photon_deps["photon_inference"]._sessions = {"s1": real_state}
 
         expanded_ids = _make_fallback_chunks_and_store(baseline_deps)
@@ -1308,11 +1322,18 @@ class TestSafeRecGenFallbackIntegration:
         assert real_state.current_state is None
         assert real_state.prev_state is None
         assert real_state.prev_logits is None
+        assert real_state.turn_history == []
 
     def test_fallback_to_baseline_path_resets_photon_session_state(self):
         """fallback_to_baseline_path action must clear PHOTON session state
-        including prev_logits (Codex CB-004: stale logits leak drift)."""
-        from photon_mlx.session import HierarchicalState, PhotonSessionState
+        including prev_logits (Codex CB-004: stale logits leak drift).
+        Issue #64 extends the contract to also empty ``turn_history``."""
+        from photon_mlx.session import (
+            HierarchicalState,
+            PhotonSessionState,
+            TurnState,
+            WorkingMemoryConfig,
+        )
 
         import mlx.core as mx
 
@@ -1321,10 +1342,18 @@ class TestSafeRecGenFallbackIntegration:
             _setup_pipeline_for_pruning(cfg, session_turns=1)
         )
 
-        real_state = PhotonSessionState("s1", "test-repo", "abc123")
+        real_state = PhotonSessionState(
+            "s1",
+            "test-repo",
+            "abc123",
+            working_memory_cfg=WorkingMemoryConfig(enabled=True),
+        )
         real_state.current_state = HierarchicalState(level_states=[mx.zeros((1, 4, 8))])
         real_state.prev_state = HierarchicalState(level_states=[mx.zeros((1, 4, 8))])
         real_state.prev_logits = mx.zeros((1, 4, 16))
+        real_state.turn_history.append(
+            TurnState(turn_id=1, hierarchical_state=real_state.current_state)
+        )
         photon_deps["photon_inference"]._sessions = {"s1": real_state}
 
         expanded_ids = _make_fallback_chunks_and_store(baseline_deps)
@@ -1350,6 +1379,7 @@ class TestSafeRecGenFallbackIntegration:
         assert real_state.current_state is None
         assert real_state.prev_state is None
         assert real_state.prev_logits is None
+        assert real_state.turn_history == []
 
     def test_normal_follow_up_still_runs_pruning(self):
         """should_fallback=False on follow-up must still prune (regression guard)."""
@@ -1427,10 +1457,16 @@ class TestTokenizeEvidencePackFailureFailsClosed:
         """A tokenizer.encode exception at question+evidence time must (a)
         continue generation via the baseline path, (b) leave drift_metrics
         unset (None), (c) drop any prior coarse state so the next turn is
-        not polluted, and (d) surface the failure in the turn log."""
+        not polluted, and (d) surface the failure in the turn log. Issue
+        #64 extends the contract to also empty ``turn_history``."""
         import mlx.core as mx
         from baseline_reporag.ingestion.chunker import Chunk
-        from photon_mlx.session import HierarchicalState, PhotonSessionState
+        from photon_mlx.session import (
+            HierarchicalState,
+            PhotonSessionState,
+            TurnState,
+            WorkingMemoryConfig,
+        )
 
         cfg = _make_pruning_cfg_disabled()
         pipeline, baseline_deps, photon_deps, _mock_session, mock_results = (
@@ -1439,9 +1475,17 @@ class TestTokenizeEvidencePackFailureFailsClosed:
 
         # Seed a stale PHOTON session state that must be cleared when
         # tokenization fails.
-        real_state = PhotonSessionState("s1", "test-repo", "abc123")
+        real_state = PhotonSessionState(
+            "s1",
+            "test-repo",
+            "abc123",
+            working_memory_cfg=WorkingMemoryConfig(enabled=True),
+        )
         real_state.current_state = HierarchicalState(level_states=[mx.zeros((1, 4, 8))])
         real_state.prev_state = HierarchicalState(level_states=[mx.zeros((1, 4, 8))])
+        real_state.turn_history.append(
+            TurnState(turn_id=1, hierarchical_state=real_state.current_state)
+        )
         photon_deps["photon_inference"]._sessions = {"s1": real_state}
 
         # Install a tokenizer whose encode() always raises.
@@ -1502,6 +1546,7 @@ class TestTokenizeEvidencePackFailureFailsClosed:
         assert real_state.current_state is None
         assert real_state.prev_state is None
         assert real_state.prev_logits is None
+        assert real_state.turn_history == []
         # session_forward must not run on the broken tokens.
         photon_deps["photon_inference"].session_forward.assert_not_called()
         # (d) Failure surfaces in the turn log for observability.
@@ -2598,3 +2643,252 @@ class TestPhotonGenerationBranch:
         )
         with pytest.raises(ValueError, match="generation_fallback_policy"):
             _run_generation_branch_query(cfg)
+
+
+# ---------------------------------------------------------------------------
+# Issue #64: session_memory.working_memory extraction and security regression
+# ---------------------------------------------------------------------------
+
+
+class TestBuildPhotonDepsWorkingMemory:
+    """_build_photon_deps wires session_memory.working_memory into PhotonInference."""
+
+    def test_enabled_working_memory_flows_into_inference(self, tmp_path):
+        from baseline_reporag.config import load_config
+        from baseline_reporag.photon_pipeline import _build_photon_deps
+        from photon_mlx.session import WorkingMemoryConfig
+
+        cfg_file = tmp_path / "photon.yaml"
+        cfg_file.write_text(
+            "model:\n"
+            "  provider: photon\n"
+            "  architecture: photon_decoder\n"
+            "  base_embed_dim: 64\n"
+            "  hidden_size: 128\n"
+            "  intermediate_size: 256\n"
+            "  num_heads: 4\n"
+            "  vocab_size: 1000\n"
+            "hierarchy:\n"
+            "  levels: 2\n"
+            "  chunk_sizes: [4, 4]\n"
+            "  encoder_layers_per_level: [2, 2]\n"
+            "  decoder_layers_per_level: [2, 2]\n"
+            "inference:\n"
+            "  hierarchical_prefill: true\n"
+            "  safe_recgen_enabled: false\n"
+            "session_memory:\n"
+            "  mode: photon\n"
+            "  working_memory:\n"
+            "    enabled: true\n"
+            "    max_turns: 4\n"
+            "    decay_factor: 0.25\n"
+        )
+        cfg = load_config(str(cfg_file))
+        deps = _build_photon_deps(cfg)
+        wm = deps["photon_inference"]._working_memory_cfg
+        assert isinstance(wm, WorkingMemoryConfig)
+        assert wm.enabled is True
+        assert wm.max_turns == 4
+        assert abs(wm.decay_factor - 0.25) < 1e-9
+
+    def test_missing_working_memory_section_defaults_to_none(self, tmp_path):
+        from baseline_reporag.config import load_config
+        from baseline_reporag.photon_pipeline import _build_photon_deps
+
+        cfg_file = tmp_path / "photon.yaml"
+        cfg_file.write_text(
+            "model:\n"
+            "  provider: photon\n"
+            "  architecture: photon_decoder\n"
+            "  base_embed_dim: 64\n"
+            "  hidden_size: 128\n"
+            "  intermediate_size: 256\n"
+            "  num_heads: 4\n"
+            "  vocab_size: 1000\n"
+            "hierarchy:\n"
+            "  levels: 2\n"
+            "  chunk_sizes: [4, 4]\n"
+            "  encoder_layers_per_level: [2, 2]\n"
+            "  decoder_layers_per_level: [2, 2]\n"
+            "inference:\n"
+            "  hierarchical_prefill: true\n"
+            "  safe_recgen_enabled: false\n"
+        )
+        cfg = load_config(str(cfg_file))
+        deps = _build_photon_deps(cfg)
+        assert deps["photon_inference"]._working_memory_cfg is None
+
+
+class TestWorkingMemoryConfigSecurityFallback:
+    """_resolve_working_memory_cfg must fail-closed on malformed inputs."""
+
+    def test_none_returns_none(self):
+        from baseline_reporag.photon_pipeline import _resolve_working_memory_cfg
+
+        assert _resolve_working_memory_cfg(None) is None
+
+    def test_wrong_scalar_type_warns_and_returns_none(self, caplog):
+        import logging
+
+        from baseline_reporag.photon_pipeline import _resolve_working_memory_cfg
+
+        SENSITIVE = "ATTACKER-CONTROLLED-STRING"
+        with caplog.at_level(
+            logging.WARNING, logger="baseline_reporag.photon_pipeline"
+        ):
+            result = _resolve_working_memory_cfg(SENSITIVE)
+        assert result is None
+        # Warning mentions only the type, not the raw string (security note §7).
+        combined = " ".join(r.getMessage() for r in caplog.records)
+        assert SENSITIVE not in combined
+        assert "str" in combined
+
+    def test_list_rejected(self, caplog):
+        import logging
+
+        from baseline_reporag.photon_pipeline import _resolve_working_memory_cfg
+
+        with caplog.at_level(
+            logging.WARNING, logger="baseline_reporag.photon_pipeline"
+        ):
+            result = _resolve_working_memory_cfg([1, 2, 3])
+        assert result is None
+
+    def test_invalid_dict_returns_none_without_leaking_payload(self, caplog):
+        import logging
+
+        from baseline_reporag.photon_pipeline import _resolve_working_memory_cfg
+
+        SENSITIVE = "EVIL_STRING_IN_YAML"
+        with caplog.at_level(
+            logging.WARNING, logger="baseline_reporag.photon_pipeline"
+        ):
+            # ``enabled`` must be strictly bool — "false" is rejected.
+            result = _resolve_working_memory_cfg({"enabled": SENSITIVE})
+        assert result is None
+        combined = " ".join(r.getMessage() for r in caplog.records)
+        assert SENSITIVE not in combined
+
+    def test_valid_dict_is_normalized(self):
+        from baseline_reporag.photon_pipeline import _resolve_working_memory_cfg
+        from photon_mlx.session import WorkingMemoryConfig
+
+        result = _resolve_working_memory_cfg(
+            {"enabled": True, "max_turns": 2, "decay_factor": 0.75}
+        )
+        assert isinstance(result, WorkingMemoryConfig)
+        assert result.max_turns == 2
+        assert abs(result.decay_factor - 0.75) < 1e-9
+
+    def test_dataclass_instance_passthrough(self):
+        from baseline_reporag.photon_pipeline import _resolve_working_memory_cfg
+        from photon_mlx.session import WorkingMemoryConfig
+
+        cfg = WorkingMemoryConfig(enabled=False)
+        assert _resolve_working_memory_cfg(cfg) is cfg
+
+
+# ---------------------------------------------------------------------------
+# Codex CB-002: tokenize_evidence_pack warning must not leak raw exc text
+# ---------------------------------------------------------------------------
+
+
+class TestCodexCB002TokenizeEvidencePackLogHygiene:
+    """tokenize_evidence_pack failure warning must only include type name.
+
+    A malicious or misconfigured tokenizer can raise with ``question`` or
+    ``evidence_pack`` fragments in the exception message. Design §7 forbids
+    surfacing those in fail-closed logs.
+    """
+
+    def test_pipeline_warning_excludes_raw_exception_payload(self, caplog):
+        """Drive the real PhotonRAGPipeline fail-closed warning path and
+        assert that sensitive payloads do not appear in the warning log."""
+        import logging
+
+        import mlx.core as mx
+        from baseline_reporag.ingestion.chunker import Chunk
+        from photon_mlx.session import (
+            HierarchicalState,
+            PhotonSessionState,
+            WorkingMemoryConfig,
+        )
+
+        cfg = _make_pruning_cfg_disabled()
+        pipeline, baseline_deps, photon_deps, _mock_session, mock_results = (
+            _setup_pipeline_for_pruning(cfg, session_turns=1)
+        )
+
+        real_state = PhotonSessionState(
+            "s1",
+            "test-repo",
+            "abc123",
+            working_memory_cfg=WorkingMemoryConfig(enabled=True),
+        )
+        real_state.current_state = HierarchicalState(level_states=[mx.zeros((1, 4, 8))])
+        photon_deps["photon_inference"]._sessions = {"s1": real_state}
+
+        # Sensitive payload that MUST NOT appear in the warning log.
+        SENSITIVE = "SECRET-EVIDENCE-payload-xyz123"
+
+        class _LeakyTokenizer:
+            vocab_size = 256
+            pad_token_id = 0
+
+            def encode(self, text):
+                # Echo the input — a tokenizer that would surface
+                # question+evidence in its exception message.
+                raise RuntimeError(SENSITIVE + " " + text[:64])
+
+        pipeline.tokenizer = _LeakyTokenizer()
+        pipeline.photon_cfg = MagicMock()
+        pipeline.photon_cfg.model.max_position_embeddings = 4096
+        pipeline.photon_cfg.hierarchy.chunk_sizes = [4, 4]
+
+        chunks = [
+            Chunk(
+                chunk_id=f"chunk_{i}",
+                repo_id="test-repo",
+                repo_commit="abc123",
+                rel_path=f"file{i}.py",
+                language="python",
+                start_line=1,
+                end_line=10,
+                content=f"def func_{i}(): pass",
+                symbols=[f"func_{i}"],
+                section_header="",
+                file_header="",
+            )
+            for i in range(4)
+        ]
+
+        def mock_get_many(ids):
+            by_id = {c.chunk_id: c for c in chunks}
+            return [by_id[cid] for cid in ids if cid in by_id]
+
+        baseline_deps["store"].get_many.side_effect = mock_get_many
+        expanded_ids = [f"chunk_{i}" for i in range(4)]
+
+        with caplog.at_level(
+            logging.WARNING, logger="baseline_reporag.photon_pipeline"
+        ):
+            with (
+                patch(
+                    "baseline_reporag.photon_pipeline.hybrid_search",
+                    return_value=mock_results,
+                ),
+                patch(
+                    "baseline_reporag.photon_pipeline.expand_with_graph",
+                    return_value=expanded_ids,
+                ),
+            ):
+                baseline_deps["generator"].generate.return_value = "answer [C:1]"
+                pipeline.query("follow-up?", session_id="s1", repo_id="test-repo")
+
+        combined = " ".join(r.getMessage() for r in caplog.records)
+        # Raw exception payload must not be logged.
+        assert SENSITIVE not in combined
+        # The type name is the only acceptable identifier.
+        assert "RuntimeError" in combined
+        # Also ensure the raw question ("follow-up?") did not bleed out.
+        assert "follow-up?" not in combined

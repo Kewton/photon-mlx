@@ -115,13 +115,13 @@ photon_mlx/             # PHOTON 階層デコーダ (研究開発線)
 ├── blocks.py           # TransformerBlock + RoPE (MLX)
 ├── model.py            # PhotonModel (bottom-up + top-down)
 ├── inference.py        # session inference + drift tracking
-├── session.py          # PhotonSessionState + DriftMetrics
+├── session.py          # PhotonSessionState + DriftMetrics + TurnState + WorkingMemoryConfig
 ├── safe_recgen.py      # Safe RecGen controller
 ├── loss.py             # next-token + recursive loss
 ├── trainer.py          # training loop + checkpoint
 ├── data.py             # JSONL → pack → batch
 ├── optimize.py         # Mac optimization utilities
-└── tests/              # 61 tests
+└── tests/              # 168 tests
 
 torch_ref/              # PyTorch reference LM (正しさ確認用)
 ├── model.py            # MinimalLM (LLaMA-style)

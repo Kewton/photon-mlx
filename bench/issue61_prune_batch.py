@@ -39,6 +39,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from photon_mlx.inference import PhotonInference  # noqa: E402
 from photon_mlx.model import PhotonModel  # noqa: E402
+from photon_mlx.session import WorkingMemoryConfig  # noqa: E402
 from torch_ref.config import (  # noqa: E402
     HierarchyConfig,
     ModelConfig,
@@ -262,8 +263,15 @@ def run_benchmark(
     # Issue #72 fix: PhotonInference requires a tokenizer (Issue #58
     # DR1-003). Use the same byte-level stub as baseline_reporag so the
     # bench stays representative of production.
+    # Issue #64: disable cross-turn working memory explicitly so the bench
+    # keeps measuring the single-turn coarse-vector path (reproducibility).
     tokenizer = _StubTokenizer(cfg.tokenizer.vocab_size)
-    inference = PhotonInference(model, cfg, tokenizer)
+    inference = PhotonInference(
+        model,
+        cfg,
+        tokenizer,
+        working_memory_cfg=WorkingMemoryConfig(enabled=False),
+    )
 
     # Establish session state so prune_evidence takes the scoring path
     # (turn 2+ behaviour). 16 random tokens is enough to populate

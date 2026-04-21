@@ -40,6 +40,12 @@ variants:
         safe_recgen_enabled: false
       safe_recgen:
         enabled: false
+      # Issue #64: sample override for the cross-turn working memory.
+      # session_memory:
+      #   working_memory:
+      #     enabled: true
+      #     max_turns: 8
+      #     decay_factor: 0.5
 
   - id: "photon_rag_safe_recgen"
     label: "PHOTON-RAG+SafeRecGen"
@@ -50,6 +56,12 @@ variants:
         safe_recgen_enabled: true
       safe_recgen:
         enabled: true
+      # Issue #64: sample override for the cross-turn working memory.
+      # session_memory:
+      #   working_memory:
+      #     enabled: true
+      #     max_turns: 8
+      #     decay_factor: 0.5
 
   # Issue #62 Phase 1 — PHOTON single-path generation (opt-in).
   - id: "photon_rag_recgen"

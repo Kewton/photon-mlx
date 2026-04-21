@@ -114,6 +114,17 @@ session_memory:
   pin_cited_chunks_max: 12
   track_topic_state: true
 
+  # Issue #64: cross-turn hierarchical working memory.
+  # Disabled by default for photon_long_context — the 65 536 context keeps
+  # hierarchy latents well above the 100 MiB ceiling; re-enable only with
+  # the Phase 2 top-level-only mode.
+  working_memory:
+    enabled: false
+    max_turns: 8
+    decay_factor: 0.5
+    relevant_turn_threshold: 0.7
+    compress_old_turns: true
+
 tokenizer:
   tokenizer_id: "mlx-community/Qwen2.5-Coder-14B-Instruct-4bit"
   vocab_size: 152064

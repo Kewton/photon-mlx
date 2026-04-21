@@ -7,10 +7,83 @@ and provides topic shift features for Safe RecGen.
 
 from __future__ import annotations
 
+import math
 import time
+import warnings
 from dataclasses import dataclass, field
 
 import mlx.core as mx
+
+
+__all__ = [
+    "HierarchicalState",
+    "DriftMetrics",
+    "TurnState",
+    "WorkingMemoryConfig",
+    "WORKING_MEMORY_MAX_TURNS_HARD_CAP",
+    "PhotonSessionState",
+    "cosine_distance",
+    "kl_divergence",
+    "token_agreement_rate",
+    "mean_pool",
+]
+
+
+# Security limit: truncate question_text to this many characters when stored in
+# turn_history to bound memory usage and PII exposure (design §3-1 / §7).
+_QUESTION_TEXT_MAX_LEN: int = 2048
+
+
+# Security hard cap on WorkingMemoryConfig.max_turns (Codex CB-004).
+#
+# ``turn_history`` retains one ``HierarchicalState`` per turn. Each state holds
+# ``mx.array`` references whose size scales with ``hidden_size`` — at
+# photon_small (hidden=640) ≈ 6.6 MiB/turn and photon_tiny (hidden=1024)
+# ≈ 10.5 MiB/turn. The GA design target (design §7) is to keep working memory
+# under 100 MiB for the default ``max_turns=8``. Allowing an unbounded value
+# opens a memory-exhaustion DoS, so ``__post_init__`` rejects any
+# ``max_turns`` above this ceiling.
+#
+# 32 is chosen to give ~210 MiB headroom on photon_small and ~336 MiB on
+# photon_tiny — well above the GA budget yet still bounded.
+WORKING_MEMORY_MAX_TURNS_HARD_CAP: int = 32
+
+
+# Sentinel for ``PhotonSessionState(working_memory_cfg=...)`` (Codex CB-001).
+#
+# We must distinguish three call styles:
+#   * omitted  (legacy callers)  → default ``WorkingMemoryConfig()`` (enabled=True)
+#   * ``None`` (fail-closed)     → ``WorkingMemoryConfig(enabled=False)``
+#   * instance                   → use as-is
+# ``None`` used to collapse to the default, which silently re-enabled working
+# memory for sessions whose YAML config was rejected by
+# ``_resolve_working_memory_cfg`` (which fails closed by returning ``None``).
+class _UnsetType:
+    _instance: _UnsetType | None = None
+
+    def __new__(cls) -> _UnsetType:
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def __repr__(self) -> str:  # pragma: no cover — debug only
+        return "<UNSET>"
+
+
+_UNSET = _UnsetType()
+
+
+def mean_pool(x: mx.array) -> mx.array:
+    """Reduce leading dims via unweighted mean, returning a ``(D,)`` vector.
+
+    Used to collapse a ``(B, T, D)`` or ``(T, D)`` hierarchical latent down to
+    a single ``(D,)`` coarse vector for cosine comparisons and cross-turn
+    aggregation (Issue #64 DR1-002). Casts to ``float32`` for stability.
+    """
+    x32 = x.astype(mx.float32)
+    if x32.ndim > 1:
+        return mx.mean(x32, axis=tuple(range(x32.ndim - 1)))
+    return x32
 
 
 @dataclass
@@ -57,22 +130,106 @@ class DriftMetrics:
         return self.latent_cosine_drift_top
 
     def as_dict(self) -> dict:
-        """Superset schema (Issue #63, DR3-002).
+        """Return a JSON-safe superset schema (Issue #63 + Issue #64).
 
-        Existing keys (``latent_cosine_drift`` / ``topic_shift_score`` / ...) are
-        preserved bit-for-bit for backward-compat; three new keys are added for
-        per-level drift. Downstream consumers can treat missing new keys as 0.0.
+        Includes the legacy ``latent_cosine_drift`` alias plus the three
+        per-level drift keys from Issue #63 (DR3-002). Non-finite values
+        (``NaN`` / ``+Inf`` / ``-Inf``) are replaced with ``0.0`` and a
+        ``warnings.warn`` is emitted — only the field name is included in
+        the warning text so raw latent vectors or question text are never
+        surfaced through this path (design §7).
         """
-        return {
-            "turn_id": self.turn_id,
-            "latent_cosine_drift": round(self.latent_cosine_drift, 6),
-            "latent_cosine_drift_top": round(self.latent_cosine_drift_top, 6),
-            "latent_cosine_drift_mid": round(self.latent_cosine_drift_mid, 6),
-            "latent_cosine_drift_token": round(self.latent_cosine_drift_token, 6),
-            "token_agreement": round(self.token_agreement, 6),
-            "logit_kl": round(self.logit_kl, 6),
-            "topic_shift_score": round(self.topic_shift_score, 6),
-        }
+        safe: dict[str, float | int] = {"turn_id": self.turn_id}
+        for name in (
+            "latent_cosine_drift",
+            "latent_cosine_drift_top",
+            "latent_cosine_drift_mid",
+            "latent_cosine_drift_token",
+            "token_agreement",
+            "logit_kl",
+            "topic_shift_score",
+        ):
+            raw = getattr(self, name)
+            if not math.isfinite(raw):
+                warnings.warn(
+                    f"DriftMetrics.{name} is non-finite; coercing to 0.0",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                raw = 0.0
+            safe[name] = round(float(raw), 6)
+        return safe
+
+
+@dataclass
+class TurnState:
+    """Public per-turn record retained in the session working memory.
+
+    Stored in :attr:`PhotonSessionState.turn_history`. ``question_text`` is
+    kept only for Phase 2 retrieval heuristics and is never fed back into
+    prompts or telemetry verbatim (design §3-1 security note).
+    """
+
+    turn_id: int
+    hierarchical_state: HierarchicalState
+    question_text: str = ""
+    timestamp: float = field(default_factory=time.time)
+
+
+@dataclass
+class WorkingMemoryConfig:
+    """Configuration for cross-turn hierarchical working memory (Issue #64).
+
+    All fields have sensible defaults; ``__post_init__`` enforces strict type
+    and range validation (DR4-001) so malformed YAML cannot silently disable
+    safety invariants.
+    """
+
+    enabled: bool = True
+    max_turns: int = 8
+    decay_factor: float = 0.5
+    relevant_turn_threshold: float = 0.7
+    compress_old_turns: bool = True  # Phase 2 reservation — not consumed in Phase 1.
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.enabled, bool):
+            raise TypeError(f"enabled must be bool, got {type(self.enabled).__name__}")
+        if not isinstance(self.compress_old_turns, bool):
+            raise TypeError(
+                "compress_old_turns must be bool, got "
+                f"{type(self.compress_old_turns).__name__}"
+            )
+        if isinstance(self.max_turns, bool) or not isinstance(self.max_turns, int):
+            raise TypeError(
+                f"max_turns must be int, got {type(self.max_turns).__name__}"
+            )
+        if self.max_turns < 1:
+            raise ValueError(f"max_turns must be >= 1, got {self.max_turns}")
+        # Hard upper bound (Codex CB-004): unbounded ``max_turns`` would let
+        # a malformed YAML trigger memory exhaustion via turn_history growth.
+        # The ceiling is chosen from photon_small / photon_tiny per-turn
+        # latent footprints (see ``WORKING_MEMORY_MAX_TURNS_HARD_CAP`` docstring).
+        if self.max_turns > WORKING_MEMORY_MAX_TURNS_HARD_CAP:
+            raise ValueError(
+                "max_turns must be <= "
+                f"{WORKING_MEMORY_MAX_TURNS_HARD_CAP} (hard cap), got "
+                f"{self.max_turns}"
+            )
+        for name in ("decay_factor", "relevant_turn_threshold"):
+            val = getattr(self, name)
+            if isinstance(val, bool) or not isinstance(val, (int, float)):
+                raise TypeError(f"{name} must be float, got {type(val).__name__}")
+            if not math.isfinite(float(val)):
+                raise ValueError(f"{name} must be finite, got {val}")
+        if not (0.0 <= float(self.decay_factor) <= 1.0):
+            raise ValueError(
+                f"decay_factor must be 0.0 <= float <= 1.0, got {self.decay_factor}"
+            )
+        if not (-1.0 <= float(self.relevant_turn_threshold) <= 1.0):
+            raise ValueError(
+                "relevant_turn_threshold must be -1.0 <= float <= 1.0, got "
+                f"{self.relevant_turn_threshold}"
+            )
 
 
 def weighted_hierarchical_score(
@@ -118,17 +275,10 @@ def cosine_distance(a: mx.array, b: mx.array) -> float:
     per-level drift.
     """
     # Mean-pool along all dims except the last to get a fixed (hidden_size,) vector,
-    # so different sequence lengths don't cause shape mismatches.
-    a_vec = (
-        mx.mean(a.astype(mx.float32), axis=tuple(range(a.ndim - 1)))
-        if a.ndim > 1
-        else a.astype(mx.float32)
-    )
-    b_vec = (
-        mx.mean(b.astype(mx.float32), axis=tuple(range(b.ndim - 1)))
-        if b.ndim > 1
-        else b.astype(mx.float32)
-    )
+    # so different sequence lengths don't cause shape mismatches (DR1-002:
+    # shared helper with get_session_coarse_state).
+    a_vec = mean_pool(a)
+    b_vec = mean_pool(b)
     dot = mx.sum(a_vec * b_vec)
     norm_a = mx.sqrt(mx.sum(a_vec * a_vec))
     norm_b = mx.sqrt(mx.sum(b_vec * b_vec))
@@ -164,6 +314,25 @@ def token_agreement_rate(logits_a: mx.array, logits_b: mx.array) -> float:
     return agree.item()
 
 
+def _sanitize_question_text(raw: str | None) -> str:
+    """Sanitize user-supplied question text for long-term retention.
+
+    Drops C0/C1 control characters except ``\\t \\n \\r`` (log-poisoning
+    mitigation) and truncates to :data:`_QUESTION_TEXT_MAX_LEN` to bound
+    memory use (design §7 security notes).
+    """
+    if not raw:
+        return ""
+    cleaned = "".join(
+        ch
+        for ch in raw
+        if ch in ("\t", "\n", "\r") or (ord(ch) >= 0x20 and ord(ch) != 0x7F)
+    )
+    if len(cleaned) > _QUESTION_TEXT_MAX_LEN:
+        cleaned = cleaned[:_QUESTION_TEXT_MAX_LEN]
+    return cleaned
+
+
 class PhotonSessionState:
     """
     Working memory for a single PHOTON-RAG session.
@@ -185,6 +354,7 @@ class PhotonSessionState:
         repo_commit: str,
         *,
         drift_level_weights: tuple[float, ...] = (0.2, 0.3, 0.5),
+        working_memory_cfg: WorkingMemoryConfig | None | _UnsetType = _UNSET,
     ) -> None:
         self.session_id = session_id
         self.repo_id = repo_id
@@ -200,17 +370,43 @@ class PhotonSessionState:
         self.prev_logits: mx.array | None = None
         self.drift_history: list[DriftMetrics] = []
         self.turn_count: int = 0
+        # Cross-turn hierarchical working memory (Issue #64, Phase 1).
+        #
+        # Codex CB-001 — explicit ``None`` is the fail-closed signal
+        # produced by ``_build_photon_deps()`` when YAML is malformed or
+        # the section is missing. It must DISABLE working memory rather
+        # than silently fall back to the default enabled config.
+        # Only the ``_UNSET`` sentinel (legacy callers that omitted the
+        # argument) yields the default ``WorkingMemoryConfig()``.
+        resolved_cfg: WorkingMemoryConfig
+        if isinstance(working_memory_cfg, _UnsetType):
+            resolved_cfg = WorkingMemoryConfig()
+        elif working_memory_cfg is None:
+            resolved_cfg = WorkingMemoryConfig(enabled=False)
+        else:
+            resolved_cfg = working_memory_cfg
+        self.working_memory_cfg: WorkingMemoryConfig = resolved_cfg
+        self.turn_history: list[TurnState] = []
 
     def update(
         self,
         new_state: HierarchicalState,
         new_logits: mx.array | None = None,
+        question_text: str | None = None,
     ) -> DriftMetrics:
         """Update session state and compute drift metrics.
 
         Signature unchanged from pre-Issue-#63 (DR1-012). Weights come from
         ``self.drift_level_weights`` so callers do not have to thread the
         configuration through every ``update()`` call.
+
+        Args:
+            new_state: the :class:`HierarchicalState` produced by the current
+                turn's ``hierarchical_prefill``.
+            new_logits: optional top-level logits for drift telemetry.
+            question_text: optional user question associated with this turn;
+                stored in :attr:`turn_history` only when
+                ``working_memory_cfg.enabled`` is ``True`` (DR1-006).
         """
         self.turn_count += 1
         self.prev_state = self.current_state
@@ -261,7 +457,78 @@ class PhotonSessionState:
 
         self.prev_logits = new_logits
         self.drift_history.append(metrics)
+
+        # Append to turn_history only when working memory is enabled (Issue #64).
+        if self.working_memory_cfg.enabled:
+            self.turn_history.append(
+                TurnState(
+                    turn_id=self.turn_count,
+                    hierarchical_state=new_state,
+                    question_text=_sanitize_question_text(question_text),
+                )
+            )
+            max_turns = self.working_memory_cfg.max_turns
+            while len(self.turn_history) > max_turns:
+                # Phase 2 will replace this with compress_oldest_turn; for now
+                # we simply drop the oldest reference so the GC can reclaim
+                # latents (design §3-1 security note).
+                self.turn_history.pop(0)
+
         return metrics
 
     def latest_drift(self) -> DriftMetrics | None:
         return self.drift_history[-1] if self.drift_history else None
+
+    def get_session_coarse_state(self) -> mx.array | None:
+        """Return a ``(D,)`` coarse session vector aggregated across turns.
+
+        Aggregation is a weighted mean of each turn's top-level
+        ``mean_pool(level_states[-1])`` using geometric decay
+        ``decay_factor ** (N-i-1)``. Returns ``None`` when working memory
+        is disabled or no turn is recorded (design §3-2 judgement #2,
+        DR1-004 — callers must fall back to the legacy path).
+        """
+        if not self.working_memory_cfg.enabled:
+            return None
+        if not self.turn_history:
+            return None
+
+        decay = float(self.working_memory_cfg.decay_factor)
+        n = len(self.turn_history)
+        # Collect per-turn coarse vectors.
+        vecs: list[mx.array] = []
+        weights: list[float] = []
+        for i, turn in enumerate(self.turn_history):
+            if not turn.hierarchical_state.level_states:
+                continue
+            top = turn.hierarchical_state.level_states[-1]
+            vecs.append(mean_pool(top))
+            weights.append(decay ** (n - i - 1))
+
+        if not vecs:
+            return None
+
+        weight_sum = sum(weights)
+        if weight_sum <= 0.0:
+            # All weights were zero (decay=0 on history length > 1). Fall
+            # back to a plain mean of the last entry.
+            return vecs[-1]
+
+        stacked = mx.stack(vecs, axis=0)  # (N, D)
+        w_arr = mx.array(weights, dtype=mx.float32)[:, None]  # (N, 1)
+        aggregated = mx.sum(stacked * w_arr, axis=0) / float(weight_sum)
+        mx.eval(aggregated)
+        return aggregated
+
+    def reset_working_memory(self) -> None:
+        """Clear stale latents and turn history for fail-closed recovery.
+
+        Drops ``current_state``, ``prev_state``, ``prev_logits`` and the
+        accumulated ``turn_history``. ``drift_history`` and ``turn_count``
+        are intentionally preserved so observability APIs remain consistent
+        (design judgement #4 / DR3-001).
+        """
+        self.current_state = None
+        self.prev_state = None
+        self.prev_logits = None
+        self.turn_history = []
