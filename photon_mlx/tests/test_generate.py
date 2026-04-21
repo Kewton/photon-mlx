@@ -125,3 +125,71 @@ class TestGenerateQuality:
         _, step_logits = model.generate(prompt, max_new_tokens=16, return_logits=True)
         mx.eval(step_logits)
         assert mx.isfinite(step_logits).all().item()
+
+
+class TestKVCacheEquivalence:
+    """Issue #54 Phase 1: KV-cache path must match no-cache path.
+
+    ``use_kv_cache=False`` is retained as an internal testing fallback
+    (DR1-005). It is not documented as a public knob; the equivalence
+    tests below exist specifically to certify the cached path.
+    """
+
+    def test_step_logits_match_without_cache(self, model: PhotonModel) -> None:
+        prompt = mx.array(
+            [[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]],
+            dtype=mx.int32,
+        )
+        _, logits_cache = model.generate(
+            prompt, max_new_tokens=8, return_logits=True, use_kv_cache=True
+        )
+        _, logits_nocache = model.generate(
+            prompt, max_new_tokens=8, return_logits=True, use_kv_cache=False
+        )
+        mx.eval(logits_cache, logits_nocache)
+        assert logits_cache.shape == logits_nocache.shape
+        assert mx.allclose(logits_cache, logits_nocache, atol=1e-5, rtol=1e-4).item(), (
+            "KV-cache step logits diverged from no-cache reference"
+        )
+
+    def test_cross_level1_boundary(self, model: PhotonModel) -> None:
+        """Crossing a 4-token chunk boundary must produce identical tokens."""
+        for prompt_len, n_new in [(15, 2), (16, 1)]:
+            prompt = mx.array(
+                [[(i + 1) % 256 for i in range(prompt_len)]], dtype=mx.int32
+            )
+            gen_cache, _ = model.generate(
+                prompt, max_new_tokens=n_new, use_kv_cache=True
+            )
+            gen_nocache, _ = model.generate(
+                prompt, max_new_tokens=n_new, use_kv_cache=False
+            )
+            mx.eval(gen_cache, gen_nocache)
+            assert mx.array_equal(gen_cache, gen_nocache).item(), (
+                f"token mismatch at prompt_len={prompt_len}, n_new={n_new}"
+            )
+
+    def test_cross_top_level_boundary(self, model: PhotonModel) -> None:
+        """Crossing a 16-token super-chunk boundary must match."""
+        for prompt_len, n_new in [(31, 2), (32, 1)]:
+            prompt = mx.array(
+                [[(i + 3) % 256 for i in range(prompt_len)]], dtype=mx.int32
+            )
+            gen_cache, _ = model.generate(
+                prompt, max_new_tokens=n_new, use_kv_cache=True
+            )
+            gen_nocache, _ = model.generate(
+                prompt, max_new_tokens=n_new, use_kv_cache=False
+            )
+            mx.eval(gen_cache, gen_nocache)
+            assert mx.array_equal(gen_cache, gen_nocache).item(), (
+                f"token mismatch at prompt_len={prompt_len}, n_new={n_new}"
+            )
+
+    @pytest.mark.parametrize("prompt_len", [16, 17, 32, 64])
+    def test_multiple_prompt_lengths(self, model: PhotonModel, prompt_len: int) -> None:
+        prompt = mx.array([[(i + 7) % 256 for i in range(prompt_len)]], dtype=mx.int32)
+        gen_cache, _ = model.generate(prompt, max_new_tokens=8, use_kv_cache=True)
+        gen_nocache, _ = model.generate(prompt, max_new_tokens=8, use_kv_cache=False)
+        mx.eval(gen_cache, gen_nocache)
+        assert mx.array_equal(gen_cache, gen_nocache).item()

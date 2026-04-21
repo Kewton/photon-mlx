@@ -128,7 +128,7 @@ def main() -> None:
     print(f"Generated tokens: {max_new}")
     print(f"Time: {elapsed:.2f}s")
     print(f"Speed: {tokens_per_sec:.1f} tok/s")
-    print("(KV cache not implemented — latency is expected)")
+    print("KV cache enabled (Phase 1, top-level only)")
 
 
 if __name__ == "__main__":
