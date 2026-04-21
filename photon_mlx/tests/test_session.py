@@ -29,6 +29,7 @@ from photon_mlx.session import (
     cosine_distance,
     kl_divergence,
     token_agreement_rate,
+    weighted_hierarchical_score,
 )
 
 
@@ -106,6 +107,44 @@ class TestDriftMetrics:
 
 
 # ---------------------------------------------------------------
+# Issue #63: weighted_hierarchical_score (shared helper)
+# ---------------------------------------------------------------
+
+
+class TestWeightedHierarchicalScore:
+    def test_scalar_tuple_input(self) -> None:
+        """Scalar-tuple path returns a Python float equal to sum(w*v)."""
+        out = weighted_hierarchical_score((0.1, 0.2, 0.3), (0.2, 0.3, 0.5))
+        expected = 0.2 * 0.1 + 0.3 * 0.2 + 0.5 * 0.3
+        assert isinstance(out, float)
+        assert abs(out - expected) < 1e-9
+
+    def test_mx_array_last_axis_reduction(self) -> None:
+        """mx.array path reduces along the last axis and returns (N,)."""
+        values = mx.array([[0.1, 0.2, 0.3], [1.0, 0.0, 0.0]])
+        out = weighted_hierarchical_score(values, (0.2, 0.3, 0.5))
+        assert isinstance(out, mx.array)
+        mx.eval(out)
+        out_list = out.tolist()
+        expected0 = 0.2 * 0.1 + 0.3 * 0.2 + 0.5 * 0.3
+        expected1 = 0.2
+        assert abs(out_list[0] - expected0) < 1e-5
+        assert abs(out_list[1] - expected1) < 1e-5
+
+    def test_mx_array_shape_assertion(self) -> None:
+        """Mismatched trailing dim vs len(weights) must assert-fail."""
+        values = mx.array([[0.1, 0.2]])  # last dim = 2
+        with pytest.raises(AssertionError):
+            weighted_hierarchical_score(values, (0.2, 0.3, 0.5))
+
+    def test_mx_array_dtype_cast(self) -> None:
+        """Weights are cast to the values dtype so no dtype promotion."""
+        values = mx.array([[0.1, 0.2, 0.3]], dtype=mx.float32)
+        out = weighted_hierarchical_score(values, (0.2, 0.3, 0.5))
+        assert out.dtype == mx.float32
+
+
+# ---------------------------------------------------------------
 # Session state tests
 # ---------------------------------------------------------------
 
@@ -141,7 +180,156 @@ class TestSessionState:
         assert 0.0 <= drift.token_agreement <= 1.0
         assert drift.logit_kl >= 0.0
 
+    def test_drift_metrics_hierarchical(self) -> None:
+        """Issue #63: with ``level_states`` length 2 and ``token_proj`` provided,
+        all three drift fields are computed independently and the weighted
+        ``topic_shift_score`` is ``sum(w_i * drift_i)`` (DR1-004)."""
+        session = PhotonSessionState("s1", "repo", "abc123")
+
+        s1 = HierarchicalState(
+            level_states=[mx.ones((1, 4, 64)), mx.ones((1, 1, 64))],
+            token_proj=mx.ones((1, 16, 64)),
+        )
+        session.update(s1)
+
+        s2 = HierarchicalState(
+            level_states=[mx.ones((1, 4, 64)) * -1, mx.ones((1, 1, 64)) * -1],
+            token_proj=mx.ones((1, 16, 64)) * -1,
+        )
+        drift = session.update(s2)
+
+        # 3 per-level drifts must all be non-zero (opposite-signed vectors).
+        assert drift.latent_cosine_drift_top > 0.0
+        assert drift.latent_cosine_drift_mid > 0.0
+        assert drift.latent_cosine_drift_token > 0.0
+        # Backward-compat: latent_cosine_drift == top (property).
+        assert drift.latent_cosine_drift == drift.latent_cosine_drift_top
+        # topic_shift_score must equal the weighted sum (default weights).
+        expected = (
+            0.2 * drift.latent_cosine_drift_token
+            + 0.3 * drift.latent_cosine_drift_mid
+            + 0.5 * drift.latent_cosine_drift_top
+        )
+        assert abs(drift.topic_shift_score - expected) < 1e-6
+
+    def test_drift_metrics_token_proj_none(self) -> None:
+        """token_proj=None on either side → drift_token fallback 0.0."""
+        session = PhotonSessionState("s1", "repo", "abc123")
+        s1 = HierarchicalState(
+            level_states=[mx.ones((1, 4, 64)), mx.ones((1, 1, 64))],
+            token_proj=None,
+        )
+        session.update(s1)
+
+        # Both level_states[0] (mid) and level_states[-1] (top) differ from
+        # s1, and token_proj is None on both sides.
+        s2 = HierarchicalState(
+            level_states=[mx.ones((1, 4, 64)) * -1, mx.ones((1, 1, 64)) * -1],
+            token_proj=None,
+        )
+        drift = session.update(s2)
+        # token_proj=None → fallback 0.0.
+        assert drift.latent_cosine_drift_token == 0.0
+        # mid / top still computed normally.
+        assert drift.latent_cosine_drift_top > 0.0
+        assert drift.latent_cosine_drift_mid > 0.0
+
+    def test_drift_metrics_levels_one(self) -> None:
+        """len(level_states)==1 → drift_mid fallback 0.0, drift_top from
+        the sole (last) level_states entry."""
+        session = PhotonSessionState("s1", "repo", "abc123")
+        s1 = HierarchicalState(level_states=[mx.ones((1, 1, 64))])
+        session.update(s1)
+
+        s2 = HierarchicalState(level_states=[mx.ones((1, 1, 64)) * -1])
+        drift = session.update(s2)
+        assert drift.latent_cosine_drift_mid == 0.0
+        assert drift.latent_cosine_drift_top > 0.0
+
+    def test_drift_metrics_identical_state(self) -> None:
+        """Identical states turn-over-turn → all three drifts are 0.0."""
+        session = PhotonSessionState("s1", "repo", "abc123")
+        s1 = HierarchicalState(
+            level_states=[mx.ones((1, 4, 64)), mx.ones((1, 1, 64))],
+            token_proj=mx.ones((1, 16, 64)),
+        )
+        session.update(s1)
+        # Same-shaped / same-valued state → drift == 0 on every level.
+        s2 = HierarchicalState(
+            level_states=[mx.ones((1, 4, 64)), mx.ones((1, 1, 64))],
+            token_proj=mx.ones((1, 16, 64)),
+        )
+        drift = session.update(s2)
+        assert drift.latent_cosine_drift_top < 1e-5
+        assert drift.latent_cosine_drift_mid < 1e-5
+        assert drift.latent_cosine_drift_token < 1e-5
+        assert drift.topic_shift_score < 1e-5
+
+    def test_drift_metrics_as_dict_superset(self) -> None:
+        """DriftMetrics.as_dict() superset contract (DR3-002): legacy keys
+        stay present, three new keys are added."""
+        session = PhotonSessionState("s1", "repo", "abc123")
+        s1 = HierarchicalState(
+            level_states=[mx.ones((1, 4, 64)), mx.ones((1, 1, 64))],
+            token_proj=mx.ones((1, 16, 64)),
+        )
+        session.update(s1)
+        s2 = HierarchicalState(
+            level_states=[mx.ones((1, 4, 64)) * -1, mx.ones((1, 1, 64)) * -1],
+            token_proj=mx.ones((1, 16, 64)) * -1,
+        )
+        drift = session.update(s2)
+        d = drift.as_dict()
+        # Legacy keys preserved.
+        for key in (
+            "turn_id",
+            "latent_cosine_drift",
+            "token_agreement",
+            "logit_kl",
+            "topic_shift_score",
+        ):
+            assert key in d
+        # New per-level keys present.
+        for key in (
+            "latent_cosine_drift_top",
+            "latent_cosine_drift_mid",
+            "latent_cosine_drift_token",
+        ):
+            assert key in d
+        # Alias still returns top.
+        assert d["latent_cosine_drift"] == d["latent_cosine_drift_top"]
+
+    def test_custom_drift_level_weights(self) -> None:
+        """Custom weights propagate into topic_shift_score."""
+        weights = (0.5, 0.25, 0.25)
+        session = PhotonSessionState(
+            "s1", "repo", "abc123", drift_level_weights=weights
+        )
+        # Weights are normalised to a tuple of Python floats.
+        assert session.drift_level_weights == weights
+
+        s1 = HierarchicalState(
+            level_states=[mx.ones((1, 4, 64)), mx.ones((1, 1, 64))],
+            token_proj=mx.ones((1, 16, 64)),
+        )
+        session.update(s1)
+        s2 = HierarchicalState(
+            level_states=[mx.ones((1, 4, 64)) * -1, mx.ones((1, 1, 64)) * -1],
+            token_proj=mx.ones((1, 16, 64)) * -1,
+        )
+        drift = session.update(s2)
+        expected = (
+            0.5 * drift.latent_cosine_drift_token
+            + 0.25 * drift.latent_cosine_drift_mid
+            + 0.25 * drift.latent_cosine_drift_top
+        )
+        assert abs(drift.topic_shift_score - expected) < 1e-6
+
     def test_drift_history_accumulates(self) -> None:
+        """Length-1 ``level_states`` (no mid) and ``token_proj=None`` exercise
+        the Issue #63 fallback path: ``drift_mid=0.0`` and
+        ``drift_token=0.0`` while ``drift_top`` is still computed. The legacy
+        assertion on ``turn_count`` / history length is preserved (DR2-004)."""
         session = PhotonSessionState("s1", "repo", "abc123")
         for i in range(5):
             state = HierarchicalState(
@@ -150,6 +338,12 @@ class TestSessionState:
             session.update(state)
         assert len(session.drift_history) == 5
         assert session.turn_count == 5
+        # Fallback path: mid and token drift must stay at the fallback 0.0
+        # throughout the history because this fixture omits level_states[0]
+        # (length 1) and never provides token_proj.
+        for metrics in session.drift_history:
+            assert metrics.latent_cosine_drift_mid == 0.0
+            assert metrics.latent_cosine_drift_token == 0.0
 
 
 # ---------------------------------------------------------------
@@ -468,7 +662,15 @@ class TestPruneEvidence:
         self, engine: PhotonInference
     ) -> None:
         """Mixed-length non-empty chunks: batched top-K and raw scores must
-        match a sequential reference within ε=1e-3 (path B exact check)."""
+        match a sequential hierarchical reference within ε=1e-3.
+
+        Post-Issue-#63: ``_score_prune_candidates`` returns the
+        ``weighted_hierarchical_score(sim_token, sim_mid, sim_top)`` combo
+        rather than top-only cosine, so the sequential reference is built
+        the same way.
+        """
+        from photon_mlx.session import weighted_hierarchical_score
+
         ids = mx.random.randint(0, 256, (1, 16))
         engine.session_forward(ids, "s1", "repo", "abc")
 
@@ -487,13 +689,27 @@ class TestPruneEvidence:
         ]
         cids = [f"c{i}" for i in range(len(texts))]
 
-        # Batched scoring via the helper.
+        # Batched scoring via the helper (hierarchical).
         batched_scores = engine._score_prune_candidates(texts, "s1")
 
-        # Sequential reference: re-tokenize & forward each chunk individually.
+        # Sequential hierarchical reference: per-chunk prefill, three
+        # masked-means (token/mid/top), three cosines, weighted sum.
         session = engine._sessions["s1"]
-        coarse_state = session.current_state.level_states[-1].astype(mx.float32)
-        coarse_vec = mx.mean(coarse_state, axis=tuple(range(coarse_state.ndim - 1)))
+        state = session.current_state
+        top_state = state.level_states[-1].astype(mx.float32)
+        q_top = mx.mean(top_state, axis=tuple(range(top_state.ndim - 1)))
+        if len(state.level_states) >= 2:
+            mid_state = state.level_states[0].astype(mx.float32)
+            q_mid = mx.mean(mid_state, axis=tuple(range(mid_state.ndim - 1)))
+        else:
+            q_mid = q_top
+        if state.token_proj is not None:
+            tok_state = state.token_proj.astype(mx.float32)
+            q_token = mx.mean(tok_state, axis=tuple(range(tok_state.ndim - 1)))
+        else:
+            q_token = q_top
+
+        weights = engine._drift_level_weights
 
         seq_scores: list[tuple[int, float]] = []
         for idx, text in enumerate(texts):
@@ -502,13 +718,26 @@ class TestPruneEvidence:
             inp = mx.array(token_ids, dtype=mx.int32).reshape(1, -1)
             _, h = engine.hierarchical_prefill(inp)
             ct = h.level_states[-1].astype(mx.float32)
-            cv = mx.mean(ct, axis=tuple(range(ct.ndim - 1)))
-            sim = _batch_cosine_similarity(coarse_vec, cv[None, :])
-            mx.eval(sim)
-            seq_scores.append((idx, float(sim.tolist()[0])))
+            c_top = mx.mean(ct, axis=tuple(range(ct.ndim - 1)))
+            cm_raw = (
+                h.level_states[0].astype(mx.float32) if len(h.level_states) >= 2 else ct
+            )
+            c_mid = mx.mean(cm_raw, axis=tuple(range(cm_raw.ndim - 1)))
+            if h.token_proj is not None:
+                cto_raw = h.token_proj.astype(mx.float32)
+                c_token = mx.mean(cto_raw, axis=tuple(range(cto_raw.ndim - 1)))
+            else:
+                c_token = c_top
 
-        # Raw-score check (ε = 1e-3 per Issue #61 acceptance — path B is
-        # actually 1e-7 tight on this fixture but we keep the policy bound).
+            sim_top = _batch_cosine_similarity(q_top, c_top[None, :])
+            sim_mid = _batch_cosine_similarity(q_mid, c_mid[None, :])
+            sim_token = _batch_cosine_similarity(q_token, c_token[None, :])
+            stacked = mx.stack([sim_token, sim_mid, sim_top], axis=-1)
+            combined = weighted_hierarchical_score(stacked, weights)
+            mx.eval(combined)
+            seq_scores.append((idx, float(combined.tolist()[0])))
+
+        # Raw-score check: batched hierarchical matches sequential within 1e-3.
         for (i_b, s_b), (i_s, s_s) in zip(batched_scores, seq_scores):
             assert i_b == i_s
             assert abs(s_b - s_s) <= 1e-3, (

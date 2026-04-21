@@ -271,7 +271,6 @@ def _build_photon_deps(cfg: Config) -> dict[str, Any]:
     # the same stub instance (Issue #58).
     tokenizer = _get_stub_tokenizer(photon_cfg.tokenizer.vocab_size)
     model = PhotonModel(photon_cfg)
-    photon_inference = PhotonInference(model, photon_cfg, tokenizer)
 
     safe_recgen_enabled = getattr(cfg.get("inference"), "safe_recgen_enabled", True)
     if safe_recgen_enabled:
@@ -279,6 +278,33 @@ def _build_photon_deps(cfg: Config) -> dict[str, Any]:
         if sr_cfg_data is not None:
             triggers = sr_cfg_data.get("triggers")
             thresholds = sr_cfg_data.get("thresholds")
+            # Issue #63 / DR1-010: alias resolution happens here, not inside
+            # SafeRecGenConfig. The legacy YAML key
+            # ``thresholds.latent_cosine_drift`` maps onto the new
+            # ``latent_cosine_drift_top_threshold``; when both are present,
+            # the new explicit ``latent_cosine_drift_top`` wins.
+            legacy_top_threshold = (
+                getattr(thresholds, "latent_cosine_drift", 0.18) if thresholds else 0.18
+            )
+            top_threshold = (
+                getattr(thresholds, "latent_cosine_drift_top", legacy_top_threshold)
+                if thresholds
+                else legacy_top_threshold
+            )
+            # DR2-005: fall back to defaults for missing new keys.
+            mid_threshold = (
+                getattr(thresholds, "latent_cosine_drift_mid", 0.40)
+                if thresholds
+                else 0.40
+            )
+            token_threshold = (
+                getattr(thresholds, "latent_cosine_drift_token", 0.30)
+                if thresholds
+                else 0.30
+            )
+            drift_level_weights = sr_cfg_data.get("drift_level_weights")
+            if drift_level_weights is None:
+                drift_level_weights = (0.2, 0.3, 0.5)
             sr_config = SafeRecGenConfig(
                 enabled=True,
                 trigger_exact_quote=getattr(triggers, "exact_quote", True)
@@ -299,11 +325,9 @@ def _build_photon_deps(cfg: Config) -> dict[str, Any]:
                 trigger_low_confidence=getattr(triggers, "low_confidence", True)
                 if triggers
                 else True,
-                latent_cosine_drift_threshold=getattr(
-                    thresholds, "latent_cosine_drift", 0.18
-                )
-                if thresholds
-                else 0.18,
+                # Legacy top-only threshold (kept in sync with the new field
+                # for backward-compat log/schema consumers).
+                latent_cosine_drift_threshold=top_threshold,
                 topic_shift_score_threshold=getattr(
                     thresholds, "topic_shift_score", 0.65
                 )
@@ -315,12 +339,31 @@ def _build_photon_deps(cfg: Config) -> dict[str, Any]:
                 logit_kl_threshold=getattr(thresholds, "logit_kl", 0.75)
                 if thresholds
                 else 0.75,
+                # Issue #63 new fields.
+                latent_cosine_drift_top_threshold=top_threshold,
+                latent_cosine_drift_mid_threshold=mid_threshold,
+                latent_cosine_drift_token_threshold=token_threshold,
+                drift_level_weights=drift_level_weights,
             )
         else:
             sr_config = SafeRecGenConfig(enabled=True)
         safe_recgen = SafeRecGenController(sr_config)
     else:
+        sr_config = None
         safe_recgen = None
+
+    # Issue #63 / DR1-005: pass drift_level_weights (not the whole
+    # SafeRecGenConfig) into PhotonInference so the inference layer only
+    # depends on what it actually needs (ISP).
+    drift_weights_for_inference = (
+        sr_config.drift_level_weights if sr_config is not None else None
+    )
+    photon_inference = PhotonInference(
+        model,
+        photon_cfg,
+        tokenizer,
+        drift_level_weights=drift_weights_for_inference,
+    )
 
     return {
         "photon_inference": photon_inference,
