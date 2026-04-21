@@ -47,6 +47,26 @@ from torch_ref.config import (  # noqa: E402
 )
 
 
+class _StubTokenizer:
+    """Minimal byte-level stub tokenizer aligned with the baseline stub
+    (see ``baseline_reporag.photon_pipeline._StubTokenizer``).
+
+    Used by the bench harness so ``PhotonInference(model, cfg, tokenizer)``
+    (Issue #58, DR1-005) receives a real tokenizer instance. Kept here as a
+    tiny self-contained copy so the benchmark script stays single-file.
+    """
+
+    def __init__(self, vocab_size: int) -> None:
+        self.vocab_size = vocab_size
+        self.pad_token_id = 0
+
+    def encode(self, text: str) -> list[int]:
+        return [b % self.vocab_size for b in text.encode("utf-8")]
+
+    def decode(self, ids: list[int]) -> str:
+        return bytes(i % 256 for i in ids).decode("utf-8", errors="replace")
+
+
 def _bench_cfg(max_position_embeddings: int) -> PhotonConfig:
     """Tiny but realistic config for benchmark workloads."""
     return PhotonConfig(
@@ -239,7 +259,11 @@ def run_benchmark(
 
     cfg = _bench_cfg(max_position_embeddings=max_len)
     model = PhotonModel(cfg)
-    inference = PhotonInference(model, cfg)
+    # Issue #72 fix: PhotonInference requires a tokenizer (Issue #58
+    # DR1-003). Use the same byte-level stub as baseline_reporag so the
+    # bench stays representative of production.
+    tokenizer = _StubTokenizer(cfg.tokenizer.vocab_size)
+    inference = PhotonInference(model, cfg, tokenizer)
 
     # Establish session state so prune_evidence takes the scoring path
     # (turn 2+ behaviour). 16 random tokens is enough to populate

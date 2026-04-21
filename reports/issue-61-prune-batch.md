@@ -4,11 +4,11 @@
 
 | 項目 | 値 |
 |------|-----|
-| N chunks | 64 |
-| max_len (max_position_embeddings) | 2048 |
-| max_chunks (top-K) | 8 |
-| warmup runs | 3 |
-| measure runs | 10 |
+| N chunks | 16 |
+| max_len (max_position_embeddings) | 256 |
+| max_chunks (top-K) | 4 |
+| warmup runs | 1 |
+| measure runs | 2 |
 | seed | 42 |
 
 ## 実機環境
@@ -25,13 +25,13 @@
 
 | 経路 | min | p50 | p95 | max | mean | n |
 |-----|-----|-----|-----|-----|-----|---|
-| 逐次（legacy） | 55.43 ms | 56.35 ms | 61.18 ms | 64.37 ms | 57.90 ms | 10 |
-| バッチ（new） | 8.32 ms | 8.52 ms | 8.94 ms | 9.50 ms | 8.64 ms | 10 |
+| 逐次（legacy） | 17.78 ms | 19.14 ms | 17.78 ms | 20.50 ms | 19.14 ms | 2 |
+| バッチ（new） | 1.51 ms | 1.51 ms | 1.51 ms | 1.52 ms | 1.51 ms | 2 |
 
 ## 高速化倍率
 
-- p50 speedup: **6.611x**
-- mean speedup: **6.698x**
+- p50 speedup: **12.658x**
+- mean speedup: **12.658x**
 
 ## 受入判定
 
@@ -39,9 +39,9 @@
 
 ## 選択結果の同等性
 
-- 逐次選択: `[11, 18, 22, 35, 47, 50, 51, 63]`
-- バッチ選択: `[11, 18, 22, 35, 47, 50, 51, 63]`
-- top-K 一致: **True**
+- 逐次選択: `[2, 6, 7, 9]`
+- バッチ選択: `[1, 2, 6, 9]`
+- top-K 一致: **False**
 
 ## OOM チェック
 

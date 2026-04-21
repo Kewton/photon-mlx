@@ -22,6 +22,7 @@ Fallback actions:
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass, field
 from enum import Enum, auto
@@ -48,11 +49,27 @@ class SafeRecGenConfig:
     trigger_latent_drift: bool = True
     trigger_low_confidence: bool = True
 
-    # Thresholds
+    # Thresholds (legacy; kept for backward-compat, same default as the new
+    # ``latent_cosine_drift_top_threshold``)
     latent_cosine_drift_threshold: float = 0.18
     topic_shift_score_threshold: float = 0.65
     confidence_floor: float = 0.40
     logit_kl_threshold: float = 0.75
+
+    # Issue #63: per-level drift thresholds. Defaults:
+    # * top   ≈ existing single threshold (0.18)
+    # * mid   = 0.40 (T/4 latents are noisier per step)
+    # * token = 0.30 (token_proj is most noisy)
+    latent_cosine_drift_top_threshold: float = 0.18
+    latent_cosine_drift_mid_threshold: float = 0.40
+    latent_cosine_drift_token_threshold: float = 0.30
+
+    # Issue #63: weights used both by PhotonSessionState.topic_shift_score and
+    # by PhotonInference hierarchical scoring. Input may be a list (YAML) but
+    # is normalised to a tuple in __post_init__ (DR1-001).
+    drift_level_weights: tuple[float, ...] | list[float] = field(
+        default_factory=lambda: (0.2, 0.3, 0.5)
+    )
 
     # High-risk keywords
     high_risk_keywords: list[str] = field(
@@ -70,6 +87,98 @@ class SafeRecGenConfig:
             "compliance",
         ]
     )
+
+    def __post_init__(self) -> None:
+        """Normalise and validate ``drift_level_weights`` on construction.
+
+        Issue #63 / DR1-007 splits this into two small steps so the
+        responsibilities are easy to reason about:
+
+        * :meth:`_normalize_drift_weights` — type invariant (list → tuple of
+          ``float``).
+        * :meth:`_validate_drift_weights`  — value bounds (length == 3,
+          non-negative, finite).
+
+        YAML-layer alias resolution (``thresholds.latent_cosine_drift`` →
+        ``latent_cosine_drift_top_threshold``) is the loader's
+        responsibility (DR1-010). However, direct constructor callers may
+        still pass only the legacy ``latent_cosine_drift_threshold``; in
+        that case :meth:`_alias_legacy_top_threshold` mirrors it to the
+        new ``latent_cosine_drift_top_threshold`` so the controller honours
+        the user's intent (Issue #63 / CB-004).
+        """
+        self._normalize_drift_weights()
+        self._validate_drift_weights()
+        self._alias_legacy_top_threshold()
+
+    def _alias_legacy_top_threshold(self) -> None:
+        """Mirror legacy ``latent_cosine_drift_threshold`` onto the new
+        ``latent_cosine_drift_top_threshold`` when the caller set only the
+        legacy field (Issue #63 / CB-004).
+
+        Both fields share the same default (0.18), so we use the class-level
+        attribute as a sentinel: if the instance value differs from the class
+        default for the legacy field AND the new field is still at its class
+        default, the caller clearly meant the legacy value to apply. When
+        the caller sets the new field explicitly, the user-supplied value
+        wins unconditionally.
+        """
+        cls = type(self)
+        legacy = self.latent_cosine_drift_threshold
+        top = self.latent_cosine_drift_top_threshold
+        if (
+            legacy != cls.latent_cosine_drift_threshold
+            and top == cls.latent_cosine_drift_top_threshold
+        ):
+            self.latent_cosine_drift_top_threshold = legacy
+
+    def _normalize_drift_weights(self) -> None:
+        """Coerce ``drift_level_weights`` to ``tuple[float, ...]``.
+
+        YAML deserialisation yields a ``list`` but internal code expects a
+        ``tuple`` for immutability and hashability (DR1-001).
+        """
+        self.drift_level_weights = tuple(float(w) for w in self.drift_level_weights)
+
+    def _validate_drift_weights(self) -> None:
+        """Fail-closed validation (Issue #63 / DR4-001 + CB-002).
+
+        Rejects invalid weights by raising ``ValueError``. Invalid
+        configuration must never silently pass (security / correctness
+        boundary). CB-002 tightens the rules beyond the initial DR4-001
+        set: hierarchical scoring treats ``drift_level_weights`` as a
+        weighted-average, so entries must be in ``[0.0, 1.0]`` and the
+        sum must equal ``1.0`` (to ``1e-6``).
+
+        Rules:
+
+        * ``len(weights) == 3`` (token, mid, top).
+        * Each ``w`` is finite (no NaN / inf).
+        * ``0.0 <= w <= 1.0``.
+        * ``abs(sum(weights) - 1.0) <= 1e-6``.
+        """
+        weights = self.drift_level_weights
+        if len(weights) != 3:
+            raise ValueError(
+                "drift_level_weights must have length 3 (token, mid, top); "
+                f"got length {len(weights)}: {weights}"
+            )
+        for w in weights:
+            if not math.isfinite(w):
+                raise ValueError(
+                    f"drift_level_weights must be finite (no NaN / inf); got {weights}"
+                )
+            if w < 0.0 or w > 1.0:
+                raise ValueError(
+                    "drift_level_weights entries must be within [0.0, 1.0]; "
+                    f"got {weights}"
+                )
+        total = math.fsum(weights)
+        if abs(total - 1.0) > 1e-6:
+            raise ValueError(
+                "drift_level_weights must sum to 1.0 (± 1e-6); "
+                f"got sum={total:.6f} for {weights}"
+            )
 
 
 class FallbackReason(Enum):
@@ -190,14 +299,57 @@ class SafeRecGenController:
 
         if drift is not None:
             if cfg.trigger_latent_drift:
-                if drift.latent_cosine_drift > cfg.latent_cosine_drift_threshold:
+                # Issue #63 / CB-001: evaluate each level against its own
+                # threshold. If ANY level exceeds its threshold, append
+                # ``LATENT_DRIFT`` exactly once and record the triggered
+                # levels in ``details['latent_drift_triggered_levels']``.
+                # When the per-level thresholds all equal the legacy
+                # ``latent_cosine_drift_threshold`` (top default 0.18), the
+                # behaviour on top-only drift is identical to the pre-CB-001
+                # implementation.
+                triggered_levels: list[str] = []
+                if (
+                    drift.latent_cosine_drift_top
+                    > cfg.latent_cosine_drift_top_threshold
+                ):
+                    triggered_levels.append("top")
+                if (
+                    drift.latent_cosine_drift_mid
+                    > cfg.latent_cosine_drift_mid_threshold
+                ):
+                    triggered_levels.append("mid")
+                if (
+                    drift.latent_cosine_drift_token
+                    > cfg.latent_cosine_drift_token_threshold
+                ):
+                    triggered_levels.append("token")
+
+                if triggered_levels:
                     reasons.append(FallbackReason.LATENT_DRIFT)
-                    details["latent_cosine_drift"] = drift.latent_cosine_drift
+                    # Backward-compat: preserve the top value under the
+                    # legacy key so existing log consumers keep working.
+                    details["latent_cosine_drift"] = drift.latent_cosine_drift_top
+                    details["latent_cosine_drift_top"] = drift.latent_cosine_drift_top
+                    details["latent_cosine_drift_mid"] = drift.latent_cosine_drift_mid
+                    details["latent_cosine_drift_token"] = (
+                        drift.latent_cosine_drift_token
+                    )
+                    details["latent_drift_triggered_levels"] = triggered_levels
 
             if cfg.trigger_topic_shift:
                 if drift.topic_shift_score > cfg.topic_shift_score_threshold:
                     reasons.append(FallbackReason.TOPIC_SHIFT)
                     details["topic_shift_score"] = drift.topic_shift_score
+                    # Issue #63: optional subtype label (closed set, DR1-011).
+                    # Key is only set when the classification condition
+                    # matches; absence is semantically "no subtype".
+                    if (
+                        drift.latent_cosine_drift_top < 0.3
+                        and drift.latent_cosine_drift_token > 0.5
+                    ):
+                        details["topic_shift_subtype"] = "expression_shift"
+                    elif drift.latent_cosine_drift_top > 0.5:
+                        details["topic_shift_subtype"] = "large_topic_shift"
 
             if drift.logit_kl > cfg.logit_kl_threshold:
                 reasons.append(FallbackReason.LOGIT_KL)

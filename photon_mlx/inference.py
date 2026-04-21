@@ -14,12 +14,17 @@ import logging
 import sys
 from math import prod
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import mlx.core as mx
 
 from .model import PhotonModel
-from .session import DriftMetrics, HierarchicalState, PhotonSessionState
+from .session import (
+    DriftMetrics,
+    HierarchicalState,
+    PhotonSessionState,
+    weighted_hierarchical_score,
+)
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from torch_ref.config import PhotonConfig  # noqa: E402
@@ -64,6 +69,45 @@ escape valve for OOM.
 """
 
 
+class HierarchicalVecs(NamedTuple):
+    """Issue #63: per-level chunk vectors produced by the shared tokenize +
+    prefill helper.
+
+    Fields are ordered to match ``drift_level_weights`` (token, mid, top)
+    so the weighted combination in :meth:`PhotonInference._score_prune_candidates`
+    can stack them directly along the last axis (DR1-003).
+
+    All three fields have shape ``(N, D)`` — one mean-pooled vector per
+    chunk at the corresponding hierarchy level.
+    """
+
+    token: mx.array
+    mid: mx.array
+    top: mx.array
+
+
+def _masked_mean_along_time(
+    tensor: mx.array,
+    valid_steps: mx.array,
+) -> mx.array:
+    """Masked mean pool along the time axis of a (B, T, D) tensor.
+
+    ``valid_steps`` is an ``(B,)`` ``int32`` array of per-row valid-step
+    counts. Rows with zero valid steps are divided by ``1.0`` (fallback)
+    to avoid division-by-zero; callers must either skip those rows or
+    accept a zero vector. The helper is extracted from the shared
+    tokenize+prefill pipeline so each granularity (token / mid / top)
+    computes the mean the same way (Issue #63 / DR2-003).
+    """
+    T = tensor.shape[1]
+    pos = mx.arange(T, dtype=mx.int32)[None, :]
+    mask = (pos < valid_steps[:, None]).astype(mx.float32)
+    mask_3d = mask[..., None]
+    masked_sum = mx.sum(tensor * mask_3d, axis=1)
+    valid_count = mx.maximum(mx.sum(mask, axis=1, keepdims=True), 1.0)
+    return masked_sum / valid_count
+
+
 def _batch_cosine_similarity(
     query: mx.array,
     keys: mx.array,
@@ -102,6 +146,8 @@ class PhotonInference:
         model: PhotonModel,
         cfg: PhotonConfig,
         tokenizer: Any,
+        *,
+        drift_level_weights: tuple[float, ...] | list[float] | None = None,
     ) -> None:
         self.model = model
         self.cfg = cfg
@@ -114,6 +160,14 @@ class PhotonInference:
         # engine. cfg.hierarchy.chunk_sizes is treated as immutable across the
         # instance lifetime (DR3-001 / Risk R7).
         self._chunk_alignment: int = prod(cfg.hierarchy.chunk_sizes)
+        # Issue #63 / DR1-005: keyword-only to preserve the existing 3-arg
+        # constructor contract. The weights are stored as a plain tuple so
+        # :class:`PhotonSessionState` (and hierarchical scoring below) can
+        # use them without coupling to :class:`SafeRecGenConfig`.
+        if drift_level_weights is None:
+            self._drift_level_weights: tuple[float, ...] = (0.2, 0.3, 0.5)
+        else:
+            self._drift_level_weights = tuple(float(w) for w in drift_level_weights)
 
     def get_session(
         self,
@@ -126,6 +180,7 @@ class PhotonInference:
                 session_id,
                 repo_id,
                 repo_commit,
+                drift_level_weights=self._drift_level_weights,
             )
         return self._sessions[session_id]
 
@@ -250,24 +305,32 @@ class PhotonInference:
 
         return token_ids
 
-    def _encode_chunks_to_vecs(
+    def _tokenize_and_prefill_chunks(
         self,
         chunk_texts: list[str],
         micro_batch_size: int | None = None,
-    ) -> tuple[list[int], mx.array | None]:
-        """Tokenise → pad → hierarchical_prefill (micro-batched) → masked-mean.
+    ) -> tuple[list[int], HierarchicalVecs | None]:
+        """Shared tokenize → pad → micro-batched prefill → masked-mean helper.
 
-        Returns ``(valid_indices, chunk_vecs)`` where ``chunk_vecs`` is either
-        ``None`` (no chunk produced any tokens) or an ``mx.array`` of shape
-        ``(len(valid_indices), D)``.  Steps ①〜④ of the design-policy data
-        flow are encapsulated here so Pass 1 scoring and Turn 2+ scoring share
-        identical chunk-vectorisation logic (DR1-001).
+        Issue #63 / DR1-002 / DR2-002: the single source of truth for
+        chunk vectorisation. It produces per-level masked-mean vectors
+        (``token``, ``mid``, ``top``) so both top-only consumers and the
+        hierarchical scoring path stay bit-for-bit compatible.
 
-        The helper is pure with respect to ``self._sessions`` — it reads the
-        tokenizer and model only. ``_TokenizerEncodeFailure`` raised by
-        :meth:`_tokenize_chunk` propagates out so the caller can fail-closed.
+        Returns ``(valid_indices, HierarchicalVecs | None)``:
+        * ``valid_indices`` — indices into ``chunk_texts`` of chunks that
+          produced at least one token.
+        * ``HierarchicalVecs`` — three ``(len(valid_indices), D)`` tensors,
+          or ``None`` if no chunk was usable.
+
+        Fails closed (DR4-002): if the prefill returns a state with
+        ``len(level_states) < 1``, the whole call returns ``(indices, None)``
+        so the caller reverts to the no-prune sentinel path. Missing
+        ``token_proj`` is NOT considered partial — it only means the
+        ``token`` vecs are degraded to a replica of ``top`` (level-1 builds).
         """
-        # ① Tokenize all chunks once, collect valid_indices and valid_top_steps.
+        # ① Tokenize all chunks once, collect valid_indices and step tables
+        # for each of the three granularities (DR2-003).
         valid_indices: list[int] = []
         all_token_ids: list[list[int]] = []
         for idx, text in enumerate(chunk_texts):
@@ -283,12 +346,16 @@ class PhotonInference:
             return valid_indices, None
 
         alignment = self._chunk_alignment
+        chunk_sizes = self.cfg.hierarchy.chunk_sizes
+        # Granularity of each level after the bottom-up encoder:
+        # * token: T
+        # * mid:   T / chunk_sizes[0]
+        # * top:   T / prod(chunk_sizes)
+        valid_token_steps = [len(ids) for ids in all_token_ids]
+        valid_mid_steps = [len(ids) // chunk_sizes[0] for ids in all_token_ids]
         valid_top_steps = [len(ids) // alignment for ids in all_token_ids]
 
-        # ② Right-pad to the maximum within the micro-batch group. We pad the
-        # whole valid set up to the global max once and slice per micro-batch
-        # below. The padding length is rounded up to ``alignment`` so the
-        # hierarchy reshape never sees a partial chunk.
+        # ② Right-pad to the maximum within the micro-batch group.
         max_batch_len = max(len(ids) for ids in all_token_ids)
         rem = max_batch_len % alignment
         if rem != 0:
@@ -298,36 +365,114 @@ class PhotonInference:
         ]
         batch_input = mx.array(padded, dtype=mx.int32)
 
-        # ②' Resolve micro-batch size (DR1-006 fallback responsibility).
+        # ②' Resolve micro-batch size (DR1-006).
         effective_micro = (
             micro_batch_size if micro_batch_size is not None else MICRO_BATCH_SIZE
         )
 
-        # ③+④ Forward each micro-batch through hierarchical_prefill, then
-        # apply masked-mean (path B per pre-check decision) to obtain one
-        # vector per chunk. Concatenate on the GPU; never tolist() between
-        # micro-batches.
+        valid_token_arr = mx.array(valid_token_steps, dtype=mx.int32)
+        valid_mid_arr = mx.array(valid_mid_steps, dtype=mx.int32)
         valid_top_arr = mx.array(valid_top_steps, dtype=mx.int32)
         n_valid = batch_input.shape[0]
-        chunk_vec_pieces: list[mx.array] = []
+        token_pieces: list[mx.array] = []
+        mid_pieces: list[mx.array] = []
+        top_pieces: list[mx.array] = []
+
         for start in range(0, n_valid, effective_micro):
             end = min(start + effective_micro, n_valid)
             sub_input = batch_input[start:end]
-            sub_steps = valid_top_arr[start:end]
+            sub_top_steps = valid_top_arr[start:end]
+            sub_mid_steps = valid_mid_arr[start:end]
+            sub_token_steps = valid_token_arr[start:end]
 
             _, h_state = self.hierarchical_prefill(sub_input)
-            chunk_tops = h_state.level_states[-1].astype(mx.float32)
-            # chunk_tops shape: (sub_B, T_top, D)
-            T_top = chunk_tops.shape[1]
-            pos = mx.arange(T_top, dtype=mx.int32)[None, :]
-            mask = (pos < sub_steps[:, None]).astype(mx.float32)
-            mask_3d = mask[..., None]
-            masked_sum = mx.sum(chunk_tops * mask_3d, axis=1)
-            valid_count = mx.maximum(mx.sum(mask, axis=1, keepdims=True), 1.0)
-            chunk_vec_pieces.append(masked_sum / valid_count)
 
-        chunk_vecs = mx.concatenate(chunk_vec_pieces, axis=0)  # (N_valid, D)
-        return valid_indices, chunk_vecs
+            # Fail-closed guard (DR4-002): if no level_states were produced,
+            # we cannot reliably score any chunk. Returning ``None`` ensures
+            # the caller drops to the no-prune sentinel.
+            if not h_state.level_states:
+                return valid_indices, None
+
+            # ③ top (level_states[-1]) masked-mean
+            chunk_tops = h_state.level_states[-1].astype(mx.float32)
+            top_pieces.append(_masked_mean_along_time(chunk_tops, sub_top_steps))
+
+            # ④ mid (level_states[0]) masked-mean; if only one level exists,
+            # fall back to top so ``mid`` stays shape-compatible with ``top``.
+            if len(h_state.level_states) >= 2:
+                chunk_mids = h_state.level_states[0].astype(mx.float32)
+                mid_pieces.append(_masked_mean_along_time(chunk_mids, sub_mid_steps))
+            else:
+                mid_pieces.append(_masked_mean_along_time(chunk_tops, sub_top_steps))
+
+            # ⑤ token (token_proj) masked-mean; if token_proj is absent,
+            # fall back to top so the three vecs can still be stacked.
+            if h_state.token_proj is not None:
+                chunk_tokens = h_state.token_proj.astype(mx.float32)
+                token_pieces.append(
+                    _masked_mean_along_time(chunk_tokens, sub_token_steps)
+                )
+            else:
+                token_pieces.append(_masked_mean_along_time(chunk_tops, sub_top_steps))
+
+        token_vecs = mx.concatenate(token_pieces, axis=0)
+        mid_vecs = mx.concatenate(mid_pieces, axis=0)
+        top_vecs = mx.concatenate(top_pieces, axis=0)
+        return valid_indices, HierarchicalVecs(
+            token=token_vecs, mid=mid_vecs, top=top_vecs
+        )
+
+    def _encode_chunks_to_vecs(
+        self,
+        chunk_texts: list[str],
+        micro_batch_size: int | None = None,
+    ) -> tuple[list[int], mx.array | None]:
+        """Thin wrapper preserving pre-Issue-#63 behaviour: returns top-only
+        chunk vectors. Delegates to :meth:`_tokenize_and_prefill_chunks` so
+        both top-only and hierarchical scoring paths share a single
+        tokenize/prefill pipeline (DR1-002, bit-for-bit compatible).
+        """
+        valid_indices, vecs = self._tokenize_and_prefill_chunks(
+            chunk_texts, micro_batch_size=micro_batch_size
+        )
+        if vecs is None:
+            return valid_indices, None
+        return valid_indices, vecs.top
+
+    def _encode_chunks_to_vecs_hierarchical(
+        self,
+        chunk_texts: list[str],
+        micro_batch_size: int | None = None,
+    ) -> tuple[list[int], HierarchicalVecs | None]:
+        """Thin wrapper returning per-level chunk vectors (Issue #63)."""
+        return self._tokenize_and_prefill_chunks(
+            chunk_texts, micro_batch_size=micro_batch_size
+        )
+
+    def _build_query_hierarchical_vecs(
+        self,
+        state: HierarchicalState,
+    ) -> tuple[mx.array, mx.array, mx.array]:
+        """Build per-level (token, mid, top) mean-pooled query vectors.
+
+        Issue #63: used by both ``_score_prune_candidates`` (session state)
+        and ``_score_prune_candidates_from_question`` (one-off prefill).
+        Missing levels fall back to the top-level vector so the stacked
+        cosines always have three finite entries (design §5 decision #4).
+        """
+        top_state = state.level_states[-1].astype(mx.float32)
+        q_top = mx.mean(top_state, axis=tuple(range(top_state.ndim - 1)))
+        if len(state.level_states) >= 2:
+            mid_state = state.level_states[0].astype(mx.float32)
+            q_mid = mx.mean(mid_state, axis=tuple(range(mid_state.ndim - 1)))
+        else:
+            q_mid = q_top
+        if state.token_proj is not None:
+            tok_state = state.token_proj.astype(mx.float32)
+            q_token = mx.mean(tok_state, axis=tuple(range(tok_state.ndim - 1)))
+        else:
+            q_token = q_top
+        return q_token, q_mid, q_top
 
     def _score_prune_candidates(
         self,
@@ -341,6 +486,11 @@ class PhotonInference:
         (length == ``len(chunk_texts)``). For chunks that should not be
         scored (empty text, no valid tokens after alignment, or no session
         state available), the raw score is ``-1.0``.
+
+        Issue #63: raw_score is a weighted combination of per-level cosine
+        similarities (token / mid / top) via
+        :func:`weighted_hierarchical_score` — the weighting reuses
+        ``self._drift_level_weights`` so drift and scoring stay consistent.
 
         ``chunk_ids`` is intentionally NOT a parameter (DR3-002): chunk_ids
         are not used by scoring; they are a presentation/selection concern
@@ -367,22 +517,24 @@ class PhotonInference:
             # special-case None.
             return scores
 
-        # Coarse session vector (mean-pool along all leading dims).
-        coarse_state = session.current_state.level_states[-1].astype(mx.float32)
-        coarse_vec = mx.mean(
-            coarse_state,
-            axis=tuple(range(coarse_state.ndim - 1)),
+        # Issue #63: build all three query vectors (token/mid/top).
+        q_token, q_mid, q_top = self._build_query_hierarchical_vecs(
+            session.current_state
         )
 
-        # ①〜④ Chunk vectorisation (shared with Pass 1 scoring via helper).
-        valid_indices, chunk_vecs = self._encode_chunks_to_vecs(
+        # ①〜④ Chunk vectorisation (shared helper, hierarchical).
+        valid_indices, vecs = self._encode_chunks_to_vecs_hierarchical(
             chunk_texts, micro_batch_size=micro_batch_size
         )
-        if chunk_vecs is None:
+        if vecs is None:
             return scores
 
-        # ⑤ Cosine similarity, single GPU→CPU sync.
-        sims = _batch_cosine_similarity(coarse_vec, chunk_vecs)
+        # ⑤ Per-level cosine similarity, then weighted combination.
+        sim_token = _batch_cosine_similarity(q_token, vecs.token)
+        sim_mid = _batch_cosine_similarity(q_mid, vecs.mid)
+        sim_top = _batch_cosine_similarity(q_top, vecs.top)
+        sim_stack = mx.stack([sim_token, sim_mid, sim_top], axis=-1)
+        sims = weighted_hierarchical_score(sim_stack, self._drift_level_weights)
         mx.eval(sims)
         sims_list = sims.tolist()
 
@@ -398,13 +550,12 @@ class PhotonInference:
         micro_batch_size: int | None = None,
     ) -> list[tuple[int, float]]:
         """Pass 1 scoring (Turn 1): score chunks against a transient
-        question-derived coarse vector.
+        question-derived hierarchical vector.
 
-        Builds a one-off coarse_vec from ``question`` via
+        Builds a one-off 3-level coarse vector from ``question`` via
         :meth:`hierarchical_prefill` (no ``session_forward``, so
-        ``self._sessions`` is never mutated — DR1-001) and cosine-scores each
-        chunk against it using the shared :meth:`_encode_chunks_to_vecs`
-        helper.
+        ``self._sessions`` is never mutated — DR1-001) and combines per-level
+        cosine similarities via :func:`weighted_hierarchical_score`.
 
         Raises :class:`_TokenizerEncodeFailure` if ``question`` or any chunk
         fails to tokenize (the caller fails closed by returning all indices).
@@ -416,25 +567,28 @@ class PhotonInference:
         if n == 0:
             return scores
 
-        # ① Question → one-off coarse vector (no session mutation).
+        # ① Question → one-off 3-level coarse vectors (no session mutation).
         question_tokens = self._tokenize_chunk(question)
         if not question_tokens:
             return scores
 
         q_input = mx.array([question_tokens], dtype=mx.int32)
         _, q_state = self.hierarchical_prefill(q_input)
-        q_top = q_state.level_states[-1].astype(mx.float32)
-        question_coarse_vec = mx.mean(q_top, axis=tuple(range(q_top.ndim - 1)))
+        q_token, q_mid, q_top = self._build_query_hierarchical_vecs(q_state)
 
-        # ②〜④ Chunk vectorisation via shared helper.
-        valid_indices, chunk_vecs = self._encode_chunks_to_vecs(
+        # ②〜④ Chunk vectorisation via shared hierarchical helper.
+        valid_indices, vecs = self._encode_chunks_to_vecs_hierarchical(
             chunk_texts, micro_batch_size=micro_batch_size
         )
-        if chunk_vecs is None:
+        if vecs is None:
             return scores
 
-        # ⑤ Cosine similarity, single GPU→CPU sync.
-        sims = _batch_cosine_similarity(question_coarse_vec, chunk_vecs)
+        # ⑤ Per-level cosine similarity, then weighted combination.
+        sim_token = _batch_cosine_similarity(q_token, vecs.token)
+        sim_mid = _batch_cosine_similarity(q_mid, vecs.mid)
+        sim_top = _batch_cosine_similarity(q_top, vecs.top)
+        sim_stack = mx.stack([sim_token, sim_mid, sim_top], axis=-1)
+        sims = weighted_hierarchical_score(sim_stack, self._drift_level_weights)
         mx.eval(sims)
         sims_list = sims.tolist()
 
@@ -505,9 +659,17 @@ class PhotonInference:
             and bool(session.current_state.level_states)
         )
 
-        # Fail closed on tokenizer errors (Issue #58 CB-002): if encode raises
-        # we cannot rank chunks reliably, so hand every chunk back to the
-        # caller instead of returning an arbitrary prefix.
+        # Fail closed on tokenizer errors (Issue #58 CB-002) and on
+        # unexpected scoring-path failures (Issue #63 / CB-003): if any
+        # step of the scoring pipeline raises (tokenizer, hierarchical
+        # prefill, masked-mean, weighted scoring, MLX runtime / shape
+        # assertion), we cannot rank chunks reliably → hand every chunk
+        # back to the caller instead of propagating the exception.
+        # The catch list is intentionally NOT bare ``Exception``: it
+        # enumerates the exception classes that legitimate failure modes
+        # raise (tokenizer failure, ValueError from shape / dtype /
+        # validation, RuntimeError from MLX, AssertionError from contract
+        # checks). Programming errors outside this set still surface.
         try:
             if has_state:
                 raw_scores = self._score_prune_candidates(
@@ -525,6 +687,15 @@ class PhotonInference:
                 # Turn 1 without a question → preserve pre-Issue-#56 behaviour.
                 return all_indices
         except _TokenizerEncodeFailure:
+            return all_indices
+        except (ValueError, RuntimeError, AssertionError) as exc:
+            _logger.warning(
+                "prune_evidence scoring failed (%s: %s); "
+                "failing closed and returning all candidate indices "
+                "(Issue #63 / CB-003)",
+                type(exc).__name__,
+                exc,
+            )
             return all_indices
 
         # Selection: sort by score desc, take top max_chunks, return indices

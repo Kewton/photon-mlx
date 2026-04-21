@@ -1734,6 +1734,153 @@ class TestBuildPhotonDepsWiresRopeScaling:
 
 
 # ---------------------------------------------------------------------------
+# Issue #63: Safe RecGen YAML loader wires per-level thresholds and weights
+# ---------------------------------------------------------------------------
+
+
+class TestBuildPhotonDepsIssue63SafeRecGen:
+    """Issue #63: _build_photon_deps must (a) resolve the legacy
+    ``thresholds.latent_cosine_drift`` YAML key onto the new
+    ``latent_cosine_drift_top_threshold`` (alias), (b) read the per-level
+    thresholds, (c) read ``drift_level_weights``, and (d) propagate weights
+    into PhotonInference._drift_level_weights."""
+
+    def _write_cfg(self, tmp_path, body: str):
+        from baseline_reporag.config import load_config
+
+        cfg_file = tmp_path / "photon_issue63.yaml"
+        cfg_file.write_text(body)
+        return load_config(str(cfg_file))
+
+    def test_legacy_threshold_alias_maps_to_top(self, tmp_path):
+        from baseline_reporag.photon_pipeline import _build_photon_deps
+
+        cfg = self._write_cfg(
+            tmp_path,
+            "model:\n"
+            "  provider: photon\n"
+            "  base_embed_dim: 16\n"
+            "  hidden_size: 32\n"
+            "  intermediate_size: 64\n"
+            "  num_heads: 2\n"
+            "  head_dim: 16\n"
+            "  vocab_size: 256\n"
+            "hierarchy:\n"
+            "  levels: 2\n"
+            "  chunk_sizes: [4, 4]\n"
+            "  encoder_layers_per_level: [1, 1]\n"
+            "  decoder_layers_per_level: [1, 1]\n"
+            "inference:\n"
+            "  safe_recgen_enabled: true\n"
+            "safe_recgen:\n"
+            "  thresholds:\n"
+            "    latent_cosine_drift: 0.42\n",
+        )
+        deps = _build_photon_deps(cfg)
+        sr_cfg = deps["safe_recgen"].config
+        # Legacy alias: top_threshold == the value from thresholds.latent_cosine_drift.
+        assert sr_cfg.latent_cosine_drift_top_threshold == 0.42
+        # Legacy field must mirror the alias so existing log schema keeps working.
+        assert sr_cfg.latent_cosine_drift_threshold == 0.42
+
+    def test_per_level_thresholds_and_weights(self, tmp_path):
+        from baseline_reporag.photon_pipeline import _build_photon_deps
+
+        cfg = self._write_cfg(
+            tmp_path,
+            "model:\n"
+            "  provider: photon\n"
+            "  base_embed_dim: 16\n"
+            "  hidden_size: 32\n"
+            "  intermediate_size: 64\n"
+            "  num_heads: 2\n"
+            "  head_dim: 16\n"
+            "  vocab_size: 256\n"
+            "hierarchy:\n"
+            "  levels: 2\n"
+            "  chunk_sizes: [4, 4]\n"
+            "  encoder_layers_per_level: [1, 1]\n"
+            "  decoder_layers_per_level: [1, 1]\n"
+            "inference:\n"
+            "  safe_recgen_enabled: true\n"
+            "safe_recgen:\n"
+            "  thresholds:\n"
+            "    latent_cosine_drift_top: 0.25\n"
+            "    latent_cosine_drift_mid: 0.33\n"
+            "    latent_cosine_drift_token: 0.22\n"
+            "  drift_level_weights: [0.1, 0.4, 0.5]\n",
+        )
+        deps = _build_photon_deps(cfg)
+        sr_cfg = deps["safe_recgen"].config
+        assert sr_cfg.latent_cosine_drift_top_threshold == 0.25
+        assert sr_cfg.latent_cosine_drift_mid_threshold == 0.33
+        assert sr_cfg.latent_cosine_drift_token_threshold == 0.22
+        # list from YAML is normalised to a tuple of floats by __post_init__.
+        assert sr_cfg.drift_level_weights == (0.1, 0.4, 0.5)
+        # PhotonInference must receive the same weights.
+        assert deps["photon_inference"]._drift_level_weights == (0.1, 0.4, 0.5)
+
+    def test_thresholds_missing_uses_defaults(self, tmp_path):
+        """DR2-005: config with safe_recgen section but no thresholds key must
+        initialise with safe default values (no KeyError)."""
+        from baseline_reporag.photon_pipeline import _build_photon_deps
+
+        cfg = self._write_cfg(
+            tmp_path,
+            "model:\n"
+            "  provider: photon\n"
+            "  base_embed_dim: 16\n"
+            "  hidden_size: 32\n"
+            "  intermediate_size: 64\n"
+            "  num_heads: 2\n"
+            "  head_dim: 16\n"
+            "  vocab_size: 256\n"
+            "hierarchy:\n"
+            "  levels: 2\n"
+            "  chunk_sizes: [4, 4]\n"
+            "  encoder_layers_per_level: [1, 1]\n"
+            "  decoder_layers_per_level: [1, 1]\n"
+            "inference:\n"
+            "  safe_recgen_enabled: true\n"
+            "safe_recgen: {}\n",
+        )
+        deps = _build_photon_deps(cfg)
+        sr_cfg = deps["safe_recgen"].config
+        assert sr_cfg.latent_cosine_drift_top_threshold == 0.18
+        assert sr_cfg.latent_cosine_drift_mid_threshold == 0.40
+        assert sr_cfg.latent_cosine_drift_token_threshold == 0.30
+        assert sr_cfg.drift_level_weights == (0.2, 0.3, 0.5)
+
+    def test_safe_recgen_disabled_still_builds_inference(self, tmp_path):
+        """DR2-005 / test_tiny config: safe_recgen_enabled=false must still
+        build PhotonInference with default drift weights."""
+        from baseline_reporag.photon_pipeline import _build_photon_deps
+
+        cfg = self._write_cfg(
+            tmp_path,
+            "model:\n"
+            "  provider: photon\n"
+            "  base_embed_dim: 16\n"
+            "  hidden_size: 32\n"
+            "  intermediate_size: 64\n"
+            "  num_heads: 2\n"
+            "  head_dim: 16\n"
+            "  vocab_size: 256\n"
+            "hierarchy:\n"
+            "  levels: 2\n"
+            "  chunk_sizes: [4, 4]\n"
+            "  encoder_layers_per_level: [1, 1]\n"
+            "  decoder_layers_per_level: [1, 1]\n"
+            "inference:\n"
+            "  safe_recgen_enabled: false\n",
+        )
+        deps = _build_photon_deps(cfg)
+        assert deps["safe_recgen"] is None
+        # Default drift weights when SafeRecGen is disabled.
+        assert deps["photon_inference"]._drift_level_weights == (0.2, 0.3, 0.5)
+
+
+# ---------------------------------------------------------------------------
 # Issue #56: two-pass search configuration and integration
 # ---------------------------------------------------------------------------
 
