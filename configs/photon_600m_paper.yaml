@@ -118,6 +118,10 @@ session_memory:
     decay_factor: 0.5
     relevant_turn_threshold: 0.7
     storage_mode: "top_level_only"
+    # Issue #80: session coarse state aggregation mode.
+    # One of {"weighted", "attention", "last"}. Default "weighted" keeps
+    # the pre-#80 decayed-mean behaviour.
+    aggregation: weighted
 
 tokenizer:
   tokenizer_id: "meta-llama/Llama-2-7b-hf"

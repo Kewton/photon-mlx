@@ -40,14 +40,16 @@ variants:
         safe_recgen_enabled: false
       safe_recgen:
         enabled: false
-      # Issue #64 / #79: sample override for the cross-turn working memory.
+      # Issue #64 / #79 / #80: sample override for the cross-turn working memory.
       # storage_mode accepts {"full", "top_level_only", "summary_only"}.
+      # aggregation accepts {"weighted", "attention", "last"}.
       # session_memory:
       #   working_memory:
       #     enabled: true
       #     max_turns: 8
       #     decay_factor: 0.5
       #     storage_mode: "full"
+      #     aggregation: weighted
 
   - id: "photon_rag_safe_recgen"
     label: "PHOTON-RAG+SafeRecGen"
@@ -58,14 +60,16 @@ variants:
         safe_recgen_enabled: true
       safe_recgen:
         enabled: true
-      # Issue #64 / #79: sample override for the cross-turn working memory.
+      # Issue #64 / #79 / #80: sample override for the cross-turn working memory.
       # storage_mode accepts {"full", "top_level_only", "summary_only"}.
+      # aggregation accepts {"weighted", "attention", "last"}.
       # session_memory:
       #   working_memory:
       #     enabled: true
       #     max_turns: 8
       #     decay_factor: 0.5
       #     storage_mode: "full"
+      #     aggregation: weighted
 
   # Issue #62 Phase 1 — PHOTON single-path generation (opt-in).
   - id: "photon_rag_recgen"
@@ -76,6 +80,53 @@ variants:
       inference:
         photon_generation_enabled: true
         generation_fallback_policy: "qwen"
+
+  # Issue #80 — aggregation mode comparison variants (3 modes).
+  # Run with:
+  #   python -m bench.run_all --config configs/eval.yaml \
+  #     --variants photon_rag_aggr_weighted,photon_rag_aggr_attention,photon_rag_aggr_last
+  # Each variant only toggles ``aggregation`` so results are A/B/C comparable.
+  - id: "photon_rag_aggr_weighted"
+    label: "PHOTON-RAG+Aggr(weighted)"
+    kind: "photon"
+    config_path: "./configs/photon_small.yaml"
+    override:
+      inference:
+        safe_recgen_enabled: false
+      safe_recgen:
+        enabled: false
+      session_memory:
+        working_memory:
+          enabled: true
+          aggregation: weighted
+
+  - id: "photon_rag_aggr_attention"
+    label: "PHOTON-RAG+Aggr(attention)"
+    kind: "photon"
+    config_path: "./configs/photon_small.yaml"
+    override:
+      inference:
+        safe_recgen_enabled: false
+      safe_recgen:
+        enabled: false
+      session_memory:
+        working_memory:
+          enabled: true
+          aggregation: attention
+
+  - id: "photon_rag_aggr_last"
+    label: "PHOTON-RAG+Aggr(last)"
+    kind: "photon"
+    config_path: "./configs/photon_small.yaml"
+    override:
+      inference:
+        safe_recgen_enabled: false
+      safe_recgen:
+        enabled: false
+      session_memory:
+        working_memory:
+          enabled: true
+          aggregation: last
 
 fairness:
   fix_repo_snapshot: true

@@ -264,6 +264,11 @@ class WorkingMemoryConfig:
     storage_mode: str | _WMFieldSentinel = field(
         default_factory=lambda: _WM_FIELD_UNSET
     )
+    # Issue #80: aggregation mode selector for ``get_session_coarse_state()``.
+    # ``Literal["weighted", "attention", "last"]`` — default ``weighted`` keeps
+    # the pre-#80 behaviour so YAML configs without this key are backward
+    # compatible.
+    aggregation: str = "weighted"
 
     def __post_init__(self) -> None:
         if not isinstance(self.enabled, bool):
@@ -334,6 +339,18 @@ class WorkingMemoryConfig:
             raise ValueError(
                 "relevant_turn_threshold must be -1.0 <= float <= 1.0, got "
                 f"{self.relevant_turn_threshold}"
+            )
+        # Issue #80: aggregation mode — fail-closed on malformed YAML.
+        # Error messages intentionally exclude the raw value (log-poisoning /
+        # PII mitigation, design §6 and DR4-001): only the literal set and the
+        # type name are surfaced.
+        if not isinstance(self.aggregation, str):
+            raise TypeError(
+                f"aggregation must be str, got {type(self.aggregation).__name__}"
+            )
+        if self.aggregation not in {"weighted", "attention", "last"}:
+            raise ValueError(
+                "aggregation must be one of {'weighted', 'attention', 'last'}"
             )
 
         # DR1-004: emit DeprecationWarning only when the caller mixed the
@@ -773,116 +790,203 @@ class PhotonSessionState:
     def latest_drift(self) -> DriftMetrics | None:
         return self.drift_history[-1] if self.drift_history else None
 
+    def _collect_turn_coarse_vecs(
+        self,
+    ) -> tuple[list[mx.array], list[int], list[float]]:
+        """Walk ``turn_history`` and return per-turn (vecs, turn_ids, weights).
+
+        Issue #79 D1 / DR1-008 adds a ``storage_mode`` switch so vec collection
+        spans ``turn_history`` only, ``compressed_history`` only, or both:
+
+        * ``"full"`` — concatenates compressed (older) + live turns.
+        * ``"top_level_only"`` — live turns only (no compressed pool).
+        * ``"summary_only"`` — compressed pool only (``turn_history`` empty
+          in this mode).
+
+        Issue #80 layers aggregation on top (see :meth:`get_session_coarse_state`)
+        and needs ``turn_ids`` for the attention mode's current-turn exclusion.
+        Compressed entries get ``turn_id = -1`` sentinel (impossible real
+        ``TurnState.turn_id``) so attention's ``exclude_turn_id`` filter is a
+        no-op against them.
+
+        ``weights``: geometric decay ``decay_factor ** (N-i-1)`` over the
+        combined vec list (so weights stay aligned with the index used for
+        scoring).
+
+        Turns whose ``hierarchical_state.level_states`` is empty and
+        compressed entries with zero-length ``summary_vec`` are skipped
+        (defensive invariant). Returned lists may be empty.
+        """
+        mode_storage = self.working_memory_cfg.storage_mode
+        vecs: list[mx.array] = []
+        turn_ids: list[int] = []
+
+        if mode_storage in ("full", "summary_only"):
+            for entry in self.compressed_history:
+                if entry.summary_vec.shape[0] == 0:
+                    continue
+                vecs.append(entry.summary_vec)
+                turn_ids.append(-1)  # sentinel: not a live turn
+
+        if mode_storage in ("full", "top_level_only"):
+            for turn in self.turn_history:
+                if not turn.hierarchical_state.level_states:
+                    continue
+                vecs.append(self._make_turn_summary(turn.hierarchical_state))
+                turn_ids.append(turn.turn_id)
+
+        decay = float(self.working_memory_cfg.decay_factor)
+        n = len(vecs)
+        weights: list[float] = [decay ** (n - i - 1) for i in range(n)]
+        return vecs, turn_ids, weights
+
+    def _aggregate_attention(
+        self,
+        vecs: list[mx.array],
+        turn_ids: list[int],
+        curr_vec: mx.array,
+        exclude_turn_id: int | None,
+    ) -> mx.array | None:
+        """Compute attention-weighted coarse state vs a query vector.
+
+        Batched MLX implementation (no Python for-loop, no ``.item()``)
+        following Issue #80 design §5-2 step 5:
+
+        1. Stack candidate vecs → shape ``(M, D)`` float32.
+        2. L2-norm per row / per query vec with ``+1e-8`` epsilon.
+        3. Cosine similarity ``scores = (stacked @ curr_vec) / norms``.
+        4. ``mx.softmax(scores, axis=-1)`` → ``(M,)`` weights.
+        5. Weighted sum along rows → ``(D,)`` output.
+
+        ``exclude_turn_id`` removes a single turn by id before stacking
+        (used to drop the current turn during production path — design
+        judgement #2). Compressed-history entries carry
+        ``turn_id == -1`` so they are always kept regardless of
+        ``exclude_turn_id``. If after exclusion ``M == 0``, returns
+        ``None`` and lets the dispatcher pick ``fallback_vec`` (DR2-006).
+
+        Pattern matches the existing ``cosine_distance`` (``mx.sqrt(mx.sum
+        (x*x))`` + ``+1e-8``) so numerical behaviour is consistent.
+        """
+        if exclude_turn_id is not None:
+            kept_vecs = [v for v, tid in zip(vecs, turn_ids) if tid != exclude_turn_id]
+        else:
+            kept_vecs = list(vecs)
+        if not kept_vecs:
+            return None
+
+        stacked = mx.stack(kept_vecs, axis=0).astype(mx.float32)  # (M, D)
+        q = curr_vec.astype(mx.float32)
+        # (M,) dot products.
+        dots = stacked @ q
+        # Norms: per-row (M,) and scalar for q.
+        k_norms = mx.sqrt(mx.sum(stacked * stacked, axis=-1)) + 1e-8  # (M,)
+        q_norm = mx.sqrt(mx.sum(q * q)) + 1e-8  # scalar
+        scores = dots / (k_norms * q_norm)  # (M,)
+        attn_weights = mx.softmax(scores, axis=-1)  # (M,)
+        result = mx.sum(attn_weights[:, None] * stacked, axis=0)  # (D,)
+        return result
+
     def get_session_coarse_state(self) -> mx.array | None:
         """Return a ``(D,)`` coarse session vector aggregated across turns.
 
-        Aggregation is a decay-weighted mean of per-turn summary vectors
-        (``decay_factor ** (N-i-1)``). Issue #79 D1 / DR1-008 adds a
-        ``storage_mode`` switch so that:
+        Issue #79 selects **what** is aggregated via
+        ``working_memory_cfg.storage_mode`` (compressed, live, or both).
+        Issue #80 selects **how** those vectors are combined via
+        ``working_memory_cfg.aggregation`` — three modes:
 
-        * ``"full"`` — aggregates ``turn_history`` summaries **and**, if
-          ``compressed_history`` is non-empty, concatenates those pooled
-          entries at the chronological front with the same decay weighting
-          (design §3.7 D7). This is what makes ``full`` mode's long sessions
-          keep a faint memory of turns that have aged out of the live
-          history.
-        * ``"top_level_only"`` — aggregates ``turn_history`` only (no writes
-          to ``compressed_history``).
-        * ``"summary_only"`` — aggregates ``compressed_history`` only
-          (``turn_history`` is always empty in this mode).
+        - ``"weighted"`` (default, backward compat): weighted mean using
+          geometric decay ``decay_factor ** (N-i-1)``. When
+          ``weight_sum <= 0`` (e.g. ``decay_factor=0`` with history > 1)
+          falls back to the most-recent valid vector.
+        - ``"last"``: most-recent valid vector (still runs the common
+          pre-processing so ``level_states == []`` and zero-length
+          ``summary_vec`` skip invariants hold).
+        - ``"attention"``: softmax-weighted sum of past-turn vecs using
+          cosine similarity to the current turn's ``level_states[-1]``
+          mean-pool. The current turn (``current_state.turn_id``) is
+          excluded from live candidates to avoid the ``cos == 1``
+          self-match that would dominate the softmax (see caller
+          contract below). Compressed-history entries carry
+          ``turn_id = -1`` sentinel and are therefore always kept.
+          When there is no valid current vec or no past candidates,
+          falls back to the most-recent valid vector.
 
-        Returns ``None`` when working memory is disabled or no summaries
-        exist yet (DR1-008 keeps mode switch and empty check on separate
-        lines for the parametric test matrix in §6.1).
+        Shared invariants:
+
+        - Returns ``None`` when working memory is disabled, the
+          storage-specific source list is empty, or every entry is
+          invalid (empty ``level_states`` / zero-length ``summary_vec``).
+        - All three modes return a vector with ``shape == (D,)`` and
+          ``dtype == mx.float32`` (DR1-002) — callers (notably
+          :meth:`PhotonInference._score_prune_candidates`) can assume no
+          additional casting is needed.
+        - Errors on aggregation value (type / unknown mode) are raised
+          without including the raw value in the message (Issue #80 §6,
+          log-poisoning mitigation).
+
+        Caller contract (attention / design judgement #2): on the
+        production path :meth:`update` is called first, which sets
+        ``current_state = new_state`` and also appends the same turn to
+        ``turn_history``. The attention branch therefore excludes the
+        current turn from past-turn candidates. After
+        :meth:`reset_working_memory` the supported path has no live
+        state and this method returns ``None`` via the early-return
+        guards, so no stale ``fallback_vec`` is ever returned in reset
+        recovery.
         """
         if not self.working_memory_cfg.enabled:
             return None
 
-        mode = self.working_memory_cfg.storage_mode
-        if mode == "summary_only":
-            # CB-001 defense-in-depth: filter zero-length summaries that
-            # might have leaked through (e.g. legacy pickled state,
-            # future refactors). The save-site filter in
-            # ``_append_summary_only`` prevents new writes; this guards
-            # reads.
-            vecs = self._collect_compressed_history_summaries()
-            if not vecs:
-                return None
-            return self._aggregate_decayed_mean(vecs)
-
-        if mode == "top_level_only":
-            if not self.turn_history:
-                return None
-            vecs = self._collect_turn_history_summaries()
-            if not vecs:
-                return None
-            return self._aggregate_decayed_mean(vecs)
-
-        # mode == "full": concatenate compressed + turn_history on a single
-        # chronological axis (design §3.7 D7). CB-001: filter zero-length
-        # compressed summaries before mixing — otherwise the
-        # ``_aggregate_decayed_mean`` stack would see shape mismatch.
-        compressed_vecs = self._collect_compressed_history_summaries()
-        live_vecs = self._collect_turn_history_summaries()
-        all_vecs = compressed_vecs + live_vecs
-        if not all_vecs:
+        # Preserve the Issue #79 ``top_level_only`` early-return before
+        # collection: ``turn_history == []`` yields ``None`` without
+        # consulting ``compressed_history`` (which is always empty in this
+        # mode anyway but the guard is kept for explicit intent).
+        mode_storage = self.working_memory_cfg.storage_mode
+        if mode_storage == "top_level_only" and not self.turn_history:
             return None
-        return self._aggregate_decayed_mean(all_vecs)
 
-    def _collect_turn_history_summaries(self) -> list[mx.array]:
-        """Build the list of per-turn summaries from ``turn_history``.
-
-        Skips entries whose ``level_states`` is empty (defensive against
-        malformed fixtures — ``_append_full`` always pushes a populated
-        ``HierarchicalState`` so this is belt-and-braces).
-        """
-        vecs: list[mx.array] = []
-        for turn in self.turn_history:
-            if not turn.hierarchical_state.level_states:
-                continue
-            vecs.append(self._make_turn_summary(turn.hierarchical_state))
-        return vecs
-
-    def _collect_compressed_history_summaries(self) -> list[mx.array]:
-        """Return the list of ``summary_vec`` entries in
-        ``compressed_history`` excluding zero-length sentinels.
-
-        CB-001 defense-in-depth: save-side filters in
-        ``_append_summary_only`` / ``_compress_oldest_turn`` block new
-        zero-length writes, but this read-side filter ensures
-        ``get_session_coarse_state()`` stays within the ``(D,) | None``
-        API contract even if malformed entries slip in (e.g. through
-        direct ``session.compressed_history.append(...)`` by test
-        fixtures or external callers).
-        """
-        vecs: list[mx.array] = []
-        for entry in self.compressed_history:
-            if entry.summary_vec.shape[0] == 0:
-                continue
-            vecs.append(entry.summary_vec)
-        return vecs
-
-    def _aggregate_decayed_mean(self, vecs: list[mx.array]) -> mx.array | None:
-        """Apply the shared ``decay_factor ** (N-i-1)`` weighting.
-
-        Pulled out of ``get_session_coarse_state`` so all three mode paths
-        share the same numerical behaviour (design §3.7 / §3.8 DR1-008).
-        Returns the last entry when all weights collapse to zero (``decay=0``
-        and ``N>1``), matching the Phase 1 fallback.
-        """
+        vecs, turn_ids, weights = self._collect_turn_coarse_vecs()
         if not vecs:
             return None
-        decay = float(self.working_memory_cfg.decay_factor)
-        n = len(vecs)
-        weights = [decay ** (n - i - 1) for i in range(n)]
-        weight_sum = sum(weights)
-        if weight_sum <= 0.0:
-            return vecs[-1]
-        stacked = mx.stack(vecs, axis=0)  # (N, D)
-        w_arr = mx.array(weights, dtype=mx.float32)[:, None]  # (N, 1)
-        aggregated = mx.sum(stacked * w_arr, axis=0) / float(weight_sum)
-        mx.eval(aggregated)
-        return aggregated
+
+        # DRY: the shared fallback is always the most-recent valid vec
+        # (DR1-004). Bound once and reused by last / weighted / attention.
+        fallback_vec = vecs[-1]
+
+        mode = self.working_memory_cfg.aggregation
+        if mode == "last":
+            result = fallback_vec
+        elif mode == "weighted":
+            weight_sum = sum(weights)
+            if weight_sum <= 0.0:
+                # All weights were zero (e.g. decay=0 with history > 1).
+                result = fallback_vec
+            else:
+                stacked = mx.stack(vecs, axis=0)  # (N, D)
+                w_arr = mx.array(weights, dtype=mx.float32)[:, None]  # (N, 1)
+                result = mx.sum(stacked * w_arr, axis=0) / float(weight_sum)
+        elif mode == "attention":
+            # Need a valid current vec to score past turns against.
+            if self.current_state is None or not self.current_state.level_states:
+                result = fallback_vec
+            else:
+                curr_vec = mean_pool(self.current_state.level_states[-1])
+                attn = self._aggregate_attention(
+                    vecs,
+                    turn_ids,
+                    curr_vec,
+                    exclude_turn_id=self.current_state.turn_id,
+                )
+                result = attn if attn is not None else fallback_vec
+        else:
+            # Defensive fail-fast for post-__post_init__ corruption
+            # (Issue #80 §8 decision #1 / judgement #1 safety net). The raw
+            # value is deliberately omitted from the message.
+            raise ValueError("Unknown aggregation mode")
+
+        mx.eval(result)
+        return result
 
     def find_relevant_past_turn(
         self, current_state: HierarchicalState | None

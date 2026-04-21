@@ -2882,6 +2882,463 @@ class TestWorkingMemoryConfigSecurityFallback:
         )
 
 
+class TestWorkingMemoryConfigAggregationYamlPropagation:
+    """Issue #80: aggregation propagates transparently through the YAML path.
+
+    Covers:
+    - ``_resolve_working_memory_cfg`` with missing / valid / malformed
+      aggregation values (fail-closed + no-leak).
+    - ``_build_photon_deps`` / ``build_pipeline`` full path with the
+      aggregation key reaching ``PhotonInference._working_memory_cfg``.
+    - Nested deep-merge override (``bench/run_all.py`` pattern) preserves
+      sibling keys while switching aggregation.
+    """
+
+    def test_resolve_working_memory_cfg_aggregation_default_weighted(self):
+        """Omitted aggregation key defaults to ``"weighted"`` (backward compat)."""
+        from baseline_reporag.photon_pipeline import _resolve_working_memory_cfg
+        from photon_mlx.session import WorkingMemoryConfig
+
+        result = _resolve_working_memory_cfg({"enabled": True, "max_turns": 3})
+        assert isinstance(result, WorkingMemoryConfig)
+        assert result.aggregation == "weighted"
+
+    def test_resolve_working_memory_cfg_aggregation_attention_roundtrip(self):
+        """``aggregation: attention`` flows through unchanged."""
+        from baseline_reporag.photon_pipeline import _resolve_working_memory_cfg
+        from photon_mlx.session import WorkingMemoryConfig
+
+        result = _resolve_working_memory_cfg(
+            {"enabled": True, "max_turns": 4, "aggregation": "attention"}
+        )
+        assert isinstance(result, WorkingMemoryConfig)
+        assert result.aggregation == "attention"
+        # Sibling keys preserved.
+        assert result.enabled is True
+        assert result.max_turns == 4
+
+    def test_resolve_working_memory_cfg_aggregation_last_roundtrip(self):
+        from baseline_reporag.photon_pipeline import _resolve_working_memory_cfg
+        from photon_mlx.session import WorkingMemoryConfig
+
+        result = _resolve_working_memory_cfg({"enabled": True, "aggregation": "last"})
+        assert isinstance(result, WorkingMemoryConfig)
+        assert result.aggregation == "last"
+
+    def test_resolve_working_memory_cfg_invalid_value_fail_closed(self, caplog):
+        """Malformed aggregation string fails closed to ``None`` with no leak."""
+        import logging
+
+        from baseline_reporag.photon_pipeline import _resolve_working_memory_cfg
+
+        SENSITIVE = "<ATTACK-PAYLOAD-aggr>"
+        with caplog.at_level(
+            logging.WARNING, logger="baseline_reporag.photon_pipeline"
+        ):
+            result = _resolve_working_memory_cfg(
+                {"enabled": True, "aggregation": SENSITIVE}
+            )
+        assert result is None
+        combined = " ".join(r.getMessage() for r in caplog.records)
+        # Attacker-controlled string must never appear in the log.
+        assert SENSITIVE not in combined
+
+    def test_resolve_working_memory_cfg_invalid_type_fail_closed(self, caplog):
+        """Non-str aggregation (e.g. 42) fails closed to ``None``."""
+        import logging
+
+        from baseline_reporag.photon_pipeline import _resolve_working_memory_cfg
+
+        with caplog.at_level(
+            logging.WARNING, logger="baseline_reporag.photon_pipeline"
+        ):
+            result = _resolve_working_memory_cfg({"enabled": True, "aggregation": 42})
+        assert result is None
+
+    def test_photon_deps_propagates_aggregation_attention(self, tmp_path):
+        """Full YAML path: aggregation reaches PhotonInference._working_memory_cfg."""
+        from baseline_reporag.config import load_config
+        from baseline_reporag.photon_pipeline import _build_photon_deps
+        from photon_mlx.session import WorkingMemoryConfig
+
+        cfg_file = tmp_path / "photon.yaml"
+        cfg_file.write_text(
+            "model:\n"
+            "  provider: photon\n"
+            "  architecture: photon_decoder\n"
+            "  base_embed_dim: 64\n"
+            "  hidden_size: 128\n"
+            "  intermediate_size: 256\n"
+            "  num_heads: 4\n"
+            "  vocab_size: 1000\n"
+            "hierarchy:\n"
+            "  levels: 2\n"
+            "  chunk_sizes: [4, 4]\n"
+            "  encoder_layers_per_level: [2, 2]\n"
+            "  decoder_layers_per_level: [2, 2]\n"
+            "inference:\n"
+            "  hierarchical_prefill: true\n"
+            "  safe_recgen_enabled: false\n"
+            "session_memory:\n"
+            "  mode: photon\n"
+            "  working_memory:\n"
+            "    enabled: true\n"
+            "    max_turns: 4\n"
+            "    decay_factor: 0.5\n"
+            "    aggregation: attention\n"
+        )
+        cfg = load_config(str(cfg_file))
+        deps = _build_photon_deps(cfg)
+        wm = deps["photon_inference"]._working_memory_cfg
+        assert isinstance(wm, WorkingMemoryConfig)
+        assert wm.aggregation == "attention"
+        assert wm.max_turns == 4
+
+    def test_photon_deps_aggregation_default_weighted(self, tmp_path):
+        """YAML without aggregation key defaults to ``weighted`` end-to-end."""
+        from baseline_reporag.config import load_config
+        from baseline_reporag.photon_pipeline import _build_photon_deps
+        from photon_mlx.session import WorkingMemoryConfig
+
+        cfg_file = tmp_path / "photon.yaml"
+        cfg_file.write_text(
+            "model:\n"
+            "  provider: photon\n"
+            "  architecture: photon_decoder\n"
+            "  base_embed_dim: 64\n"
+            "  hidden_size: 128\n"
+            "  intermediate_size: 256\n"
+            "  num_heads: 4\n"
+            "  vocab_size: 1000\n"
+            "hierarchy:\n"
+            "  levels: 2\n"
+            "  chunk_sizes: [4, 4]\n"
+            "  encoder_layers_per_level: [2, 2]\n"
+            "  decoder_layers_per_level: [2, 2]\n"
+            "inference:\n"
+            "  hierarchical_prefill: true\n"
+            "  safe_recgen_enabled: false\n"
+            "session_memory:\n"
+            "  mode: photon\n"
+            "  working_memory:\n"
+            "    enabled: true\n"
+            "    max_turns: 4\n"
+        )
+        cfg = load_config(str(cfg_file))
+        deps = _build_photon_deps(cfg)
+        wm = deps["photon_inference"]._working_memory_cfg
+        assert isinstance(wm, WorkingMemoryConfig)
+        assert wm.aggregation == "weighted"
+
+    def test_photon_deps_aggregation_invalid_fails_closed(self, tmp_path, caplog):
+        """Malformed aggregation in YAML disables working memory cleanly.
+
+        CB-002 / AT-002 (refactor): the no-leak assertion is enforced
+        unconditionally. A unique sentinel string is used as the raw
+        payload so a regression that forwards ``aggregation`` into the
+        warning log (e.g. via ``f"... got {raw!r}"``) is caught regardless
+        of whether the word "ValueError" also happens to appear.
+        """
+        import logging
+
+        from baseline_reporag.config import load_config
+        from baseline_reporag.photon_pipeline import _build_photon_deps
+
+        SENSITIVE = "<ATTACK-PAYLOAD-WM-INVALID-AGG-SENTINEL>"
+        cfg_file = tmp_path / "photon.yaml"
+        cfg_file.write_text(
+            "model:\n"
+            "  provider: photon\n"
+            "  architecture: photon_decoder\n"
+            "  base_embed_dim: 64\n"
+            "  hidden_size: 128\n"
+            "  intermediate_size: 256\n"
+            "  num_heads: 4\n"
+            "  vocab_size: 1000\n"
+            "hierarchy:\n"
+            "  levels: 2\n"
+            "  chunk_sizes: [4, 4]\n"
+            "  encoder_layers_per_level: [2, 2]\n"
+            "  decoder_layers_per_level: [2, 2]\n"
+            "inference:\n"
+            "  hierarchical_prefill: true\n"
+            "  safe_recgen_enabled: false\n"
+            "session_memory:\n"
+            "  mode: photon\n"
+            "  working_memory:\n"
+            "    enabled: true\n"
+            "    max_turns: 4\n"
+            f"    aggregation: {SENSITIVE!s}\n"
+        )
+        cfg = load_config(str(cfg_file))
+        with caplog.at_level(
+            logging.WARNING, logger="baseline_reporag.photon_pipeline"
+        ):
+            deps = _build_photon_deps(cfg)
+        # fail-closed: working memory disabled.
+        assert deps["photon_inference"]._working_memory_cfg is None
+        combined = " ".join(r.getMessage() for r in caplog.records)
+        # Hard no-leak invariant (design §6 / DR4-001): the attacker-controlled
+        # raw YAML value must NEVER appear in warning logs.
+        assert SENSITIVE not in combined, (
+            f"raw aggregation value leaked into warning log: {combined!r}"
+        )
+        # Also covers the legacy regression — the literal word "mean" must
+        # not leak when the YAML raw is ``mean``. Re-checked here for the
+        # exact string the Codex CB-002 finding called out.
+        assert "mean" not in combined, (
+            f"literal 'mean' leaked into warning log: {combined!r}"
+        )
+        # Exception class presence is an independent, positive signal (so
+        # fail-closed warnings remain diagnosable). Checked as its own
+        # unconditional assertion so the no-leak invariant above is not
+        # short-circuited.
+        assert "ValueError" in combined, (
+            f"expected ValueError class name in fail-closed warning: {combined!r}"
+        )
+
+    def test_photon_deps_aggregation_invalid_type_fails_closed(self, tmp_path, caplog):
+        """Non-str aggregation in YAML disables working memory cleanly.
+
+        CB-002 / AT-002 (refactor): mirrors the invalid-value test above
+        for the invalid-*type* branch so the no-leak coverage is
+        consistent across both TypeError and ValueError fail-closed paths.
+        """
+        import logging
+
+        from baseline_reporag.config import load_config
+        from baseline_reporag.photon_pipeline import _build_photon_deps
+
+        # Sentinel int. Its ``repr`` contains a distinctive token that is
+        # extremely unlikely to appear elsewhere, so if a regression leaks
+        # the raw value into the warning (``f"... got {raw!r}"``) it shows
+        # up here.
+        SENSITIVE_INT = 4242424242
+        cfg_file = tmp_path / "photon.yaml"
+        cfg_file.write_text(
+            "model:\n"
+            "  provider: photon\n"
+            "  architecture: photon_decoder\n"
+            "  base_embed_dim: 64\n"
+            "  hidden_size: 128\n"
+            "  intermediate_size: 256\n"
+            "  num_heads: 4\n"
+            "  vocab_size: 1000\n"
+            "hierarchy:\n"
+            "  levels: 2\n"
+            "  chunk_sizes: [4, 4]\n"
+            "  encoder_layers_per_level: [2, 2]\n"
+            "  decoder_layers_per_level: [2, 2]\n"
+            "inference:\n"
+            "  hierarchical_prefill: true\n"
+            "  safe_recgen_enabled: false\n"
+            "session_memory:\n"
+            "  mode: photon\n"
+            "  working_memory:\n"
+            "    enabled: true\n"
+            "    max_turns: 4\n"
+            f"    aggregation: {SENSITIVE_INT}\n"
+        )
+        cfg = load_config(str(cfg_file))
+        with caplog.at_level(
+            logging.WARNING, logger="baseline_reporag.photon_pipeline"
+        ):
+            deps = _build_photon_deps(cfg)
+        # fail-closed: working memory disabled.
+        assert deps["photon_inference"]._working_memory_cfg is None
+        combined = " ".join(r.getMessage() for r in caplog.records)
+        # Hard no-leak invariant: the raw int must NEVER appear in the log.
+        assert str(SENSITIVE_INT) not in combined, (
+            f"raw int aggregation value leaked into warning log: {combined!r}"
+        )
+        # Type-name surface IS allowed (design §6): operators need the type
+        # to diagnose malformed YAML.
+        assert ("TypeError" in combined) or ("ValueError" in combined), (
+            f"expected exception class name in fail-closed warning: {combined!r}"
+        )
+
+    def test_photon_deps_variant_override_deep_merge_last(self, tmp_path):
+        """bench/run_all.py deep_merge override pattern.
+
+        Simulates ``variants[].override.session_memory.working_memory.
+        aggregation: last`` applied to a base config, preserving sibling
+        keys (enabled / max_turns / decay_factor) from the base.
+        """
+        from baseline_reporag.config import deep_merge, load_config
+        from baseline_reporag.photon_pipeline import _build_photon_deps
+        from photon_mlx.session import WorkingMemoryConfig
+
+        base_cfg = {
+            "model": {
+                "provider": "photon",
+                "architecture": "photon_decoder",
+                "base_embed_dim": 64,
+                "hidden_size": 128,
+                "intermediate_size": 256,
+                "num_heads": 4,
+                "vocab_size": 1000,
+            },
+            "hierarchy": {
+                "levels": 2,
+                "chunk_sizes": [4, 4],
+                "encoder_layers_per_level": [2, 2],
+                "decoder_layers_per_level": [2, 2],
+            },
+            "inference": {
+                "hierarchical_prefill": True,
+                "safe_recgen_enabled": False,
+            },
+            "session_memory": {
+                "mode": "photon",
+                "working_memory": {
+                    "enabled": True,
+                    "max_turns": 5,
+                    "decay_factor": 0.25,
+                    "aggregation": "weighted",
+                },
+            },
+        }
+        override = {
+            "session_memory": {
+                "working_memory": {
+                    "aggregation": "last",
+                },
+            },
+        }
+        merged = deep_merge(base_cfg, override)
+
+        # Write merged dict back out as YAML, load, and build deps.
+        import yaml as _yaml
+
+        cfg_file = tmp_path / "merged.yaml"
+        cfg_file.write_text(_yaml.safe_dump(merged))
+        cfg = load_config(str(cfg_file))
+        deps = _build_photon_deps(cfg)
+        wm = deps["photon_inference"]._working_memory_cfg
+        assert isinstance(wm, WorkingMemoryConfig)
+        # Sibling keys preserved; aggregation switched.
+        assert wm.enabled is True
+        assert wm.max_turns == 5
+        assert abs(wm.decay_factor - 0.25) < 1e-9
+        assert wm.aggregation == "last"
+
+    def test_build_pipeline_canonical_and_reexport_match(self, tmp_path):
+        """Both ``pipeline_factory.build_pipeline`` (canonical) and
+        ``photon_pipeline.build_pipeline`` (backward-compat re-export) must
+        route to the same ``_build_photon_deps`` so aggregation is
+        propagated identically (DR3-001).
+
+        CB-003 / AT-003 (refactor): the previous version only called the
+        private ``_build_photon_deps`` directly. This version actually
+        invokes both public ``build_pipeline()`` entrypoints with
+        monkeypatched heavy deps and asserts:
+
+        1. Both entrypoints call ``_build_photon_deps`` exactly once each.
+        2. The aggregation value seen by the spy is identical across the
+           two calls (i.e. provider dispatch routes both through the same
+           deps-builder).
+        3. Both entrypoints return a ``PhotonRAGPipeline`` whose
+           ``_working_memory_cfg.aggregation`` matches the YAML value.
+        """
+        from baseline_reporag import photon_pipeline as reexport
+        from baseline_reporag import pipeline_factory as canonical
+        from baseline_reporag.config import load_config
+        from photon_mlx.session import WorkingMemoryConfig
+
+        cfg_file = tmp_path / "photon.yaml"
+        cfg_file.write_text(
+            "model:\n"
+            "  provider: photon\n"
+            "  architecture: photon_decoder\n"
+            "  base_embed_dim: 64\n"
+            "  hidden_size: 128\n"
+            "  intermediate_size: 256\n"
+            "  num_heads: 4\n"
+            "  vocab_size: 1000\n"
+            "hierarchy:\n"
+            "  levels: 2\n"
+            "  chunk_sizes: [4, 4]\n"
+            "  encoder_layers_per_level: [2, 2]\n"
+            "  decoder_layers_per_level: [2, 2]\n"
+            "inference:\n"
+            "  hierarchical_prefill: true\n"
+            "  safe_recgen_enabled: false\n"
+            "session_memory:\n"
+            "  mode: photon\n"
+            "  working_memory:\n"
+            "    enabled: true\n"
+            "    max_turns: 3\n"
+            "    aggregation: attention\n"
+        )
+        cfg = load_config(str(cfg_file))
+
+        # Both public entrypoints must exist as importable symbols.
+        assert canonical.build_pipeline is not None
+        assert reexport.build_pipeline is not None
+        # The re-export must be a thin shim, not a separate implementation;
+        # this sanity-check catches accidental divergence between the two
+        # code paths at symbol resolution time.
+        assert reexport.build_pipeline is not canonical.build_pipeline, (
+            "re-export should be a distinct wrapper function that delegates"
+            " to the canonical factory; if it becomes identical, DR3-001"
+            " backward-compat semantics need to be re-examined."
+        )
+
+        # Spy on ``_build_photon_deps`` so we can observe what the public
+        # ``build_pipeline`` actually dispatches to — and avoid booting the
+        # heavy 14B generator. The canonical factory does
+        # ``from .photon_pipeline import _build_photon_deps`` lazily
+        # inside ``build_pipeline``, so patching the attribute on the
+        # ``photon_pipeline`` module intercepts both call paths.
+        calls: list[WorkingMemoryConfig | None] = []
+        real_build_photon_deps = reexport._build_photon_deps
+
+        def _spy_build_photon_deps(received_cfg):
+            deps = real_build_photon_deps(received_cfg)
+            calls.append(deps["photon_inference"]._working_memory_cfg)
+            return deps
+
+        # Mock the baseline deps so ``PhotonRAGPipeline.__init__`` can
+        # construct without hitting the disk/network. The PHOTON branch
+        # lazy-imports ``_build_baseline_deps`` from ``photon_pipeline``
+        # directly (see pipeline_factory.py DR3 wiring), so patching there
+        # is the correct target.
+        with (
+            patch(
+                "baseline_reporag.photon_pipeline._build_photon_deps",
+                side_effect=_spy_build_photon_deps,
+            ) as spy,
+            patch(
+                "baseline_reporag.photon_pipeline._build_baseline_deps"
+            ) as mock_baseline,
+        ):
+            mock_baseline.return_value = _make_mock_deps()
+            pipeline_canonical = canonical.build_pipeline(cfg)
+            pipeline_reexport = reexport.build_pipeline(cfg)
+
+        # Spy must have fired twice — once per entrypoint.
+        assert spy.call_count == 2, (
+            "expected both build_pipeline entrypoints to hit"
+            f" _build_photon_deps exactly once each; got {spy.call_count}"
+        )
+        assert len(calls) == 2
+        # Both entrypoints must have propagated the same aggregation
+        # value from the same cfg object through the shared deps-builder.
+        aggregations = [wm.aggregation for wm in calls if wm is not None]
+        assert aggregations == ["attention", "attention"], (
+            f"aggregation mismatch between entrypoints: {aggregations!r}"
+        )
+
+        # End-to-end: both pipelines carry the expected aggregation.
+        from baseline_reporag.photon_pipeline import PhotonRAGPipeline
+
+        for pipeline in (pipeline_canonical, pipeline_reexport):
+            assert isinstance(pipeline, PhotonRAGPipeline)
+            wm = pipeline.photon_inference._working_memory_cfg
+            assert isinstance(wm, WorkingMemoryConfig)
+            assert wm.aggregation == "attention"
+
+
 # ---------------------------------------------------------------------------
 # Codex CB-002: tokenize_evidence_pack warning must not leak raw exc text
 # ---------------------------------------------------------------------------
