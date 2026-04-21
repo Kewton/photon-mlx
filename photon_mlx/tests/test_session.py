@@ -17,7 +17,12 @@ from torch_ref.config import (
     TokenizerConfig,
 )
 from photon_mlx.model import PhotonModel
-from photon_mlx.inference import PhotonInference
+from photon_mlx.inference import (
+    MICRO_BATCH_SIZE,
+    PAD_TOKEN_ID,
+    PhotonInference,
+    _batch_cosine_similarity,
+)
 from photon_mlx.session import (
     HierarchicalState,
     PhotonSessionState,
@@ -261,3 +266,223 @@ class TestPruneEvidence:
 
         result = engine.prune_evidence([], [], "s1", max_chunks=8)
         assert result == []
+
+    # ───────────── Issue #61: batched-prune external behaviour ──────────────
+
+    def test_hierarchical_prefill_batch_shape(self, engine: PhotonInference) -> None:
+        """B>1 input must produce per-batch level_states (B, T_top, D)."""
+        ids = mx.random.randint(0, 256, (2, 16))
+        logits, state = engine.hierarchical_prefill(ids)
+        assert logits.shape[0] == 2
+        # Top-level encoder output: leading dim is batch.
+        assert state.level_states[-1].shape[0] == 2
+
+    def test_all_empty_chunks_returns_first_max_chunks(
+        self, engine: PhotonInference
+    ) -> None:
+        """All-empty chunks → return [0..max_chunks-1] (no scoring possible)."""
+        ids = mx.random.randint(0, 256, (1, 16))
+        engine.session_forward(ids, "s1", "repo", "abc")
+
+        texts = ["" for _ in range(12)]
+        chunk_ids = [f"c{i}" for i in range(12)]
+        result = engine.prune_evidence(texts, chunk_ids, "s1", max_chunks=8)
+        # All scores stay at -1.0; the sorted top-K selection must return the
+        # first max_chunks indices in ascending order (CB-003: pin tie-break).
+        assert result == list(range(8))
+
+    def test_single_valid_chunk_returns_valid_first(
+        self, engine: PhotonInference
+    ) -> None:
+        """One valid chunk + many empty: the valid index must be selected."""
+        ids = mx.random.randint(0, 256, (1, 16))
+        engine.session_forward(ids, "s1", "repo", "abc")
+
+        texts = ["" for _ in range(12)]
+        texts[7] = "real content here for the only valid chunk"
+        chunk_ids = [f"c{i}" for i in range(12)]
+        result = engine.prune_evidence(texts, chunk_ids, "s1", max_chunks=4)
+        assert 7 in result
+        assert len(result) == 4
+
+    def test_boundary_len_equals_max_chunks_returns_all(
+        self, engine: PhotonInference
+    ) -> None:
+        """len(chunks) == max_chunks → early return (b) returns all."""
+        ids = mx.random.randint(0, 256, (1, 16))
+        engine.session_forward(ids, "s1", "repo", "abc")
+
+        texts = [f"chunk text {i}" for i in range(8)]
+        chunk_ids = [f"c{i}" for i in range(8)]
+        result = engine.prune_evidence(texts, chunk_ids, "s1", max_chunks=8)
+        assert result == list(range(8))
+
+    def test_oversized_chunk_truncated_to_max_position_embeddings(
+        self, engine: PhotonInference
+    ) -> None:
+        """Chunks longer than cfg.model.max_position_embeddings must be capped."""
+        # _tiny_cfg sets max_position_embeddings=128.
+        long_text = "x" * 5000  # 5000 bytes -> 5000 raw token ids
+        ids = mx.random.randint(0, 256, (1, 16))
+        engine.session_forward(ids, "s1", "repo", "abc")
+
+        token_ids = engine._tokenize_chunk(long_text)
+        assert len(token_ids) <= engine.cfg.model.max_position_embeddings
+        # Length must remain chunk-aligned after cap.
+        assert len(token_ids) % engine._chunk_alignment == 0
+
+        # End-to-end pruning still completes.
+        texts = [long_text] + [f"text {i}" for i in range(11)]
+        cids = [f"c{i}" for i in range(12)]
+        result = engine.prune_evidence(texts, cids, "s1", max_chunks=4)
+        assert len(result) == 4
+
+    def test_micro_batch_equivalence_2_vs_64(self, engine: PhotonInference) -> None:
+        """micro_batch_size=2 must yield the same selection as =64."""
+        ids = mx.random.randint(0, 256, (1, 16))
+        engine.session_forward(ids, "s1", "repo", "abc")
+
+        texts = [f"chunk number {i} body content" for i in range(16)]
+        cids = [f"c{i}" for i in range(16)]
+        result_small = engine.prune_evidence(
+            texts, cids, "s1", max_chunks=8, micro_batch_size=2
+        )
+        result_large = engine.prune_evidence(
+            texts, cids, "s1", max_chunks=8, micro_batch_size=64
+        )
+        assert result_small == result_large
+
+    def test_micro_batch_none_equals_default(self, engine: PhotonInference) -> None:
+        """micro_batch_size=None must behave identically to MICRO_BATCH_SIZE."""
+        ids = mx.random.randint(0, 256, (1, 16))
+        engine.session_forward(ids, "s1", "repo", "abc")
+
+        texts = [f"chunk content {i}" for i in range(16)]
+        cids = [f"c{i}" for i in range(16)]
+        result_none = engine.prune_evidence(
+            texts, cids, "s1", max_chunks=6, micro_batch_size=None
+        )
+        result_default = engine.prune_evidence(
+            texts, cids, "s1", max_chunks=6, micro_batch_size=MICRO_BATCH_SIZE
+        )
+        assert result_none == result_default
+
+    def test_invalid_micro_batch_size_raises(self, engine: PhotonInference) -> None:
+        """Invalid micro_batch_size must raise ValueError."""
+        ids = mx.random.randint(0, 256, (1, 16))
+        engine.session_forward(ids, "s1", "repo", "abc")
+        texts = [f"x{i}" for i in range(12)]
+        cids = [f"c{i}" for i in range(12)]
+        for bad in (0, -1, True, False, 1.5, "64"):
+            with pytest.raises(ValueError):
+                engine.prune_evidence(
+                    texts, cids, "s1", max_chunks=8, micro_batch_size=bad
+                )
+
+    def test_mixed_length_batch_topk_matches_sequential(
+        self, engine: PhotonInference
+    ) -> None:
+        """Mixed-length non-empty chunks: batched top-K and raw scores must
+        match a sequential reference within ε=1e-3 (path B exact check)."""
+        ids = mx.random.randint(0, 256, (1, 16))
+        engine.session_forward(ids, "s1", "repo", "abc")
+
+        # 10 chunks of 3 distinct lengths, all non-empty (per DR2-005).
+        texts = [
+            "short",
+            "another short text",
+            "medium length chunk content here",
+            "longer chunk text " * 4,
+            "some words",
+            "yet more medium length chunk content",
+            "longer chunk text " * 6,
+            "tiny",
+            "medium chunk again with words",
+            "longer chunk text " * 5,
+        ]
+        cids = [f"c{i}" for i in range(len(texts))]
+
+        # Batched scoring via the helper.
+        batched_scores = engine._score_prune_candidates(texts, "s1")
+
+        # Sequential reference: re-tokenize & forward each chunk individually.
+        session = engine._sessions["s1"]
+        coarse_state = session.current_state.level_states[-1].astype(mx.float32)
+        coarse_vec = mx.mean(coarse_state, axis=tuple(range(coarse_state.ndim - 1)))
+
+        seq_scores: list[tuple[int, float]] = []
+        for idx, text in enumerate(texts):
+            token_ids = engine._tokenize_chunk(text)
+            assert token_ids, "test fixture must have only non-empty chunks"
+            inp = mx.array(token_ids, dtype=mx.int32).reshape(1, -1)
+            _, h = engine.hierarchical_prefill(inp)
+            ct = h.level_states[-1].astype(mx.float32)
+            cv = mx.mean(ct, axis=tuple(range(ct.ndim - 1)))
+            sim = _batch_cosine_similarity(coarse_vec, cv[None, :])
+            mx.eval(sim)
+            seq_scores.append((idx, float(sim.tolist()[0])))
+
+        # Raw-score check (ε = 1e-3 per Issue #61 acceptance — path B is
+        # actually 1e-7 tight on this fixture but we keep the policy bound).
+        for (i_b, s_b), (i_s, s_s) in zip(batched_scores, seq_scores):
+            assert i_b == i_s
+            assert abs(s_b - s_s) <= 1e-3, (
+                f"mixed-length raw score mismatch at idx {i_b}: "
+                f"batched={s_b} sequential={s_s} delta={abs(s_b - s_s)}"
+            )
+
+        # Top-K selection match.
+        result_batched = engine.prune_evidence(texts, cids, "s1", max_chunks=4)
+        seq_top = sorted(i for i, _ in sorted(seq_scores, key=lambda x: -x[1])[:4])
+        assert result_batched == seq_top
+
+
+# ---------------------------------------------------------------
+# Issue #61: pure-function and helper unit tests
+# ---------------------------------------------------------------
+
+
+class TestBatchCosineSimilarity:
+    """Unit tests for _batch_cosine_similarity (pure function)."""
+
+    def test_orthogonal_vectors_zero_similarity(self) -> None:
+        q = mx.array([1.0, 0.0, 0.0, 0.0])
+        keys = mx.array(
+            [
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ]
+        )
+        sims = _batch_cosine_similarity(q, keys)
+        for s in sims.tolist():
+            assert abs(s) < 1e-6
+
+    def test_identical_vectors_one_similarity(self) -> None:
+        q = mx.array([0.5, 0.25, -0.75, 1.0])
+        keys = mx.stack([q, q * 2.0, q * -1.0])  # parallel/antiparallel
+        sims_list = _batch_cosine_similarity(q, keys).tolist()
+        # 0: identical → +1
+        assert abs(sims_list[0] - 1.0) < 1e-5
+        # 1: positive scalar multiple → +1 (cosine ignores magnitude)
+        assert abs(sims_list[1] - 1.0) < 1e-5
+        # 2: anti-parallel → -1
+        assert abs(sims_list[2] + 1.0) < 1e-5
+
+    def test_numerical_stability_zero_norm(self) -> None:
+        """eps must keep results finite when one of the vectors is zero."""
+        q = mx.array([0.0, 0.0, 0.0])
+        keys = mx.array([[1.0, 2.0, 3.0], [0.0, 0.0, 0.0]])
+        sims = _batch_cosine_similarity(q, keys, eps=1e-8)
+        for s in sims.tolist():
+            # Value must be finite (not NaN / inf).
+            assert s == s  # not NaN
+            assert -1.0 <= s <= 1.0
+
+    def test_pad_token_id_constant(self) -> None:
+        """PAD_TOKEN_ID is 0 — a regression guard for the SSOT contract."""
+        assert PAD_TOKEN_ID == 0
+
+    def test_micro_batch_size_default(self) -> None:
+        """MICRO_BATCH_SIZE default matches the production cap."""
+        assert MICRO_BATCH_SIZE == 64
