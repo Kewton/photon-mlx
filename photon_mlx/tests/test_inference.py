@@ -11,6 +11,7 @@ Covers:
 
 from __future__ import annotations
 
+import math
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -369,3 +370,167 @@ class TestFailClosed:
         ids = [f"c{i}" for i in range(10)]
         result = inference.prune_evidence(texts, ids, "no-session", max_chunks=4)
         assert result == list(range(10))
+
+
+# ---------------------------------------------------------------
+# Issue #79: scoring path tolerates all three storage_mode values
+# ---------------------------------------------------------------
+
+
+class TestScoringPathAcrossStorageModes:
+    """The ``q_top ← session.get_session_coarse_state()`` override at
+    photon_mlx/inference.py:550 must tolerate all three storage_mode
+    values. Each mode drives a different coarse_vec path:
+
+    * full            — turn_history + compressed_history mixed
+    * top_level_only  — turn_history only, compressed_history untouched
+    * summary_only    — turn_history empty, compressed_history only
+
+    With a single turn the batched scoring simply needs to produce a
+    finite score per chunk (no shape/dtype crash). We do NOT assert
+    numerical equivalence across modes because each mode pools a
+    different vector.
+    """
+
+    @pytest.fixture
+    def stub_tokenizer_factory(self, stub_tokenizer_for_cfg):
+        return stub_tokenizer_for_cfg
+
+    def _make_engine(self, stub_tokenizer_factory, mode: str) -> PhotonInference:
+        from photon_mlx.session import WorkingMemoryConfig
+
+        mx.random.seed(42)
+        cfg = _tiny_cfg()
+        model = PhotonModel(cfg)
+        return PhotonInference(
+            model,
+            cfg,
+            stub_tokenizer_factory(cfg),
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True, max_turns=4, storage_mode=mode
+            ),
+        )
+
+    @pytest.mark.parametrize("mode", ["full", "top_level_only", "summary_only"])
+    def test_score_prune_candidates_returns_finite_scores(
+        self, stub_tokenizer_factory, mode: str
+    ) -> None:
+        engine = self._make_engine(stub_tokenizer_factory, mode)
+        setup_ids = mx.random.randint(0, 256, (1, 16))
+        engine.session_forward(setup_ids, "s1", "repo", "abc")
+
+        texts = ["alpha beta", "gamma delta epsilon", "zeta eta theta iota"]
+        scored = engine._score_prune_candidates(texts, "s1")
+        assert len(scored) == 3
+        # CB-003: the previous assertion was only ``isinstance(score,
+        # float)``, which trivially passes for the ``-1.0`` fail-closed
+        # sentinel that ``_score_prune_candidates`` returns when scoring
+        # bails out. Without rejecting that sentinel the test had no
+        # regression power against the storage_mode-specific coarse-state
+        # paths it was supposed to exercise. Tighten the assertions to:
+        #   (a) finite float (no ``NaN`` / ``inf``), and
+        #   (b) NOT equal to the ``-1.0`` sentinel.
+        # If scoring falls through for every candidate under any mode the
+        # assertion now fails loudly.
+        for idx, score in scored:
+            assert 0 <= idx < 3
+            assert isinstance(score, float)
+            assert math.isfinite(score), (
+                f"storage_mode={mode} produced non-finite score {score!r}"
+            )
+            assert score != -1.0, (
+                f"storage_mode={mode} returned -1.0 fail-closed sentinel "
+                "(scoring path did not actually run)"
+            )
+        # Sanity: at least one candidate must have been scored (i.e. we
+        # never want all three to be the sentinel even though we now
+        # reject individual sentinels above).
+        assert any(score != -1.0 for _, score in scored), (
+            f"storage_mode={mode}: every candidate returned the sentinel"
+        )
+
+    @pytest.mark.parametrize("mode", ["full", "top_level_only", "summary_only"])
+    def test_prune_evidence_full_path(self, stub_tokenizer_factory, mode: str) -> None:
+        engine = self._make_engine(stub_tokenizer_factory, mode)
+        setup_ids = mx.random.randint(0, 256, (1, 16))
+        engine.session_forward(setup_ids, "s1", "repo", "abc")
+
+        texts = [f"chunk text number {i}" for i in range(10)]
+        cids = [f"c{i}" for i in range(10)]
+        result = engine.prune_evidence(texts, cids, "s1", max_chunks=4)
+        assert len(result) == 4
+        assert result == sorted(result)
+
+    def test_summary_only_coarse_none_tolerated_when_compressed_empty(
+        self, stub_tokenizer_factory
+    ) -> None:
+        """``summary_only`` + fresh session → get_session_coarse_state() is
+        None (no coarse override), scoring falls back to pure Issue #63
+        hierarchical path without crashing."""
+        from photon_mlx.session import WorkingMemoryConfig
+
+        mx.random.seed(42)
+        cfg = _tiny_cfg()
+        model = PhotonModel(cfg)
+        engine = PhotonInference(
+            model,
+            cfg,
+            stub_tokenizer_factory(cfg),
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True, max_turns=4, storage_mode="summary_only"
+            ),
+        )
+        # No session_forward yet → no state. But we still exercise the
+        # scoring path with Turn 1 + question (pure-question path).
+        texts = [f"chunk {i}" for i in range(8)]
+        cids = [f"c{i}" for i in range(8)]
+        result = engine.prune_evidence(
+            texts, cids, "fresh", max_chunks=3, question="what is this?"
+        )
+        assert len(result) == 3
+
+    def test_full_mode_token_and_mid_still_come_from_current_state(
+        self, stub_tokenizer_factory
+    ) -> None:
+        """Only ``q_top`` is overridden by the coarse aggregate; ``q_token``
+        and ``q_mid`` remain keyed on ``session.current_state``. Verified by
+        the fact that scoring with working memory enabled on a single turn
+        gives a bit-for-bit match with the pure-#63 reference (the coarse
+        aggregate of one turn equals the pooled current_state top level).
+        """
+        from photon_mlx.session import WorkingMemoryConfig, weighted_hierarchical_score
+
+        mx.random.seed(42)
+        cfg = _tiny_cfg()
+        model = PhotonModel(cfg)
+        engine = PhotonInference(
+            model,
+            cfg,
+            stub_tokenizer_factory(cfg),
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True, max_turns=4, storage_mode="full"
+            ),
+        )
+        setup_ids = mx.random.randint(0, 256, (1, 16))
+        engine.session_forward(setup_ids, "s1", "repo", "abc")
+
+        texts = ["alpha", "beta gamma", "delta epsilon"]
+        batched = engine._score_prune_candidates(texts, "s1")
+
+        # Build pure-#63 reference: no coarse override (single turn, coarse
+        # aggregate equals current_state top after mean_pool).
+        session = engine._sessions["s1"]
+        q_token, q_mid, q_top = engine._build_query_hierarchical_vecs(
+            session.current_state
+        )
+        _, vecs = engine._encode_chunks_to_vecs_hierarchical(texts)
+        sim_token = _batch_cosine_similarity(q_token, vecs.token)
+        sim_mid = _batch_cosine_similarity(q_mid, vecs.mid)
+        sim_top = _batch_cosine_similarity(q_top, vecs.top)
+        stack = mx.stack([sim_token, sim_mid, sim_top], axis=-1)
+        expected = weighted_hierarchical_score(stack, engine._drift_level_weights)
+        mx.eval(expected)
+        expected_list = expected.tolist()
+
+        for (_, s_batched), s_expected in zip(batched, expected_list):
+            assert abs(s_batched - s_expected) < 1e-4

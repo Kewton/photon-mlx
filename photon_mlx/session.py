@@ -19,14 +19,26 @@ __all__ = [
     "HierarchicalState",
     "DriftMetrics",
     "TurnState",
+    "CompressedTurnState",
     "WorkingMemoryConfig",
     "WORKING_MEMORY_MAX_TURNS_HARD_CAP",
+    "STORAGE_MODES",
     "PhotonSessionState",
     "cosine_distance",
     "kl_divergence",
     "token_agreement_rate",
     "mean_pool",
 ]
+
+
+# Closed enumeration of accepted ``storage_mode`` values (Issue #79).
+#
+# Kept as a module-level frozenset so validation in
+# :class:`WorkingMemoryConfig.__post_init__` and
+# :meth:`PhotonSessionState._append_turn_for_mode` share a single source of
+# truth. Added values MUST be lowercase to match the design §3.6 D6 ruling
+# that rejects ``"Full"`` / ``"FULL"`` rather than auto-normalising.
+STORAGE_MODES: frozenset[str] = frozenset({"full", "top_level_only", "summary_only"})
 
 
 # Security limit: truncate question_text to this many characters when stored in
@@ -177,28 +189,121 @@ class TurnState:
 
 
 @dataclass
+class CompressedTurnState:
+    """Pooled summary of a single turn retained in ``compressed_history``.
+
+    Issue #79 DR1-003 / DR1-005: compressed entries keep only the minimum
+    needed for cross-turn aggregation — a pooled ``summary_vec`` plus the
+    originating turn id / timestamp. ``question_text`` is intentionally
+    NOT retained (§2.2 YAGNI note); callers that want question-based
+    retrieval against compressed history will revisit the field list under
+    a follow-up issue.
+
+    Invariants:
+    * ``summary_vec`` is produced by
+      :meth:`PhotonSessionState._make_turn_summary` and has shape
+      ``(hidden_size,)`` with dtype ``float32``.
+    * ``turn_id`` and ``timestamp`` are inherited from the originating
+      :class:`TurnState` when compressed from ``turn_history``, or set from
+      the current turn when produced directly by ``summary_only``.
+    """
+
+    turn_id: int
+    summary_vec: mx.array
+    timestamp: float = field(default_factory=time.time)
+
+
+# Sentinel marking that the caller did not pass ``compress_old_turns`` or
+# ``storage_mode`` explicitly (Issue #79 D1 / DR1-004). We cannot use ``None``
+# because ``compress_old_turns`` is a strictly typed ``bool`` field, and we
+# need to distinguish "user did not provide a value" from "user explicitly set
+# True/False" when deciding whether to emit the ``DeprecationWarning``.
+class _WMFieldSentinel:
+    _instance: _WMFieldSentinel | None = None
+
+    def __new__(cls) -> _WMFieldSentinel:
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def __repr__(self) -> str:  # pragma: no cover — debug only
+        return "<WM_FIELD_UNSET>"
+
+
+_WM_FIELD_UNSET = _WMFieldSentinel()
+
+
+@dataclass
 class WorkingMemoryConfig:
     """Configuration for cross-turn hierarchical working memory (Issue #64).
 
     All fields have sensible defaults; ``__post_init__`` enforces strict type
     and range validation (DR4-001) so malformed YAML cannot silently disable
     safety invariants.
+
+    Issue #79 adds ``storage_mode`` (closed enum, see :data:`STORAGE_MODES`).
+    The legacy ``compress_old_turns`` flag is kept as a parse-only deprecated
+    field — ``storage_mode`` is the authoritative runtime semantics.
+    ``DeprecationWarning`` is emitted only when the caller explicitly passes
+    both ``compress_old_turns`` and a non-default ``storage_mode`` so existing
+    YAMLs that omit ``storage_mode`` stay silent during the transition
+    (design §3.1 D1 / DR1-004).
     """
 
     enabled: bool = True
     max_turns: int = 8
     decay_factor: float = 0.5
     relevant_turn_threshold: float = 0.7
-    compress_old_turns: bool = True  # Phase 2 reservation — not consumed in Phase 1.
+    # ``compress_old_turns`` is DEPRECATED (Issue #79 D1). Kept as a parse-only
+    # field so existing YAML configs keep loading. Runtime semantics are
+    # driven by ``storage_mode``; the ``_WMFieldSentinel`` default lets
+    # ``__post_init__`` tell "user omitted the key" from "user said True/False".
+    compress_old_turns: bool | _WMFieldSentinel = field(
+        default_factory=lambda: _WM_FIELD_UNSET
+    )
+    storage_mode: str | _WMFieldSentinel = field(
+        default_factory=lambda: _WM_FIELD_UNSET
+    )
 
     def __post_init__(self) -> None:
         if not isinstance(self.enabled, bool):
             raise TypeError(f"enabled must be bool, got {type(self.enabled).__name__}")
+
+        # Track explicit-vs-default for each deprecation-relevant field so the
+        # DeprecationWarning fires only in the ambiguous both-specified case
+        # (design §3.1 DR1-004).
+        compress_explicit = not isinstance(self.compress_old_turns, _WMFieldSentinel)
+        storage_explicit = not isinstance(self.storage_mode, _WMFieldSentinel)
+
+        # Resolve ``compress_old_turns`` to its boolean default if the caller
+        # omitted it, then type-validate (keeps the Issue #64 TypeError
+        # contract for non-bool inputs like "true"/1).
+        if not compress_explicit:
+            self.compress_old_turns = True  # type: ignore[assignment]
         if not isinstance(self.compress_old_turns, bool):
             raise TypeError(
                 "compress_old_turns must be bool, got "
                 f"{type(self.compress_old_turns).__name__}"
             )
+
+        # Resolve ``storage_mode`` similarly; validation below keeps the
+        # closed-enum contract (design §3.6 D6).
+        if not storage_explicit:
+            self.storage_mode = "full"  # type: ignore[assignment]
+        # Type check: strict ``str`` (rejects int/None/bool). We do NOT echo
+        # the raw value back into the exception text (§4 security: raw values
+        # from attacker-controlled YAML must never leak into logs / traces).
+        if not isinstance(self.storage_mode, str):
+            raise TypeError(
+                f"storage_mode must be str, got {type(self.storage_mode).__name__}"
+            )
+        if self.storage_mode not in STORAGE_MODES:
+            # Closed-enum message — intentionally omits the raw value per
+            # DR4 security rules (fail-closed on attacker-controlled input).
+            raise ValueError(
+                "storage_mode must be one of {'full', 'top_level_only', 'summary_only'}"
+            )
+
         if isinstance(self.max_turns, bool) or not isinstance(self.max_turns, int):
             raise TypeError(
                 f"max_turns must be int, got {type(self.max_turns).__name__}"
@@ -229,6 +334,20 @@ class WorkingMemoryConfig:
             raise ValueError(
                 "relevant_turn_threshold must be -1.0 <= float <= 1.0, got "
                 f"{self.relevant_turn_threshold}"
+            )
+
+        # DR1-004: emit DeprecationWarning only when the caller mixed the
+        # deprecated ``compress_old_turns`` with a non-default ``storage_mode``.
+        # Existing YAMLs (``compress_old_turns=True``, ``storage_mode`` omitted
+        # ⇒ resolved to "full") stay silent so the migration can roll out
+        # without noisy logs on every pipeline build.
+        if compress_explicit and storage_explicit and self.storage_mode != "full":
+            warnings.warn(
+                "compress_old_turns is deprecated; storage_mode is the "
+                "authoritative setting and compress_old_turns will be removed "
+                "in a future release",
+                DeprecationWarning,
+                stacklevel=2,
             )
 
 
@@ -387,6 +506,12 @@ class PhotonSessionState:
             resolved_cfg = working_memory_cfg
         self.working_memory_cfg: WorkingMemoryConfig = resolved_cfg
         self.turn_history: list[TurnState] = []
+        # Issue #79: pooled summary of turns that have aged out of
+        # ``turn_history`` (``full`` mode overflow) or that are stored only
+        # as summaries (``summary_only`` mode). Upper-bounded at
+        # ``max_turns * 4`` (design §3.4 D4) with silent ``pop(0)`` once the
+        # cap is hit (design §3.5 D5).
+        self.compressed_history: list[CompressedTurnState] = []
 
     def update(
         self,
@@ -458,23 +583,192 @@ class PhotonSessionState:
         self.prev_logits = new_logits
         self.drift_history.append(metrics)
 
-        # Append to turn_history only when working memory is enabled (Issue #64).
+        # Append to working memory only when enabled (Issue #64). Mode-specific
+        # retention policy lives in ``_append_turn_for_mode`` so ``update()``
+        # keeps a single responsibility (drift + state roll). Issue #79 D1 /
+        # DR1-002.
         if self.working_memory_cfg.enabled:
-            self.turn_history.append(
-                TurnState(
-                    turn_id=self.turn_count,
-                    hierarchical_state=new_state,
-                    question_text=_sanitize_question_text(question_text),
-                )
-            )
-            max_turns = self.working_memory_cfg.max_turns
-            while len(self.turn_history) > max_turns:
-                # Phase 2 will replace this with compress_oldest_turn; for now
-                # we simply drop the oldest reference so the GC can reclaim
-                # latents (design §3-1 security note).
-                self.turn_history.pop(0)
+            self._append_turn_for_mode(new_state, question_text)
 
         return metrics
+
+    def _make_turn_summary(self, hierarchical_state: HierarchicalState) -> mx.array:
+        """Produce the pooled ``(hidden_size,)`` summary of a turn.
+
+        Single-source helper (design §2.3 / DR1-006) so all call sites —
+        ``_append_full`` → ``_compress_oldest_turn``, ``_append_summary_only``,
+        and ``get_session_coarse_state`` — share the same pooling policy.
+        A future dtype change (e.g. bf16, OQ-2) localises here.
+
+        Returns ``mx.zeros((0,))`` when ``level_states`` is empty so callers
+        can detect "no top-level state to summarise" via ``.shape[0] == 0``
+        without raising.
+        """
+        if not hierarchical_state.level_states:
+            return mx.zeros((0,), dtype=mx.float32)
+        top = hierarchical_state.level_states[-1]
+        return mean_pool(top)
+
+    def _append_turn_for_mode(
+        self,
+        new_state: HierarchicalState,
+        question_text: str | None,
+    ) -> None:
+        """Dispatch turn retention to the mode-specific helper (Issue #79)."""
+        mode = self.working_memory_cfg.storage_mode
+        if mode == "full":
+            self._append_full(new_state, question_text)
+        elif mode == "top_level_only":
+            self._append_top_level_only(new_state, question_text)
+        elif mode == "summary_only":
+            self._append_summary_only(new_state, question_text)
+        # ``__post_init__`` guarantees the closed-enum invariant, so no else.
+
+    def _append_full(
+        self,
+        new_state: HierarchicalState,
+        question_text: str | None,
+    ) -> None:
+        """Retain the full :class:`HierarchicalState`; compress on overflow.
+
+        Preserves the Issue #64 behaviour (append ``TurnState`` + drop oldest
+        once ``max_turns`` is hit) but extends the drop path so the oldest
+        turn is pooled into ``compressed_history`` rather than garbage-
+        collected outright (Issue #79 D1 / D7). This is what lets the coarse
+        state keep a faint memory of old turns even after they leave
+        ``turn_history``.
+        """
+        self.turn_history.append(
+            TurnState(
+                turn_id=self.turn_count,
+                hierarchical_state=new_state,
+                question_text=_sanitize_question_text(question_text),
+            )
+        )
+        max_turns = self.working_memory_cfg.max_turns
+        while len(self.turn_history) > max_turns:
+            self._compress_oldest_turn()
+
+    def _append_top_level_only(
+        self,
+        new_state: HierarchicalState,
+        question_text: str | None,
+    ) -> None:
+        """Retain only ``level_states[-1]`` as a length-1 ``HierarchicalState``.
+
+        Key invariant (design §3.2 DR1-007): the incoming ``new_state``
+        MUST NOT be mutated. We build a fresh ``HierarchicalState`` that
+        shares the ``mx.array`` reference with ``new_state.level_states[-1]``
+        but drops ``level_states[0:-1]`` and ``token_proj``, then wrap it
+        in a fresh ``TurnState``. Callers in ``update()`` / drift path keep
+        reading the original ``new_state``, so both references must be
+        physically distinct instances (tested via
+        ``test_top_level_only_does_not_mutate_input_state``).
+        """
+        top = new_state.level_states[-1] if new_state.level_states else None
+        level_states = [top] if top is not None else []
+        stored_state = HierarchicalState(
+            level_states=level_states,
+            token_proj=None,
+            turn_id=self.turn_count,
+            # Inherit timestamp so cross-mode telemetry is comparable.
+            timestamp=new_state.timestamp,
+        )
+        self.turn_history.append(
+            TurnState(
+                turn_id=self.turn_count,
+                hierarchical_state=stored_state,
+                question_text=_sanitize_question_text(question_text),
+            )
+        )
+        max_turns = self.working_memory_cfg.max_turns
+        while len(self.turn_history) > max_turns:
+            self.turn_history.pop(0)
+
+    def _append_summary_only(
+        self,
+        new_state: HierarchicalState,
+        question_text: str | None,
+    ) -> None:
+        """Skip ``turn_history`` and push a pooled summary straight to
+        ``compressed_history`` (design §3.3 D3).
+
+        ``question_text`` is sanitised (design §4 security: the sanitize
+        contract must be mode-invariant — a malicious question must not
+        bypass ``_sanitize_question_text`` just because the retention mode
+        drops it afterwards) and then discarded; DR1-003 / DR1-005 says
+        ``CompressedTurnState`` does not hold ``question_text`` in Issue #79
+        scope.
+
+        CB-001 (codex review): ``_make_turn_summary()`` returns
+        ``mx.zeros((0,))`` when ``level_states`` is empty (sentinel shape).
+        We must NOT persist a zero-length summary because downstream
+        ``get_session_coarse_state()`` would then either (a) return a
+        ``shape=(0,)`` array (breaking the ``(D,) | None`` API contract) or
+        (b) trigger an ``mx.stack`` mismatch when mixed with ``(D,)``
+        entries. Skip the save instead — this preserves the
+        ``_make_turn_summary`` contract (§2.3) while keeping the storage
+        surface clean.
+        """
+        # Run the sanitize pass for its side-effect contract (rejects
+        # control chars, enforces MAX_LEN) even though the result is
+        # immediately discarded.
+        _ = _sanitize_question_text(question_text)
+        summary = self._make_turn_summary(new_state)
+        if summary.shape[0] == 0:
+            # Empty level_states → no coarse information to retain; skip
+            # the save entirely (defense-in-depth, paired with the
+            # get_session_coarse_state() filter below).
+            return
+        self.compressed_history.append(
+            CompressedTurnState(
+                turn_id=self.turn_count,
+                summary_vec=summary,
+                timestamp=time.time(),
+            )
+        )
+        self._truncate_compressed_history()
+
+    def _compress_oldest_turn(self) -> None:
+        """Pop the oldest ``TurnState`` and append its pooled summary.
+
+        Called from ``_append_full`` when ``turn_history`` exceeds
+        ``max_turns``. Preserves ``turn_id`` / ``timestamp`` so
+        ``compressed_history`` remains chronologically consistent with the
+        emptied ``turn_history`` slot (design §2.3 _compress_oldest_turn
+        pseudocode).
+
+        CB-001: the oldest turn is always popped from ``turn_history``
+        (unconditional — drop semantics unchanged). But if its
+        ``level_states`` is empty, ``_make_turn_summary`` returns a
+        zero-length sentinel that must NOT be appended to
+        ``compressed_history``; otherwise the API contract on
+        ``get_session_coarse_state()`` breaks. Skip the append in that
+        case.
+        """
+        oldest = self.turn_history.pop(0)
+        summary = self._make_turn_summary(oldest.hierarchical_state)
+        if summary.shape[0] == 0:
+            return
+        self.compressed_history.append(
+            CompressedTurnState(
+                turn_id=oldest.turn_id,
+                summary_vec=summary,
+                timestamp=oldest.timestamp,
+            )
+        )
+        self._truncate_compressed_history()
+
+    def _truncate_compressed_history(self) -> None:
+        """Enforce the ``max_turns * 4`` upper bound with silent ``pop(0)``.
+
+        Design §3.4 D4 + §3.5 D5: a fixed coefficient keeps ``decay_factor``
+        cumulative weight >=95% and avoids a new config surface for a
+        minor behaviour knob.
+        """
+        cap = self.working_memory_cfg.max_turns * 4
+        while len(self.compressed_history) > cap:
+            self.compressed_history.pop(0)
 
     def latest_drift(self) -> DriftMetrics | None:
         return self.drift_history[-1] if self.drift_history else None
@@ -482,38 +776,108 @@ class PhotonSessionState:
     def get_session_coarse_state(self) -> mx.array | None:
         """Return a ``(D,)`` coarse session vector aggregated across turns.
 
-        Aggregation is a weighted mean of each turn's top-level
-        ``mean_pool(level_states[-1])`` using geometric decay
-        ``decay_factor ** (N-i-1)``. Returns ``None`` when working memory
-        is disabled or no turn is recorded (design §3-2 judgement #2,
-        DR1-004 — callers must fall back to the legacy path).
+        Aggregation is a decay-weighted mean of per-turn summary vectors
+        (``decay_factor ** (N-i-1)``). Issue #79 D1 / DR1-008 adds a
+        ``storage_mode`` switch so that:
+
+        * ``"full"`` — aggregates ``turn_history`` summaries **and**, if
+          ``compressed_history`` is non-empty, concatenates those pooled
+          entries at the chronological front with the same decay weighting
+          (design §3.7 D7). This is what makes ``full`` mode's long sessions
+          keep a faint memory of turns that have aged out of the live
+          history.
+        * ``"top_level_only"`` — aggregates ``turn_history`` only (no writes
+          to ``compressed_history``).
+        * ``"summary_only"`` — aggregates ``compressed_history`` only
+          (``turn_history`` is always empty in this mode).
+
+        Returns ``None`` when working memory is disabled or no summaries
+        exist yet (DR1-008 keeps mode switch and empty check on separate
+        lines for the parametric test matrix in §6.1).
         """
         if not self.working_memory_cfg.enabled:
             return None
-        if not self.turn_history:
-            return None
 
-        decay = float(self.working_memory_cfg.decay_factor)
-        n = len(self.turn_history)
-        # Collect per-turn coarse vectors.
+        mode = self.working_memory_cfg.storage_mode
+        if mode == "summary_only":
+            # CB-001 defense-in-depth: filter zero-length summaries that
+            # might have leaked through (e.g. legacy pickled state,
+            # future refactors). The save-site filter in
+            # ``_append_summary_only`` prevents new writes; this guards
+            # reads.
+            vecs = self._collect_compressed_history_summaries()
+            if not vecs:
+                return None
+            return self._aggregate_decayed_mean(vecs)
+
+        if mode == "top_level_only":
+            if not self.turn_history:
+                return None
+            vecs = self._collect_turn_history_summaries()
+            if not vecs:
+                return None
+            return self._aggregate_decayed_mean(vecs)
+
+        # mode == "full": concatenate compressed + turn_history on a single
+        # chronological axis (design §3.7 D7). CB-001: filter zero-length
+        # compressed summaries before mixing — otherwise the
+        # ``_aggregate_decayed_mean`` stack would see shape mismatch.
+        compressed_vecs = self._collect_compressed_history_summaries()
+        live_vecs = self._collect_turn_history_summaries()
+        all_vecs = compressed_vecs + live_vecs
+        if not all_vecs:
+            return None
+        return self._aggregate_decayed_mean(all_vecs)
+
+    def _collect_turn_history_summaries(self) -> list[mx.array]:
+        """Build the list of per-turn summaries from ``turn_history``.
+
+        Skips entries whose ``level_states`` is empty (defensive against
+        malformed fixtures — ``_append_full`` always pushes a populated
+        ``HierarchicalState`` so this is belt-and-braces).
+        """
         vecs: list[mx.array] = []
-        weights: list[float] = []
-        for i, turn in enumerate(self.turn_history):
+        for turn in self.turn_history:
             if not turn.hierarchical_state.level_states:
                 continue
-            top = turn.hierarchical_state.level_states[-1]
-            vecs.append(mean_pool(top))
-            weights.append(decay ** (n - i - 1))
+            vecs.append(self._make_turn_summary(turn.hierarchical_state))
+        return vecs
 
+    def _collect_compressed_history_summaries(self) -> list[mx.array]:
+        """Return the list of ``summary_vec`` entries in
+        ``compressed_history`` excluding zero-length sentinels.
+
+        CB-001 defense-in-depth: save-side filters in
+        ``_append_summary_only`` / ``_compress_oldest_turn`` block new
+        zero-length writes, but this read-side filter ensures
+        ``get_session_coarse_state()`` stays within the ``(D,) | None``
+        API contract even if malformed entries slip in (e.g. through
+        direct ``session.compressed_history.append(...)`` by test
+        fixtures or external callers).
+        """
+        vecs: list[mx.array] = []
+        for entry in self.compressed_history:
+            if entry.summary_vec.shape[0] == 0:
+                continue
+            vecs.append(entry.summary_vec)
+        return vecs
+
+    def _aggregate_decayed_mean(self, vecs: list[mx.array]) -> mx.array | None:
+        """Apply the shared ``decay_factor ** (N-i-1)`` weighting.
+
+        Pulled out of ``get_session_coarse_state`` so all three mode paths
+        share the same numerical behaviour (design §3.7 / §3.8 DR1-008).
+        Returns the last entry when all weights collapse to zero (``decay=0``
+        and ``N>1``), matching the Phase 1 fallback.
+        """
         if not vecs:
             return None
-
+        decay = float(self.working_memory_cfg.decay_factor)
+        n = len(vecs)
+        weights = [decay ** (n - i - 1) for i in range(n)]
         weight_sum = sum(weights)
         if weight_sum <= 0.0:
-            # All weights were zero (decay=0 on history length > 1). Fall
-            # back to a plain mean of the last entry.
             return vecs[-1]
-
         stacked = mx.stack(vecs, axis=0)  # (N, D)
         w_arr = mx.array(weights, dtype=mx.float32)[:, None]  # (N, 1)
         aggregated = mx.sum(stacked * w_arr, axis=0) / float(weight_sum)
@@ -579,12 +943,19 @@ class PhotonSessionState:
     def reset_working_memory(self) -> None:
         """Clear stale latents and turn history for fail-closed recovery.
 
-        Drops ``current_state``, ``prev_state``, ``prev_logits`` and the
-        accumulated ``turn_history``. ``drift_history`` and ``turn_count``
-        are intentionally preserved so observability APIs remain consistent
-        (design judgement #4 / DR3-001).
+        Drops ``current_state``, ``prev_state``, ``prev_logits`` plus both
+        ``turn_history`` and ``compressed_history`` (Issue #79 DR1-010). All
+        five fields are cleared atomically so Safe RecGen fallback leaves a
+        fully blank working memory regardless of storage mode.
+        ``drift_history`` and ``turn_count`` are intentionally preserved so
+        observability APIs remain consistent (Issue #64 judgement #4 /
+        DR3-001).
+
+        NOTE: if a future change pushes the clear list past ~6 fields, move
+        to a ``_VOLATILE_STATE_FIELDS`` tuple + ``setattr`` loop (DR1-010).
         """
         self.current_state = None
         self.prev_state = None
         self.prev_logits = None
         self.turn_history = []
+        self.compressed_history = []

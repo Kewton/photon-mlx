@@ -113,6 +113,12 @@ session_memory:
   pin_cited_chunks_max: 12
   track_topic_state: true
 
+  # Issue #64 / #79: working_memory is intentionally omitted for RecGen
+  # profiles — RecGen is a single-path generator that does not need the
+  # cross-turn coarse aggregate, and keeping the section absent exercises
+  # the fail-closed "missing section" branch in
+  # baseline_reporag.photon_pipeline._extract_working_memory_cfg.
+
 tokenizer:
   tokenizer_id: "meta-llama/Llama-2-7b-hf"
   vocab_size: 32000

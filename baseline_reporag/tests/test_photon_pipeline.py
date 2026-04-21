@@ -1323,6 +1323,10 @@ class TestSafeRecGenFallbackIntegration:
         assert real_state.prev_state is None
         assert real_state.prev_logits is None
         assert real_state.turn_history == []
+        # Issue #79: compressed_history is also reset atomically so Safe
+        # RecGen fallback starts from a clean working memory regardless of
+        # storage_mode.
+        assert real_state.compressed_history == []
 
     def test_fallback_to_baseline_path_resets_photon_session_state(self):
         """fallback_to_baseline_path action must clear PHOTON session state
@@ -1380,6 +1384,8 @@ class TestSafeRecGenFallbackIntegration:
         assert real_state.prev_state is None
         assert real_state.prev_logits is None
         assert real_state.turn_history == []
+        # Issue #79: fallback path must also wipe compressed_history.
+        assert real_state.compressed_history == []
 
     def test_normal_follow_up_still_runs_pruning(self):
         """should_fallback=False on follow-up must still prune (regression guard)."""
@@ -2786,6 +2792,94 @@ class TestWorkingMemoryConfigSecurityFallback:
 
         cfg = WorkingMemoryConfig(enabled=False)
         assert _resolve_working_memory_cfg(cfg) is cfg
+
+    # ------------------------------------------------------------------
+    # Issue #79: storage_mode passthrough + fail-closed
+    # ------------------------------------------------------------------
+
+    def test_storage_mode_top_level_only_passthrough(self):
+        """YAML dict with ``storage_mode`` must flow to WorkingMemoryConfig."""
+        from baseline_reporag.photon_pipeline import _resolve_working_memory_cfg
+        from photon_mlx.session import WorkingMemoryConfig
+
+        result = _resolve_working_memory_cfg(
+            {"enabled": True, "storage_mode": "top_level_only"}
+        )
+        assert isinstance(result, WorkingMemoryConfig)
+        assert result.storage_mode == "top_level_only"
+
+    def test_storage_mode_summary_only_passthrough(self):
+        from baseline_reporag.photon_pipeline import _resolve_working_memory_cfg
+
+        result = _resolve_working_memory_cfg(
+            {"enabled": True, "storage_mode": "summary_only"}
+        )
+        assert result.storage_mode == "summary_only"
+
+    def test_storage_mode_invalid_enum_fails_closed(self, caplog):
+        """Unknown ``storage_mode`` value → None + warning without raw leak."""
+        import logging
+
+        from baseline_reporag.photon_pipeline import _resolve_working_memory_cfg
+
+        with caplog.at_level(
+            logging.WARNING, logger="baseline_reporag.photon_pipeline"
+        ):
+            result = _resolve_working_memory_cfg({"storage_mode": "Full"})
+        assert result is None
+        combined = " ".join(r.getMessage() for r in caplog.records)
+        # ValueError is caught; raw "Full" token must never leak.
+        assert "Full" not in combined
+        assert "ValueError" in combined
+
+    def test_storage_mode_wrong_type_fails_closed(self, caplog):
+        """Non-str ``storage_mode`` (e.g. int) → None + warning."""
+        import logging
+
+        from baseline_reporag.photon_pipeline import _resolve_working_memory_cfg
+
+        with caplog.at_level(
+            logging.WARNING, logger="baseline_reporag.photon_pipeline"
+        ):
+            result = _resolve_working_memory_cfg({"storage_mode": 42})
+        assert result is None
+        combined = " ".join(r.getMessage() for r in caplog.records)
+        assert "TypeError" in combined
+
+    def test_storage_mode_none_fails_closed(self, caplog):
+        """``None`` is not a valid closed-enum value; reject."""
+        import logging
+
+        from baseline_reporag.photon_pipeline import _resolve_working_memory_cfg
+
+        with caplog.at_level(
+            logging.WARNING, logger="baseline_reporag.photon_pipeline"
+        ):
+            result = _resolve_working_memory_cfg({"storage_mode": None})
+        assert result is None
+
+    def test_deprecation_warning_fires_from_dict_with_both_keys(self):
+        """DR1-004 — dict fixture with both deprecated and new keys emits
+        DeprecationWarning when the underlying WorkingMemoryConfig is built.
+        """
+        import warnings as _warnings
+
+        from baseline_reporag.photon_pipeline import _resolve_working_memory_cfg
+        from photon_mlx.session import WorkingMemoryConfig
+
+        with _warnings.catch_warnings(record=True) as captured:
+            _warnings.simplefilter("always")
+            result = _resolve_working_memory_cfg(
+                {
+                    "enabled": True,
+                    "compress_old_turns": True,
+                    "storage_mode": "top_level_only",
+                }
+            )
+        assert isinstance(result, WorkingMemoryConfig)
+        assert any(issubclass(rec.category, DeprecationWarning) for rec in captured), (
+            f"no DeprecationWarning; got: {[str(r.message) for r in captured]}"
+        )
 
 
 # ---------------------------------------------------------------------------

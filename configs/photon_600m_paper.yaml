@@ -108,16 +108,16 @@ session_memory:
   pin_cited_chunks_max: 12
   track_topic_state: true
 
-  # Issue #64: cross-turn hierarchical working memory.
-  # Disabled by default for photon_600m_paper — retaining full hierarchy for
-  # 8 turns at this scale exceeds the 100 MiB ceiling; re-enable only when
-  # the Phase 2 top-level-only mode lands.
+  # Issue #64 / #79: cross-turn hierarchical working memory.
+  # Re-enabled with storage_mode="top_level_only" (Issue #79 Phase 2).
+  # At 600M-paper scale the full hierarchy for 8 turns exceeds the
+  # 100 MiB ceiling, so we retain only level_states[-1] per turn.
   working_memory:
-    enabled: false
+    enabled: true
     max_turns: 8
     decay_factor: 0.5
     relevant_turn_threshold: 0.7
-    compress_old_turns: true
+    storage_mode: "top_level_only"
 
 tokenizer:
   tokenizer_id: "meta-llama/Llama-2-7b-hf"
