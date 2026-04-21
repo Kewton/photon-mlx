@@ -20,9 +20,12 @@ import mlx.core as mx
 
 from .model import PhotonModel
 from .session import (
+    _UNSET,
     DriftMetrics,
     HierarchicalState,
     PhotonSessionState,
+    WorkingMemoryConfig,
+    _UnsetType,
     weighted_hierarchical_score,
 )
 
@@ -148,6 +151,7 @@ class PhotonInference:
         tokenizer: Any,
         *,
         drift_level_weights: tuple[float, ...] | list[float] | None = None,
+        working_memory_cfg: WorkingMemoryConfig | None | _UnsetType = _UNSET,
     ) -> None:
         self.model = model
         self.cfg = cfg
@@ -168,6 +172,16 @@ class PhotonInference:
             self._drift_level_weights: tuple[float, ...] = (0.2, 0.3, 0.5)
         else:
             self._drift_level_weights = tuple(float(w) for w in drift_level_weights)
+        # Issue #64 / Codex CB-001: cross-turn working memory policy is
+        # propagated to every PhotonSessionState created via get_session().
+        # ``_UNSET`` (argument omitted) keeps the session default (working
+        # memory enabled with defaults) for legacy callers. Explicit ``None``
+        # is the fail-closed signal from ``_build_photon_deps()`` and MUST
+        # produce a disabled session. A ``WorkingMemoryConfig`` instance is
+        # used as-is.
+        self._working_memory_cfg: WorkingMemoryConfig | None | _UnsetType = (
+            working_memory_cfg
+        )
 
     def get_session(
         self,
@@ -181,6 +195,7 @@ class PhotonInference:
                 repo_id,
                 repo_commit,
                 drift_level_weights=self._drift_level_weights,
+                working_memory_cfg=self._working_memory_cfg,
             )
         return self._sessions[session_id]
 
@@ -218,11 +233,15 @@ class PhotonInference:
         session_id: str,
         repo_id: str,
         repo_commit: str,
+        *,
+        question: str | None = None,
     ) -> tuple[mx.array, DriftMetrics]:
         """
         Run a session-aware forward pass:
         1. Hierarchical prefill
-        2. Update session state
+        2. Update session state (optionally recording ``question`` into
+           :attr:`PhotonSessionState.turn_history` when Issue #64 working
+           memory is enabled).
         3. Compute drift metrics
 
         Returns (logits, drift_metrics).
@@ -232,7 +251,7 @@ class PhotonInference:
         logits, h_state = self.hierarchical_prefill(input_ids)
         mx.eval(logits)
 
-        drift = session.update(h_state, logits)
+        drift = session.update(h_state, logits, question_text=question)
 
         return logits, drift
 
@@ -278,16 +297,18 @@ class PhotonInference:
         try:
             token_ids = list(self.tokenizer.encode(text))
         except Exception as exc:
-            # Security logging (CB-002 codex-fix): log the closed-enum
-            # exception class name only; the raw exception body may carry
-            # prompt fragments / tokenizer internals and must never appear
-            # in warning logs.
+            # Security logging (Issue #58 CB-002 + Issue #64 Codex CB-003):
+            # log the closed-enum exception class name only. tokenizer.encode()
+            # receives question text (Pass 1) or repo chunk text (Turn 2+); a
+            # tokenizer that echoes the input in its exception message would
+            # leak those fragments to log sinks if we surfaced ``exc`` or
+            # ``str(exc)`` (design §7).
             _logger.warning(
                 "tokenizer.encode failed; disabling pruning (fail-closed, "
-                "Issue #58 CB-002, reason=%s)",
+                "Issue #58 CB-002, Codex CB-003, reason=%s)",
                 type(exc).__name__,
             )
-            raise _TokenizerEncodeFailure(str(exc)) from exc
+            raise _TokenizerEncodeFailure(type(exc).__name__) from exc
         if not token_ids:
             return []
 
@@ -517,10 +538,18 @@ class PhotonInference:
             # special-case None.
             return scores
 
-        # Issue #63: build all three query vectors (token/mid/top).
+        # Issue #63 + #64: build all three query vectors (token/mid/top).
+        # When working memory is active (get_session_coarse_state returns an
+        # aggregate), override q_top with the cross-turn coarse aggregate so
+        # scoring reflects the whole session; token/mid remain per-turn. When
+        # working memory is disabled or the aggregate is unavailable, fall
+        # back to the pure #63 hierarchical path (DR1-004).
         q_token, q_mid, q_top = self._build_query_hierarchical_vecs(
             session.current_state
         )
+        coarse_vec = session.get_session_coarse_state()
+        if coarse_vec is not None:
+            q_top = coarse_vec
 
         # ①〜④ Chunk vectorisation (shared helper, hierarchical).
         valid_indices, vecs = self._encode_chunks_to_vecs_hierarchical(
@@ -574,6 +603,9 @@ class PhotonInference:
 
         q_input = mx.array([question_tokens], dtype=mx.int32)
         _, q_state = self.hierarchical_prefill(q_input)
+        # Issue #63: one-off 3-level query vectors for Pass 1 hierarchical
+        # scoring. Turn 1 has no session history, so there is no coarse
+        # aggregate to blend in (DR1-004).
         q_token, q_mid, q_top = self._build_query_hierarchical_vecs(q_state)
 
         # ②〜④ Chunk vectorisation via shared hierarchical helper.

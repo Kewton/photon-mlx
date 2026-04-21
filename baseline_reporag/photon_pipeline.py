@@ -183,6 +183,65 @@ def _build_baseline_deps(cfg: Config) -> dict[str, Any]:
     return _build_baseline_deps_no_mlx(cfg)
 
 
+def _resolve_working_memory_cfg(raw: Any) -> Any:
+    """Normalise ``session_memory.working_memory`` into a ``WorkingMemoryConfig``.
+
+    Accepts ``None`` (feature disabled), a dict (YAML form), or an already
+    constructed :class:`photon_mlx.session.WorkingMemoryConfig`. Anything
+    else triggers a warning (type name only; raw values are never surfaced,
+    design §7) and fails closed to ``None`` so the query path continues.
+
+    Returns either a ``WorkingMemoryConfig`` instance or ``None``.
+    """
+    from photon_mlx.session import WorkingMemoryConfig
+
+    if raw is None:
+        return None
+    if isinstance(raw, WorkingMemoryConfig):
+        return raw
+    # Support the baseline Config wrapper (has .to_dict()) and plain dicts.
+    raw_dict: dict[str, Any]
+    if isinstance(raw, Config):
+        raw_dict = raw.to_dict()
+    elif isinstance(raw, dict):
+        raw_dict = dict(raw)
+    else:
+        _logger.warning(
+            "session_memory.working_memory has unsupported type %s; "
+            "disabling working memory for this session",
+            type(raw).__name__,
+        )
+        return None
+    try:
+        return WorkingMemoryConfig(**raw_dict)
+    except (TypeError, ValueError) as exc:
+        # Intentionally omit the raw dict (may contain attacker-controlled
+        # values from YAML). Only the exception class name is logged.
+        _logger.warning(
+            "WorkingMemoryConfig rejected session_memory.working_memory "
+            "(%s); disabling working memory for this session",
+            type(exc).__name__,
+        )
+        return None
+
+
+def _extract_working_memory_cfg(cfg: Config) -> Any:
+    """Pull ``session_memory.working_memory`` out of a baseline ``Config``.
+
+    Uses ``getattr`` / ``get`` so missing sections surface as ``None``
+    rather than raising (design §3-3 fail-closed rules).
+    """
+    session_memory = getattr(cfg, "session_memory", None)
+    if session_memory is None:
+        return None
+    raw = None
+    if hasattr(session_memory, "get"):
+        raw = session_memory.get("working_memory", None)
+    else:
+        raw = getattr(session_memory, "working_memory", None)
+    return _resolve_working_memory_cfg(raw)
+
+
 def _build_photon_deps(cfg: Config) -> dict[str, Any]:
     """Construct PHOTON-specific dependencies from config."""
     import sys
@@ -239,6 +298,9 @@ def _build_photon_deps(cfg: Config) -> dict[str, Any]:
     # the same stub instance (Issue #58).
     tokenizer = _get_stub_tokenizer(photon_cfg.tokenizer.vocab_size)
     model = PhotonModel(photon_cfg)
+    # Issue #64 / Codex CB-001: extract working memory policy once, pass it
+    # into PhotonInference alongside the Issue #63 drift_level_weights below.
+    working_memory_cfg = _extract_working_memory_cfg(cfg)
 
     safe_recgen_enabled = getattr(cfg.get("inference"), "safe_recgen_enabled", True)
     if safe_recgen_enabled:
@@ -331,6 +393,7 @@ def _build_photon_deps(cfg: Config) -> dict[str, Any]:
         photon_cfg,
         tokenizer,
         drift_level_weights=drift_weights_for_inference,
+        working_memory_cfg=working_memory_cfg,
     )
 
     return {
@@ -376,9 +439,10 @@ def _clear_photon_session_state(photon_inference: Any, session_id: str) -> None:
     photon_session = photon_inference._sessions.get(session_id)
     if photon_session is None:
         return
-    photon_session.current_state = None
-    photon_session.prev_state = None
-    photon_session.prev_logits = None
+    # Issue #64: delegate to PhotonSessionState.reset_working_memory() so
+    # ``turn_history`` is cleared atomically alongside the stale latents
+    # while ``drift_history`` / ``turn_count`` are preserved for telemetry.
+    photon_session.reset_working_memory()
 
 
 def build_pipeline(cfg: Config) -> RepoRAGPipeline | PhotonRAGPipeline:
@@ -701,14 +765,18 @@ class PhotonRAGPipeline:
                 self.photon_cfg,
             )
         except Exception as exc:
-            # Security logging (CB-002 codex-fix): log the closed-enum
-            # exception class name only; the raw exception body may carry
-            # prompt fragments / tokenizer internals and must never appear
-            # in warning logs.
+            # Security logging (Issue #58 CB-001 + Issue #64 Codex CB-002):
+            # log only the closed-enum exception class name. The tokenizer
+            # was handed ``question + evidence_pack``; a pathological or
+            # mis-configured tokenizer could echo that payload back in its
+            # exception message, so surfacing ``str(exc)`` / ``%s % exc``
+            # would leak question/evidence fragments to log sinks (design §7
+            # bars raw question_text and attacker-controlled values from
+            # fail-closed telemetry).
             _logger.warning(
                 "tokenize_evidence_pack failed; clearing PHOTON session "
                 "state and falling back to baseline path for this turn "
-                "(fail-closed, CB-001, reason=%s)",
+                "(fail-closed, CB-001, Codex CB-002, reason=%s)",
                 type(exc).__name__,
             )
             tokenization_failed = True
@@ -725,6 +793,7 @@ class PhotonRAGPipeline:
                 session_id=photon_session_id,
                 repo_id=repo_id or "unknown",
                 repo_commit="HEAD",
+                question=question,
             )
             confidence = compute_confidence(logits)
             drift_dict = drift.as_dict() if drift else None

@@ -24,10 +24,14 @@ from photon_mlx.inference import (
     _batch_cosine_similarity,
 )
 from photon_mlx.session import (
+    DriftMetrics,
     HierarchicalState,
     PhotonSessionState,
+    TurnState,
+    WorkingMemoryConfig,
     cosine_distance,
     kl_divergence,
+    mean_pool,
     token_agreement_rate,
     weighted_hierarchical_score,
 )
@@ -658,8 +662,11 @@ class TestPruneEvidence:
         )
         assert result == list(range(10))
 
+    @pytest.mark.parametrize("working_memory_enabled", [True, False])
     def test_mixed_length_batch_topk_matches_sequential(
-        self, engine: PhotonInference
+        self,
+        stub_tokenizer_for_cfg,
+        working_memory_enabled: bool,
     ) -> None:
         """Mixed-length non-empty chunks: batched top-K and raw scores must
         match a sequential hierarchical reference within ε=1e-3.
@@ -668,8 +675,27 @@ class TestPruneEvidence:
         ``weighted_hierarchical_score(sim_token, sim_mid, sim_top)`` combo
         rather than top-only cosine, so the sequential reference is built
         the same way.
+
+        Run with both working_memory enabled and disabled (Issue #64) to
+        ensure the coarse-state aggregation does not change the prune
+        ranking when only a single turn has been recorded (S3-004). With
+        a single turn, ``get_session_coarse_state()`` returns a vector
+        that is a decayed mean of one entry — equal to that turn's
+        ``mean_pool(level_states[-1])`` — so the overridden q_top stays
+        bit-for-bit equivalent to the pure-#63 path.
         """
         from photon_mlx.session import weighted_hierarchical_score
+
+        mx.random.seed(42)
+        cfg = _tiny_cfg()
+        model = PhotonModel(cfg)
+        tokenizer = stub_tokenizer_for_cfg(cfg)
+        engine = PhotonInference(
+            model,
+            cfg,
+            tokenizer,
+            working_memory_cfg=WorkingMemoryConfig(enabled=working_memory_enabled),
+        )
 
         ids = mx.random.randint(0, 256, (1, 16))
         engine.session_forward(ids, "s1", "repo", "abc")
@@ -800,3 +826,375 @@ class TestBatchCosineSimilarity:
     def test_micro_batch_size_default(self) -> None:
         """MICRO_BATCH_SIZE default matches the production cap."""
         assert MICRO_BATCH_SIZE == 64
+
+
+# ---------------------------------------------------------------
+# Issue #64: Cross-turn working memory (Phase 1)
+# ---------------------------------------------------------------
+
+
+def _mk_state(value: float, hidden: int = 4) -> HierarchicalState:
+    """Build a HierarchicalState whose top-level state is a constant vector."""
+    top = mx.ones((1, 2, hidden)) * value
+    return HierarchicalState(level_states=[top])
+
+
+class TestWorkingMemory:
+    """Issue #64 — PhotonSessionState cross-turn working memory."""
+
+    def test_turn_history_accumulates(self) -> None:
+        """update() must append one TurnState per turn up to max_turns."""
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(enabled=True, max_turns=3),
+        )
+        for i in range(5):
+            session.update(_mk_state(float(i + 1)), question_text=f"q{i + 1}")
+
+        # max_turns=3 → oldest two turns dropped
+        assert len(session.turn_history) == 3
+        assert [t.turn_id for t in session.turn_history] == [3, 4, 5]
+        assert all(isinstance(t, TurnState) for t in session.turn_history)
+        assert session.turn_history[-1].question_text == "q5"
+
+    def test_get_session_coarse_state_weighted_average(self) -> None:
+        """Weighted average uses decay_factor ** (N-i-1)."""
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True, max_turns=4, decay_factor=0.5
+            ),
+        )
+        # Three turns with scalar-encoded top states: values 1, 2, 4.
+        session.update(_mk_state(1.0))
+        session.update(_mk_state(2.0))
+        session.update(_mk_state(4.0))
+
+        coarse = session.get_session_coarse_state()
+        assert coarse is not None
+        mx.eval(coarse)
+        # Analytical expected value:
+        #   weights = [0.25, 0.5, 1.0], sum = 1.75
+        #   weighted sum = 1*0.25 + 2*0.5 + 4*1.0 = 5.25
+        #   result = 5.25 / 1.75 = 3.0 (broadcast across hidden dim)
+        vals = coarse.tolist()
+        for v in vals:
+            assert abs(v - 3.0) < 1e-5
+
+    def test_working_memory_enabled_false_preserves_legacy(self) -> None:
+        """enabled=False must leave turn_history empty and coarse state None."""
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(enabled=False),
+        )
+        session.update(_mk_state(1.0), question_text="q")
+        session.update(_mk_state(2.0), question_text="q2")
+
+        assert session.turn_history == []
+        assert session.get_session_coarse_state() is None
+        # Legacy current_state path still functional
+        assert session.current_state is not None
+
+    def test_prev_logits_preserved_across_update(self) -> None:
+        """Second-turn update retains prior logits to compute logit_kl."""
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(enabled=True),
+        )
+        logits_1 = mx.random.normal((1, 8, 64))
+        session.update(_mk_state(1.0), logits_1)
+        # After first update(), prev_logits tracks the most recent logits so
+        # the next turn can compute drift.
+        assert session.prev_logits is not None
+        logits_2 = mx.random.normal((1, 8, 64))
+        drift = session.update(_mk_state(2.0), logits_2)
+        assert drift.logit_kl >= 0.0
+        # prev_logits rolled forward to logits_2 for the next turn
+        assert session.prev_logits is logits_2
+
+    def test_drift_invariance_across_working_memory_toggle(self) -> None:
+        """latent_cosine_drift / logit_kl must be identical with WM on vs off."""
+        mx.random.seed(123)
+        s1_logits = [mx.random.normal((1, 8, 64)) for _ in range(2)]
+        mx.random.seed(123)
+        s2_logits = [mx.random.normal((1, 8, 64)) for _ in range(2)]
+
+        session_on = PhotonSessionState(
+            "on",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(enabled=True),
+        )
+        session_off = PhotonSessionState(
+            "off",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(enabled=False),
+        )
+        for v, l_on, l_off in zip((1.0, 2.0), s1_logits, s2_logits, strict=True):
+            d_on = session_on.update(_mk_state(v), l_on)
+            d_off = session_off.update(_mk_state(v), l_off)
+            assert abs(d_on.latent_cosine_drift - d_off.latent_cosine_drift) < 1e-6
+            assert abs(d_on.logit_kl - d_off.logit_kl) < 1e-6
+
+
+class TestSessionStateReset:
+    """Issue #64 — reset_working_memory() preserves telemetry only."""
+
+    def test_reset_clears_latents_and_history_preserves_drift(self) -> None:
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(enabled=True),
+        )
+        logits_1 = mx.random.normal((1, 8, 64))
+        session.update(_mk_state(1.0), logits_1, question_text="q1")
+        logits_2 = mx.random.normal((1, 8, 64))
+        session.update(_mk_state(2.0), logits_2, question_text="q2")
+
+        assert session.current_state is not None
+        assert session.prev_state is not None
+        assert session.prev_logits is not None
+        assert len(session.turn_history) == 2
+        drift_len_before = len(session.drift_history)
+        turn_count_before = session.turn_count
+
+        session.reset_working_memory()
+
+        # Cleared
+        assert session.current_state is None
+        assert session.prev_state is None
+        assert session.prev_logits is None
+        assert session.turn_history == []
+        # Preserved
+        assert len(session.drift_history) == drift_len_before
+        assert session.turn_count == turn_count_before
+
+
+class TestWorkingMemorySecurityRegression:
+    """Issue #64 — DR4 security regression coverage."""
+
+    def test_working_memory_config_rejects_non_bool_enabled(self) -> None:
+        with pytest.raises(TypeError, match="enabled must be bool"):
+            WorkingMemoryConfig(enabled="true")  # type: ignore[arg-type]
+
+    def test_working_memory_config_rejects_bad_max_turns(self) -> None:
+        with pytest.raises(ValueError, match="max_turns must be >= 1"):
+            WorkingMemoryConfig(max_turns=0)
+        with pytest.raises(TypeError):
+            WorkingMemoryConfig(max_turns=1.5)  # type: ignore[arg-type]
+
+    def test_working_memory_config_rejects_non_finite_decay(self) -> None:
+        import math as _math
+
+        with pytest.raises(ValueError):
+            WorkingMemoryConfig(decay_factor=_math.nan)
+        with pytest.raises(ValueError):
+            WorkingMemoryConfig(decay_factor=1.5)
+        with pytest.raises(ValueError):
+            WorkingMemoryConfig(relevant_turn_threshold=_math.inf)
+
+    def test_drift_metrics_as_dict_coerces_nan_and_inf(self) -> None:
+        import math as _math
+        import warnings as _warnings
+
+        # Issue #63 made ``latent_cosine_drift`` a read-only @property alias
+        # for ``latent_cosine_drift_top`` (DR1-009), so to drive a NaN through
+        # the legacy alias we have to set the underlying _top field directly.
+        m = DriftMetrics(
+            turn_id=3,
+            latent_cosine_drift_top=_math.nan,
+            token_agreement=_math.inf,
+            logit_kl=-_math.inf,
+            topic_shift_score=0.25,
+        )
+        with _warnings.catch_warnings(record=True) as captured:
+            _warnings.simplefilter("always")
+            out = m.as_dict()
+        # Non-finite values coerced to 0.0, finite value preserved.
+        assert out["latent_cosine_drift"] == 0.0
+        assert out["latent_cosine_drift_top"] == 0.0
+        assert out["token_agreement"] == 0.0
+        assert out["logit_kl"] == 0.0
+        assert abs(out["topic_shift_score"] - 0.25) < 1e-9
+        # JSON-safety: no NaN / Inf tokens in the dict.
+        for v in out.values():
+            assert _math.isfinite(v)
+        # A warning was surfaced for each non-finite coercion. The alias
+        # ``latent_cosine_drift`` and the authoritative ``_top`` field both
+        # resolve to NaN, so at minimum the 4 coercions (drift + alias +
+        # token_agreement + logit_kl) are reported.
+        assert len(captured) >= 3
+        # No leaked payload: warning text must reference the field name only.
+        for rec in captured:
+            msg = str(rec.message)
+            assert "latent" in msg or "agreement" in msg or "logit_kl" in msg
+            assert "q1" not in msg
+
+    def test_reset_warning_does_not_leak_question_text(self) -> None:
+        """reset_working_memory() runs silently; no question_text is logged."""
+        import io
+        import logging
+
+        stream = io.StringIO()
+        handler = logging.StreamHandler(stream)
+        handler.setLevel(logging.DEBUG)
+        logger = logging.getLogger("photon_mlx.session")
+        logger.addHandler(handler)
+        logger.setLevel(logging.DEBUG)
+        try:
+            session = PhotonSessionState(
+                "s1",
+                "repo",
+                "abc",
+                working_memory_cfg=WorkingMemoryConfig(enabled=True),
+            )
+            session.update(_mk_state(1.0), question_text="SECRET-USER-QUESTION")
+            session.reset_working_memory()
+        finally:
+            logger.removeHandler(handler)
+
+        assert "SECRET-USER-QUESTION" not in stream.getvalue()
+
+
+class TestCodexCB001NoneDisablesWorkingMemory:
+    """Codex CB-001: explicit ``None`` must be treated as disabled.
+
+    ``_build_photon_deps()`` returns ``None`` when the YAML is malformed or
+    the section is missing (fail-closed, design §7). The session layer must
+    honour that disable signal instead of silently re-enabling working memory.
+    """
+
+    def test_explicit_none_yields_disabled_working_memory(self) -> None:
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=None,
+        )
+        assert session.working_memory_cfg.enabled is False
+
+    def test_explicit_none_skips_turn_history(self) -> None:
+        """When None is passed, update() must not accumulate turn_history."""
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=None,
+        )
+        session.update(_mk_state(1.0), question_text="SECRET-Q")
+        session.update(_mk_state(2.0), question_text="SECRET-Q2")
+        assert session.turn_history == []
+        assert session.get_session_coarse_state() is None
+
+    def test_unset_default_keeps_working_memory_enabled(self) -> None:
+        """Callers that omit working_memory_cfg keep the legacy default on."""
+        # No ``working_memory_cfg`` argument at all → default sentinel path.
+        session = PhotonSessionState("s1", "repo", "abc")
+        assert session.working_memory_cfg.enabled is True
+
+    def test_inference_propagates_none_as_disabled(
+        self, stub_tokenizer_for_cfg
+    ) -> None:
+        """PhotonInference(working_memory_cfg=None).get_session must be disabled."""
+        cfg = _tiny_cfg()
+        model = PhotonModel(cfg)
+        tokenizer = stub_tokenizer_for_cfg(cfg)
+        engine = PhotonInference(
+            model,
+            cfg,
+            tokenizer,
+            working_memory_cfg=None,
+        )
+        session = engine.get_session("s1", "repo", "abc")
+        assert session.working_memory_cfg.enabled is False
+
+
+class TestCodexCB003PruneTokenizerLogHygiene:
+    """Codex CB-003: _tokenize_chunk warning must not leak raw exception text.
+
+    The tokenizer can raise with input fragments in the message (question
+    text on Pass 1, repo chunk text on Turn 2+). Warning must expose only
+    ``type(exc).__name__`` (design §7).
+    """
+
+    def test_tokenize_chunk_warning_contains_only_type_name(
+        self, caplog, stub_tokenizer_for_cfg
+    ) -> None:
+        import logging
+
+        cfg = _tiny_cfg()
+        model = PhotonModel(cfg)
+        tokenizer = stub_tokenizer_for_cfg(cfg)
+        engine = PhotonInference(model, cfg, tokenizer)
+
+        SENSITIVE = "LEAKED-CHUNK-TEXT-abcdef123"
+
+        class _EvilTokenizer:
+            pad_token_id = 0
+
+            def encode(self, text: str):
+                raise RuntimeError(SENSITIVE)
+
+        engine.tokenizer = _EvilTokenizer()
+
+        with caplog.at_level(logging.WARNING, logger="photon_mlx.inference"):
+            with pytest.raises(Exception):
+                # propagates as _TokenizerEncodeFailure
+                engine._tokenize_chunk("some repo chunk text")
+
+        combined = " ".join(r.getMessage() for r in caplog.records)
+        assert SENSITIVE not in combined
+        assert "RuntimeError" in combined
+
+
+class TestCodexCB004WorkingMemoryMaxTurnsHardCap:
+    """Codex CB-004: WorkingMemoryConfig.max_turns must reject unbounded values."""
+
+    def test_hard_cap_constant_is_reasonable(self) -> None:
+        from photon_mlx.session import WORKING_MEMORY_MAX_TURNS_HARD_CAP
+
+        assert isinstance(WORKING_MEMORY_MAX_TURNS_HARD_CAP, int)
+        # Design §7 references max_turns=8 GA. The hard cap must be at least
+        # large enough to accept that default, but small enough to bound
+        # memory (photon_small hidden=640, photon_tiny hidden=1024) — 32 is
+        # the documented recommended value.
+        assert WORKING_MEMORY_MAX_TURNS_HARD_CAP >= 8
+        assert WORKING_MEMORY_MAX_TURNS_HARD_CAP <= 64
+
+    def test_max_turns_rejects_values_above_hard_cap(self) -> None:
+        from photon_mlx.session import WORKING_MEMORY_MAX_TURNS_HARD_CAP
+
+        # Exactly the cap is allowed.
+        WorkingMemoryConfig(max_turns=WORKING_MEMORY_MAX_TURNS_HARD_CAP)
+        # One above the cap must raise ValueError.
+        with pytest.raises(ValueError, match="max_turns"):
+            WorkingMemoryConfig(max_turns=WORKING_MEMORY_MAX_TURNS_HARD_CAP + 1)
+        # A huge value (DoS attempt) must raise.
+        with pytest.raises(ValueError, match="max_turns"):
+            WorkingMemoryConfig(max_turns=10**9)
+
+
+class TestMeanPool:
+    """``mean_pool`` is the shared leading-dims reducer (DR1-002)."""
+
+    def test_mean_pool_returns_1d_for_3d(self) -> None:
+        x = mx.ones((2, 3, 4))
+        v = mean_pool(x)
+        assert v.shape == (4,)
+
+    def test_mean_pool_passthrough_for_1d(self) -> None:
+        x = mx.array([1.0, 2.0, 3.0])
+        v = mean_pool(x)
+        mx.eval(v)
+        assert v.shape == (3,)
+        assert v.tolist() == [1.0, 2.0, 3.0]
