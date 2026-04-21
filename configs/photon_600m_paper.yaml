@@ -82,6 +82,11 @@ retrieval:
     max_hops: 1
     max_nodes: 24
 
+  two_pass_search:
+    enabled: false       # Issue #56: enable to add Pass 1 PHOTON scoring on Turn 1
+    pass1_top_k: 64      # candidates fetched by retrieval for Pass 1
+    pass2_top_k: 16      # top-K passed to evidence pack (keep aligned with evidence_pack.max_chunks)
+
 evidence_pack:
   max_chunks: 16
   max_tokens: 16000

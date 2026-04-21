@@ -379,6 +379,91 @@ class TestPruneEvidence:
                     texts, cids, "s1", max_chunks=8, micro_batch_size=bad
                 )
 
+    # ───────────── Issue #56: Pass 1 scoring (Turn 1 + question) ──────────────
+
+    def test_pass1_returns_topk(self, engine: PhotonInference) -> None:
+        """Turn 1 + question (no session state) must return max_chunks indices
+        ranked by question↔chunk similarity, sorted ascending."""
+        texts = [f"chunk number {i} body content" for i in range(12)]
+        cids = [f"c{i}" for i in range(12)]
+        result = engine.prune_evidence(
+            texts,
+            cids,
+            "no_session_pass1",
+            max_chunks=6,
+            question="what is chunk 3 about?",
+        )
+        assert len(result) == 6
+        assert result == sorted(result)
+        assert all(0 <= idx < 12 for idx in result)
+
+    def test_pass1_does_not_mutate_session(self, engine: PhotonInference) -> None:
+        """Pass 1 must not touch self._sessions (DR1-001 read-only guarantee)."""
+        session = engine.get_session("s_pass1", "repo", "abc")
+        assert session.current_state is None
+        assert session.prev_state is None
+        turn_count_before = session.turn_count
+        drift_len_before = len(session.drift_history)
+
+        texts = [f"chunk {i} text" for i in range(10)]
+        cids = [f"c{i}" for i in range(10)]
+        engine.prune_evidence(
+            texts,
+            cids,
+            "s_pass1",
+            max_chunks=4,
+            question="query text",
+        )
+
+        # Session state remains untouched — Pass 1 is read-only.
+        assert session.current_state is None
+        assert session.prev_state is None
+        assert session.turn_count == turn_count_before
+        assert len(session.drift_history) == drift_len_before
+
+    def test_pass1_no_question_returns_all(self, engine: PhotonInference) -> None:
+        """question=None on Turn 1 preserves the pre-Issue-#56 behaviour
+        (all_indices) so callers that have not opted into two-pass are
+        unaffected (DR1-006 backward-compat spec)."""
+        texts = [f"chunk {i}" for i in range(12)]
+        cids = [f"c{i}" for i in range(12)]
+        result = engine.prune_evidence(
+            texts, cids, "no_session_pass1_none", max_chunks=4, question=None
+        )
+        assert result == list(range(12))
+
+        # Empty-string question behaves the same (early return).
+        result2 = engine.prune_evidence(
+            texts, cids, "no_session_pass1_empty", max_chunks=4, question="   "
+        )
+        assert result2 == list(range(12))
+
+    def test_pass1_tokenize_failure_returns_all(self, stub_tokenizer_for_cfg) -> None:
+        """tokenizer.encode raising inside Pass 1 must fail-closed to
+        all_indices (CB-002 / DR1-002)."""
+        mx.random.seed(42)
+        cfg = _tiny_cfg()
+        model = PhotonModel(cfg)
+
+        class _BrokenTokenizer:
+            vocab_size = cfg.tokenizer.vocab_size
+            pad_token_id = 0
+
+            def encode(self, text: str) -> list[int]:
+                raise RuntimeError("simulated encode failure")
+
+        engine = PhotonInference(model, cfg, _BrokenTokenizer())
+        texts = [f"chunk {i}" for i in range(10)]
+        cids = [f"c{i}" for i in range(10)]
+        result = engine.prune_evidence(
+            texts,
+            cids,
+            "no_session_broken",
+            max_chunks=4,
+            question="some question",
+        )
+        assert result == list(range(10))
+
     def test_mixed_length_batch_topk_matches_sequential(
         self, engine: PhotonInference
     ) -> None:
