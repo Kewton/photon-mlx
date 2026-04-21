@@ -13,6 +13,11 @@ import yaml
 _logger = logging.getLogger(__name__)
 
 
+# v1 scope: only "none" (vanilla RoPE) and "ntk" (NTK-aware interpolated RoPE).
+# Extend this set when adding new scaling methods (e.g. "linear", "yarn").
+ROPE_SCALING_CHOICES: frozenset[str] = frozenset({"none", "ntk"})
+
+
 @dataclass
 class ModelConfig:
     architecture: str = "photon_decoder"
@@ -24,10 +29,44 @@ class ModelConfig:
     head_dim: int = 64
     max_position_embeddings: int = 2048
     rope_theta: float = 1_000_000.0
+    rope_scaling: str = "none"
+    rope_scale_factor: float = 1.0
     norm_eps: float = 1e-5
     tie_word_embeddings: bool = False
     dropout: float = 0.0
     bias: bool = False
+
+    def __post_init__(self) -> None:
+        if self.rope_scaling not in ROPE_SCALING_CHOICES:
+            raise ValueError(
+                f"invalid rope_scaling: {self.rope_scaling!r} "
+                f"(expected one of {sorted(ROPE_SCALING_CHOICES)})"
+            )
+        if self.rope_scale_factor < 1.0:
+            raise ValueError(
+                f"rope_scale_factor must be >= 1.0 (got {self.rope_scale_factor})"
+            )
+        if self.rope_scaling == "none" and self.rope_scale_factor != 1.0:
+            _logger.warning(
+                "rope_scale_factor=%s is ignored because rope_scaling='none'; "
+                "set rope_scaling='ntk' to apply the scale factor.",
+                self.rope_scale_factor,
+            )
+
+    @classmethod
+    def rope_scaling_from(cls, m: Any) -> tuple[str, float]:
+        """Single source of defaults for ``rope_scaling`` / ``rope_scale_factor``.
+
+        Handles MagicMock-based configs in tests (unknown attrs return
+        ``MagicMock`` instances), so we use ``getattr`` with concrete
+        fallbacks.  ``scaling="ntk"`` with ``scale_factor=1.0`` is
+        mathematically equivalent to ``scaling="none"`` (the scale factor
+        term collapses to ``theta * 1.0``).
+        """
+        return (
+            getattr(m, "rope_scaling", "none"),
+            float(getattr(m, "rope_scale_factor", 1.0)),
+        )
 
 
 @dataclass
@@ -132,6 +171,45 @@ def _set_fields(dc: Any, raw: dict) -> None:
     for k, v in raw.items():
         if hasattr(dc, k):
             setattr(dc, k, v)
+        else:
+            _logger.warning(
+                "unknown config key ignored: %s (in %s)",
+                k,
+                type(dc).__name__,
+            )
+
+
+def _prod(xs: list[int]) -> int:
+    result = 1
+    for x in xs:
+        result *= int(x)
+    return result
+
+
+def _validate_cross_config(
+    model: ModelConfig,
+    hierarchy: HierarchyConfig,
+    training: TrainingConfig,
+) -> None:
+    """Enforce cross-dataclass invariants that can only be checked at load time.
+
+    - ``training.context_length`` must be a multiple of ``prod(hierarchy.chunk_sizes)``
+      so PHOTON can chunk the sequence cleanly into hierarchical tiles.
+    - ``training.context_length`` must not exceed ``model.max_position_embeddings``
+      since the RoPE table is precomputed to that length.
+    """
+    cl = int(training.context_length)
+    cl_mult = _prod(hierarchy.chunk_sizes)
+    if cl_mult > 0 and cl % cl_mult != 0:
+        raise ValueError(
+            f"training.context_length ({cl}) must be a multiple of "
+            f"prod(hierarchy.chunk_sizes)={cl_mult}"
+        )
+    if cl > int(model.max_position_embeddings):
+        raise ValueError(
+            f"training.context_length ({cl}) must be <= "
+            f"model.max_position_embeddings ({model.max_position_embeddings})"
+        )
 
 
 def load_photon_config(path: str | Path) -> PhotonConfig:
@@ -139,6 +217,9 @@ def load_photon_config(path: str | Path) -> PhotonConfig:
         raw = yaml.safe_load(f)
     cfg = PhotonConfig()
     _set_fields(cfg.model, raw.get("model", {}))
+    # Re-run ModelConfig.__post_init__ to validate fields set via _set_fields
+    # (setattr does not trigger __post_init__).
+    cfg.model.__post_init__()
     _set_fields(cfg.hierarchy, raw.get("hierarchy", {}))
     _set_fields(cfg.tokenizer, raw.get("tokenizer", {}))
     if "training" in raw:
@@ -171,4 +252,6 @@ def load_photon_config(path: str | Path) -> PhotonConfig:
                 cfg.training.eval_every_steps,
                 cfg.training.max_steps,
             )
+    if cfg.training is not None:
+        _validate_cross_config(cfg.model, cfg.hierarchy, cfg.training)
     return cfg

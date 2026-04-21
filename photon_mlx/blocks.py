@@ -13,14 +13,57 @@ import mlx.nn as nn
 KVCache = tuple[mx.array, mx.array]
 
 
+def _effective_positions_and_theta(
+    dim: int,
+    max_len: int,
+    theta: float,
+    scaling: str,
+    scale_factor: float,
+) -> tuple[mx.array, float]:
+    """Return ``(positions, effective_theta)`` for the requested RoPE scaling.
+
+    - ``scaling="none"``: identity (positions = arange(max_len), theta unchanged).
+    - ``scaling="ntk"``: NTK-aware RoPE — positions unchanged, theta rescaled
+      by ``scale_factor ** (dim / (dim - 2))``.
+
+    Any other ``scaling`` value is treated as ``"none"``; the caller
+    (``ModelConfig.__post_init__``) is responsible for validating the
+    allowed set, so this helper stays permissive.
+    """
+    positions = mx.arange(max_len)
+    if scaling == "ntk":
+        eff_theta = theta * (scale_factor ** (dim / (dim - 2)))
+        return positions, float(eff_theta)
+    return positions, theta
+
+
 def precompute_rope(
     dim: int,
     max_len: int,
     theta: float = 1_000_000.0,
+    *,
+    scaling: str = "none",
+    scale_factor: float = 1.0,
 ) -> tuple[mx.array, mx.array]:
-    """Return (cos, sin) each of shape (max_len, dim // 2)."""
-    freqs = 1.0 / (theta ** (mx.arange(0, dim, 2).astype(mx.float32) / dim))
-    t = mx.arange(max_len).astype(mx.float32)
+    """Return ``(cos, sin)`` each of shape ``(max_len, dim // 2)``.
+
+    Args:
+        dim: head dimension (``head_dim``).
+        max_len: number of positions to precompute.
+        theta: base RoPE frequency (e.g. ``1e6`` for LLaMA-style).
+        scaling: RoPE position-scaling method. ``"none"`` (default) uses
+            vanilla RoPE; ``"ntk"`` rescales ``theta`` per NTK-aware
+            interpolation (Su et al. follow-up).
+        scale_factor: multiplicative scale for ``"ntk"`` (must be >= 1.0).
+            ``scaling="ntk"`` with ``scale_factor=1.0`` is mathematically
+            equivalent to ``scaling="none"`` (the rescaling term
+            ``scale_factor ** (dim / (dim - 2))`` collapses to 1.0).
+    """
+    t, eff_theta = _effective_positions_and_theta(
+        dim, max_len, theta, scaling, scale_factor
+    )
+    freqs = 1.0 / (eff_theta ** (mx.arange(0, dim, 2).astype(mx.float32) / dim))
+    t = t.astype(mx.float32)
     angles = t[:, None] * freqs[None, :]  # (max_len, dim//2)
     return mx.cos(angles), mx.sin(angles)
 

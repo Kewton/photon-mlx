@@ -1,0 +1,254 @@
+version: 1
+
+project:
+  name: "photon-reporag"
+  mode: "photon_long_context"
+
+run:
+  name_prefix: "photon_long_context"
+  seed: 42
+  deterministic: true
+
+paths:
+  data_root: "./data"
+  raw_root: "./data/raw"
+  processed_root: "./data/processed"
+  index_root: "./data/indexes"
+  eval_root: "./data/eval_sets"
+  log_root: "./logs"
+  report_root: "./reports"
+  checkpoint_root: "./checkpoints"
+  cache_root: "./.cache"
+
+runtime:
+  device: "auto"
+  dtype: "float16"
+  num_workers: 8
+  profile_latency: true
+  profile_memory: true
+  compile_decode_step: true
+
+repo:
+  repo_id: "fastapi_fastapi"
+  repo_path: "./data/raw/fastapi"
+  repo_commit: "eba8942c81dbf990d25fbae34e6601bdbc21e74b"
+
+ingestion:
+  chunking:
+    strategy: "code_aware"
+    max_chars: 2400
+    overlap_chars: 300
+    max_lines: 120
+    overlap_lines: 12
+    keep_function_boundary: true
+    keep_class_boundary: true
+    attach_section_headers: true
+    attach_file_header: true
+
+indexing:
+  lexical:
+    enabled: true
+    engine: "bm25"
+
+  embedding:
+    enabled: true
+    provider: "local"
+    model_id: "sentence-transformers/all-MiniLM-L6-v2"
+    batch_size: 64
+    normalize: true
+
+  symbol_graph:
+    enabled: true
+
+retrieval:
+  mode: "hybrid"
+  lexical_top_k: 20
+  embedding_top_k: 20
+  fused_top_k: 16
+  rerank_top_k: 12
+
+  weights:
+    lexical: 0.45
+    embedding: 0.45
+    graph: 0.10
+
+  reranker:
+    enabled: true
+    model_id: "cross-encoder/ms-marco-MiniLM-L-6-v2"
+
+  file_type_boost: 0.0
+
+  query_expansion:
+    enabled: true
+    include_symbol_aliases: true
+    include_filename_hints: true
+
+  neighborhood_expansion:
+    enabled: true
+    before: 1
+    after: 1
+
+  graph_expansion:
+    enabled: true
+    max_hops: 1
+    max_nodes: 24
+
+evidence_pack:
+  max_chunks: 16
+  max_tokens: 16000
+  include_neighbors: true
+  include_section_headers: true
+
+  local_refresh:
+    enabled: true
+    top_k: 4
+    refresh_before_answer: true
+    refresh_on_exact_quote: true
+    refresh_on_diff_or_patch: true
+
+session_memory:
+  mode: "photon"
+  max_turns: 8
+  summary_max_tokens: 800
+  pin_recent_chunks_max: 8
+  pin_cited_chunks_max: 12
+  track_topic_state: true
+
+tokenizer:
+  tokenizer_id: "mlx-community/Qwen2.5-Coder-14B-Instruct-4bit"
+  vocab_size: 152064
+
+# Issue #55: all model fields live under `model:` (unlike photon_small.yaml
+# which has a known schema bug with model fields placed under `generation:`).
+# This lets NTK-aware RoPE scaling fields reach ModelConfig correctly.
+model:
+  architecture: "photon_decoder"
+
+  provider: "photon"
+  model_id: "mlx-community/Qwen2.5-Coder-14B-Instruct-4bit"
+
+  base_embed_dim: 256
+  hidden_size: 1024
+  intermediate_size: 2816
+
+  num_attention_heads: 16
+  num_key_value_heads: 16
+  head_dim: 64
+
+  # Long-context extensions (Issue #55)
+  max_position_embeddings: 65536
+  rope_theta: 10000000.0
+  rope_scaling: ntk
+  rope_scale_factor: 32.0
+
+  norm_eps: 0.00001
+  tie_word_embeddings: false
+  dropout: 0.0
+  bias: false
+
+generation:
+  max_new_tokens: 768
+  temperature: 0.2
+  top_p: 0.9
+  repetition_penalty: 1.05
+  do_sample: false
+
+hierarchy:
+  levels: 2
+
+  chunk_sizes: [4, 4]
+  converter_prefix_lengths: [2, 2]
+
+  chunker:
+    level1_type: "concat"
+    upper_type: "linear"
+
+  encoder_layers_per_level: [3, 3]
+  decoder_layers_per_level: [3, 3]
+
+  context_encoder_arch: "llama_decoder_style"
+  context_decoder_arch: "llama_decoder_style"
+  context_converter_type: "conv1d"
+
+  recursive_loss_weight: 0.0
+  bottleneck_consistency_target: "top_level"
+
+training:
+  enabled: true
+  stage: "long_context"
+
+  train_corpus: "./data/processed/train_multi.jsonl"
+  val_corpus: "./data/processed/val_multi.jsonl"
+
+  # Issue #55 v1: inference-only long context. Training remains at 32768
+  # (<= max_position_embeddings, multiple of prod(chunk_sizes)=16).
+  context_length: 32768
+  micro_batch_size: 1
+  gradient_accumulation_steps: 32
+
+  learning_rate: 0.00015
+  min_learning_rate: 0.000015
+  warmup_ratio: 0.03
+  weight_decay: 0.1
+  max_grad_norm: 1.0
+
+  max_steps: 2000
+  eval_every_steps: 100
+  save_every_steps: 100
+  log_every_steps: 20
+
+  early_stopping:
+    enabled: true
+    patience: 3
+    min_delta: 0.001
+    restore_best: true
+
+inference:
+  hierarchical_prefill: true
+  recgen_enabled: true
+  safe_recgen_enabled: true
+  evidence_pruning_enabled: true
+  pruned_max_chunks: 8
+
+  answer_max_new_tokens: 768
+  temperature: 0.2
+  top_p: 0.9
+  do_sample: false
+
+safe_recgen:
+  enabled: true
+
+  triggers:
+    exact_quote: true
+    diff_or_patch: true
+    high_risk_query: true
+    topic_shift: true
+    latent_drift: true
+    low_confidence: false
+
+  thresholds:
+    latent_cosine_drift: 0.50
+    topic_shift_score: 0.65
+    confidence_floor: 0.40
+    logit_kl: 0.75
+
+  fallback_actions:
+    re_retrieve: true
+    strengthen_local_refresh: true
+    reprefill_hierarchy: true
+    fallback_to_baseline_path: true
+
+drift_monitoring:
+  enabled: true
+  track_latent_cosine_drift: true
+  track_token_agreement: true
+  track_logit_kl: true
+  save_turn_level_metrics: true
+
+logging:
+  level: "INFO"
+  save_hidden_stats: true
+  save_drift_metrics: true
+  save_latency_breakdown: true
+  save_memory_metrics: true
+  save_fallback_reasons: true

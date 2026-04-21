@@ -742,3 +742,154 @@ class TestEarlyStopping:
                 assert "val_loss" in entry
                 found_eval = True
         assert found_eval
+
+
+# ---------------------------------------------------------------
+# Issue #55: long-context + NTK RoPE integration tests
+# ---------------------------------------------------------------
+
+
+class TestLongContextConfig:
+    """Sanity tests for configs/photon_long_context.yaml (Issue #55)."""
+
+    def test_long_context_config_loads(self) -> None:
+        """configs/photon_long_context.yaml must load without error.
+
+        Cross-config validation is strict:
+        training.context_length (32768) must be a multiple of
+        prod(chunk_sizes)=16 and <= max_position_embeddings (65536).
+        """
+        from torch_ref.config import load_photon_config
+
+        cfg = load_photon_config("configs/photon_long_context.yaml")
+        assert cfg.model.max_position_embeddings == 65536
+        assert cfg.model.rope_scaling == "ntk"
+        assert cfg.model.rope_scale_factor == 32.0
+        assert cfg.training is not None
+        assert cfg.training.context_length == 32768
+
+
+class TestCrossConfigCheckpointLoad:
+    """Checkpoints trained with a small max_position_embeddings must still
+    load into a PhotonModel configured with a larger max_position_embeddings
+    (Issue #55 backward-compat)."""
+
+    def test_cross_config_checkpoint_load(self, tmp_path: Path) -> None:
+        """Save under tiny config (max_pos=128), load into a larger-context
+        config (max_pos=512) and run generate() without error.
+
+        Note: the plan mentions 65536; we downscale to 512 to keep the
+        PhotonModel instantiation within a reasonable unit-test memory
+        budget (65536 * 65536 causal-mask style buffers would OOM).
+        """
+        mx.random.seed(42)
+        cfg_small = _tiny_cfg()
+        model = PhotonModel(cfg_small)
+        state = TrainState(step=10, best_val_loss=1.0)
+
+        ckpt_dir = tmp_path / "ckpt"
+        save_checkpoint(model, state, ckpt_dir)
+
+        # Larger-context config: still tiny hidden size, but bigger
+        # max_position_embeddings + NTK scaling.
+        cfg_long = PhotonConfig(
+            model=ModelConfig(
+                base_embed_dim=16,
+                hidden_size=64,
+                intermediate_size=128,
+                num_attention_heads=4,
+                num_key_value_heads=4,
+                head_dim=16,
+                max_position_embeddings=512,
+                rope_scaling="ntk",
+                rope_scale_factor=4.0,  # 128 -> 512
+            ),
+            hierarchy=HierarchyConfig(
+                levels=2,
+                chunk_sizes=[4, 4],
+                converter_prefix_lengths=[2, 2],
+                encoder_layers_per_level=[1, 1],
+                decoder_layers_per_level=[1, 1],
+            ),
+            tokenizer=TokenizerConfig(vocab_size=256),
+        )
+        model2 = PhotonModel(cfg_long)
+        load_checkpoint(model2, ckpt_dir)
+
+        # generate() at prompt_len=64, max_new=4 must not raise.
+        ids = mx.random.randint(0, 256, (1, 64))
+        out_ids, _ = model2.generate(ids, max_new_tokens=4)
+        mx.eval(out_ids)
+        assert out_ids.shape == (1, 64 + 4)
+
+
+class TestNtkRopeLongInference:
+    """2048-trained PHOTON weights + NTK RoPE scaling must produce valid
+    inference outputs beyond the training context (Issue #55 accept-criteria
+    surrogate — scaled down to keep unit tests fast)."""
+
+    def test_ntk_rope_long_inference(self) -> None:
+        """Construct a tiny PhotonModel with rope_scaling='ntk',
+        rope_scale_factor=2.0, max_position_embeddings=2048 and run
+        generate(prompt_len=64, max_new=4) without raising."""
+        mx.random.seed(0)
+        cfg = PhotonConfig(
+            model=ModelConfig(
+                base_embed_dim=16,
+                hidden_size=64,
+                intermediate_size=128,
+                num_attention_heads=4,
+                num_key_value_heads=4,
+                head_dim=16,
+                max_position_embeddings=2048,
+                rope_theta=1_000_000.0,
+                rope_scaling="ntk",
+                rope_scale_factor=2.0,
+            ),
+            hierarchy=HierarchyConfig(
+                levels=2,
+                chunk_sizes=[4, 4],
+                converter_prefix_lengths=[2, 2],
+                encoder_layers_per_level=[1, 1],
+                decoder_layers_per_level=[1, 1],
+            ),
+            tokenizer=TokenizerConfig(vocab_size=256),
+        )
+        model = PhotonModel(cfg)
+        ids = mx.random.randint(0, 256, (1, 64))
+        out_ids, _ = model.generate(ids, max_new_tokens=4)
+        mx.eval(out_ids)
+        assert out_ids.shape == (1, 64 + 4)
+
+
+class TestLongContextModelInit:
+    """PhotonModel(load_photon_config('configs/photon_long_context.yaml'))
+    must not raise (Issue #55 basic-init receipt).
+
+    Gated behind a hidden_size downscale done at PhotonConfig level so we
+    don't actually allocate weights for the full 1024-dim 65536-position
+    model in unit tests.
+    """
+
+    def test_long_context_model_init(self) -> None:
+        from torch_ref.config import load_photon_config
+
+        cfg = load_photon_config("configs/photon_long_context.yaml")
+        # Downscale the heavy dims (hidden_size/intermediate/layers) to keep
+        # this test fast; the 65536 max_position_embeddings path is what we
+        # want to exercise.  Do NOT touch max_position_embeddings, rope_theta,
+        # rope_scaling, rope_scale_factor — those are the actual Issue #55
+        # surface under test.
+        cfg.model.base_embed_dim = 16
+        cfg.model.hidden_size = 64
+        cfg.model.intermediate_size = 128
+        cfg.model.num_attention_heads = 4
+        cfg.model.num_key_value_heads = 4
+        cfg.model.head_dim = 16
+        cfg.hierarchy.encoder_layers_per_level = [1, 1]
+        cfg.hierarchy.decoder_layers_per_level = [1, 1]
+        cfg.tokenizer.vocab_size = 256
+
+        model = PhotonModel(cfg)
+        # Touch the top-level RoPE table to confirm it got allocated.
+        assert model._rope_cos.shape[0] == 65536
