@@ -1633,3 +1633,395 @@ class TestBuildPhotonDepsWiresRopeScaling:
         assert photon_cfg.model.rope_scaling == "none"
         assert photon_cfg.model.rope_scale_factor == 1.0
         assert photon_cfg.model.max_position_embeddings == 2048
+
+
+# ---------------------------------------------------------------------------
+# Issue #56: two-pass search configuration and integration
+# ---------------------------------------------------------------------------
+
+
+def _make_two_pass_cfg():
+    """Config with two-pass search enabled on Turn 1 (Issue #56)."""
+    from baseline_reporag.config import Config
+
+    return Config(
+        {
+            "model": {
+                "provider": "photon",
+                "model_id": "test-model",
+            },
+            "repo": {
+                "repo_id": "test-repo",
+                "repo_commit": "abc123",
+            },
+            "hierarchy": {
+                "chunk_sizes": [4, 4],
+            },
+            "retrieval": {
+                "lexical_top_k": 20,
+                "embedding_top_k": 20,
+                "fused_top_k": 16,
+                "rerank_top_k": 12,
+                "weights": {
+                    "lexical": 0.45,
+                    "embedding": 0.45,
+                },
+                "query_expansion": {"enabled": False},
+                "graph_expansion": {"max_hops": 1, "max_nodes": 24},
+                "neighborhood_expansion": {"before": 1, "after": 1},
+                "file_type_boost": 0.0,
+                "two_pass_search": {
+                    "enabled": True,
+                    "pass1_top_k": 64,
+                    "pass2_top_k": 16,
+                },
+            },
+            "evidence_pack": {
+                "max_chunks": 16,
+                "max_tokens": 16000,
+            },
+            "inference": {
+                "evidence_pruning_enabled": False,
+                "pruned_max_chunks": 8,
+            },
+        }
+    )
+
+
+class TestTwoPassSearchPipeline:
+    """pipeline.query integration with retrieval.two_pass_search (Issue #56)."""
+
+    def test_two_pass_enabled_runs_pass1(self):
+        """Turn 1 with two_pass enabled must call prune_evidence with the
+        question kwarg and record a pass1_scoring profiler phase."""
+        from baseline_reporag.ingestion.chunker import Chunk
+
+        cfg = _make_two_pass_cfg()
+        pipeline, baseline_deps, photon_deps, _mock_session, mock_results = (
+            _setup_pipeline_for_pruning(cfg, session_turns=0)
+        )
+
+        chunks = [
+            Chunk(
+                chunk_id=f"chunk_{i}",
+                repo_id="test-repo",
+                repo_commit="abc123",
+                rel_path=f"file{i}.py",
+                language="python",
+                start_line=1,
+                end_line=10,
+                content=f"def func_{i}(): pass",
+                symbols=[f"func_{i}"],
+                section_header="",
+                file_header="",
+            )
+            for i in range(64)
+        ]
+
+        def mock_get_many(ids):
+            by_id = {c.chunk_id: c for c in chunks}
+            return [by_id[cid] for cid in ids if cid in by_id]
+
+        baseline_deps["store"].get_many.side_effect = mock_get_many
+        # hybrid_search returns 64 candidates when Pass 1 enables effective_fused_top_k=64
+        mock_results_64 = []
+        for i in range(64):
+            r = MagicMock()
+            r.chunk_id = f"chunk_{i}"
+            r.score = 1.0 - i * 0.01
+            mock_results_64.append(r)
+        expanded_ids = [f"chunk_{i}" for i in range(64)]
+
+        photon_deps["photon_inference"].prune_evidence.return_value = list(range(16))
+
+        captured_fused_top_k: dict[str, int] = {}
+
+        def capture_hybrid(*args, **kwargs):
+            captured_fused_top_k["value"] = kwargs.get("fused_top_k")
+            return mock_results_64
+
+        with (
+            patch(
+                "baseline_reporag.photon_pipeline.hybrid_search",
+                side_effect=capture_hybrid,
+            ),
+            patch(
+                "baseline_reporag.photon_pipeline.expand_with_graph",
+                return_value=expanded_ids,
+            ),
+        ):
+            baseline_deps["generator"].generate.return_value = "Answer [C:1]"
+            pipeline.query("What is func 3?", session_id="s1", repo_id="test-repo")
+
+        # effective_fused_top_k must be at least pass1_top_k=64 on Turn 1 Pass 1.
+        assert captured_fused_top_k["value"] == 64
+
+        # prune_evidence must be called with question kwarg and max_chunks=pass2_top_k.
+        photon_deps["photon_inference"].prune_evidence.assert_called_once()
+        call = photon_deps["photon_inference"].prune_evidence.call_args
+        assert call.kwargs.get("question") == "What is func 3?"
+        assert call.kwargs.get("max_chunks") == 16
+
+        # pass1_scoring phase must be recorded.
+        # (We can read it via photon_inference session_forward's argument profiler
+        # or via inspection of the profiler; simplest is to re-introspect by
+        # mocking TurnProfiler below — but since prof is created internally, we
+        # instead exercise the indirect effect: prune_evidence was called, which
+        # is guarded by the pass1_scoring block.)
+
+    def test_two_pass_enabled_records_pass1_phase(self):
+        """pass1_scoring phase name is registered on the profiler."""
+        from baseline_reporag.ingestion.chunker import Chunk
+        from baseline_reporag import photon_pipeline as pp
+
+        cfg = _make_two_pass_cfg()
+        pipeline, baseline_deps, photon_deps, _mock_session, _mock_results = (
+            _setup_pipeline_for_pruning(cfg, session_turns=0)
+        )
+
+        chunks = [
+            Chunk(
+                chunk_id=f"chunk_{i}",
+                repo_id="test-repo",
+                repo_commit="abc123",
+                rel_path=f"file{i}.py",
+                language="python",
+                start_line=1,
+                end_line=10,
+                content=f"def func_{i}(): pass",
+                symbols=[f"func_{i}"],
+                section_header="",
+                file_header="",
+            )
+            for i in range(64)
+        ]
+
+        def mock_get_many(ids):
+            by_id = {c.chunk_id: c for c in chunks}
+            return [by_id[cid] for cid in ids if cid in by_id]
+
+        baseline_deps["store"].get_many.side_effect = mock_get_many
+        mock_results_64 = []
+        for i in range(64):
+            r = MagicMock()
+            r.chunk_id = f"chunk_{i}"
+            r.score = 1.0 - i * 0.01
+            mock_results_64.append(r)
+        expanded_ids = [f"chunk_{i}" for i in range(64)]
+        photon_deps["photon_inference"].prune_evidence.return_value = list(range(16))
+
+        captured_profilers: list = []
+        original_profiler = pp.TurnProfiler
+
+        class _SpyProfiler(original_profiler):
+            def __init__(self):
+                super().__init__()
+                captured_profilers.append(self)
+
+        with (
+            patch("baseline_reporag.photon_pipeline.TurnProfiler", _SpyProfiler),
+            patch(
+                "baseline_reporag.photon_pipeline.hybrid_search",
+                return_value=mock_results_64,
+            ),
+            patch(
+                "baseline_reporag.photon_pipeline.expand_with_graph",
+                return_value=expanded_ids,
+            ),
+        ):
+            baseline_deps["generator"].generate.return_value = "Answer [C:1]"
+            pipeline.query("query?", session_id="s1", repo_id="test-repo")
+
+        assert len(captured_profilers) == 1
+        prof = captured_profilers[0]
+        # pass1_scoring must be registered; evidence_pruning must NOT be on
+        # a Turn 1 Pass 1 run.
+        assert "pass1_scoring" in prof._watches
+        assert "evidence_pruning" not in prof._watches
+
+    def test_two_pass_disabled_uses_full_evidence(self):
+        """enabled=false → Turn 1 behaves as before (no prune_evidence call)."""
+        from baseline_reporag.ingestion.chunker import Chunk
+
+        # _make_pruning_cfg has no two_pass_search section → enabled=False.
+        cfg = _make_pruning_cfg()
+        pipeline, baseline_deps, photon_deps, _mock_session, mock_results = (
+            _setup_pipeline_for_pruning(cfg, session_turns=0)
+        )
+
+        chunks = [
+            Chunk(
+                chunk_id=f"chunk_{i}",
+                repo_id="test-repo",
+                repo_commit="abc123",
+                rel_path=f"file{i}.py",
+                language="python",
+                start_line=1,
+                end_line=10,
+                content=f"def func_{i}(): pass",
+                symbols=[f"func_{i}"],
+                section_header="",
+                file_header="",
+            )
+            for i in range(16)
+        ]
+
+        def mock_get_many(ids):
+            by_id = {c.chunk_id: c for c in chunks}
+            return [by_id[cid] for cid in ids if cid in by_id]
+
+        baseline_deps["store"].get_many.side_effect = mock_get_many
+        expanded_ids = [f"chunk_{i}" for i in range(16)]
+
+        captured_fused_top_k: dict[str, int] = {}
+
+        def capture_hybrid(*args, **kwargs):
+            captured_fused_top_k["value"] = kwargs.get("fused_top_k")
+            return mock_results
+
+        with (
+            patch(
+                "baseline_reporag.photon_pipeline.hybrid_search",
+                side_effect=capture_hybrid,
+            ),
+            patch(
+                "baseline_reporag.photon_pipeline.expand_with_graph",
+                return_value=expanded_ids,
+            ),
+        ):
+            baseline_deps["generator"].generate.return_value = "Answer [C:1]"
+            pipeline.query("query?", session_id="s1", repo_id="test-repo")
+
+        # fused_top_k is unchanged (=16) when two_pass is disabled.
+        assert captured_fused_top_k["value"] == 16
+        # prune_evidence must NOT be called on Turn 1 with two_pass disabled.
+        photon_deps["photon_inference"].prune_evidence.assert_not_called()
+
+    def test_two_pass_search_cfg_missing_section_in_pipeline(self):
+        """Pipeline must work with configs that omit retrieval.two_pass_search."""
+        from baseline_reporag.ingestion.chunker import Chunk
+
+        cfg = _make_pruning_cfg()  # no two_pass_search section
+        pipeline, baseline_deps, photon_deps, _mock_session, mock_results = (
+            _setup_pipeline_for_pruning(cfg, session_turns=0)
+        )
+
+        chunks = [
+            Chunk(
+                chunk_id=f"chunk_{i}",
+                repo_id="test-repo",
+                repo_commit="abc123",
+                rel_path=f"file{i}.py",
+                language="python",
+                start_line=1,
+                end_line=10,
+                content=f"def func_{i}(): pass",
+                symbols=[f"func_{i}"],
+                section_header="",
+                file_header="",
+            )
+            for i in range(16)
+        ]
+
+        def mock_get_many(ids):
+            by_id = {c.chunk_id: c for c in chunks}
+            return [by_id[cid] for cid in ids if cid in by_id]
+
+        baseline_deps["store"].get_many.side_effect = mock_get_many
+        expanded_ids = [f"chunk_{i}" for i in range(16)]
+
+        with (
+            patch(
+                "baseline_reporag.photon_pipeline.hybrid_search",
+                return_value=mock_results,
+            ),
+            patch(
+                "baseline_reporag.photon_pipeline.expand_with_graph",
+                return_value=expanded_ids,
+            ),
+        ):
+            baseline_deps["generator"].generate.return_value = "Answer [C:1]"
+            result = pipeline.query("query?", session_id="s1", repo_id="test-repo")
+
+        # Query completes without raising for configs that omit the section.
+        assert result.answer == "Answer [C:1]"
+
+
+class TestTwoPassSearchConfig:
+    """_resolve_two_pass_search_cfg validates and defaults two-pass settings."""
+
+    def test_two_pass_search_config_validation(self):
+        """pass1_top_k < pass2_top_k must raise ValueError."""
+        import pytest
+
+        from baseline_reporag.config import Config
+        from baseline_reporag.photon_pipeline import _resolve_two_pass_search_cfg
+
+        retrieval = Config(
+            {
+                "two_pass_search": {
+                    "enabled": True,
+                    "pass1_top_k": 8,
+                    "pass2_top_k": 16,
+                }
+            }
+        )
+        with pytest.raises(ValueError, match="pass1_top_k must be >= pass2_top_k"):
+            _resolve_two_pass_search_cfg(
+                retrieval, fused_top_k=16, evidence_max_chunks=16
+            )
+
+        # pass2_top_k < 1 also rejected
+        retrieval2 = Config(
+            {
+                "two_pass_search": {
+                    "enabled": False,
+                    "pass1_top_k": 64,
+                    "pass2_top_k": 0,
+                }
+            }
+        )
+        with pytest.raises(ValueError, match="pass2_top_k must be >= 1"):
+            _resolve_two_pass_search_cfg(
+                retrieval2, fused_top_k=16, evidence_max_chunks=16
+            )
+
+    def test_two_pass_search_cfg_missing_section(self):
+        """Missing two_pass_search section defaults to disabled without errors."""
+        from baseline_reporag.config import Config
+        from baseline_reporag.photon_pipeline import _resolve_two_pass_search_cfg
+
+        retrieval = Config({"fused_top_k": 16})
+        enabled, p1, p2 = _resolve_two_pass_search_cfg(
+            retrieval, fused_top_k=16, evidence_max_chunks=16
+        )
+        assert enabled is False
+        assert p1 == 16
+        assert p2 == 16
+
+    def test_two_pass_search_cfg_warn_and_clamp_pass1_below_fused(self, caplog):
+        """pass1_top_k < fused_top_k must warn and clamp up to fused_top_k."""
+        import logging
+
+        from baseline_reporag.config import Config
+        from baseline_reporag.photon_pipeline import _resolve_two_pass_search_cfg
+
+        retrieval = Config(
+            {
+                "two_pass_search": {
+                    "enabled": True,
+                    "pass1_top_k": 8,
+                    "pass2_top_k": 4,
+                }
+            }
+        )
+        with caplog.at_level(
+            logging.WARNING, logger="baseline_reporag.photon_pipeline"
+        ):
+            enabled, p1, p2 = _resolve_two_pass_search_cfg(
+                retrieval, fused_top_k=16, evidence_max_chunks=8
+            )
+        assert enabled is True
+        assert p1 == 16  # clamped up
+        assert p2 == 4
+        assert any("clamping pass1_top_k" in rec.message for rec in caplog.records)

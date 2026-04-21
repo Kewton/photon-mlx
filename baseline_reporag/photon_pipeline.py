@@ -30,6 +30,73 @@ _logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Two-pass search configuration (Issue #56)
+# ---------------------------------------------------------------------------
+
+
+def _resolve_two_pass_search_cfg(
+    retrieval_cfg: Any,
+    fused_top_k: int,
+    evidence_max_chunks: int,
+) -> tuple[bool, int, int]:
+    """Resolve and validate ``retrieval.two_pass_search`` settings.
+
+    Returns ``(enabled, pass1_top_k, pass2_top_k)``. ``enabled`` defaults to
+    ``False`` when the section is missing so existing configs continue to work.
+
+    Validation rules (design §4.5 / DR1-008):
+    - ``pass1_top_k >= pass2_top_k >= 1`` — violation raises ``ValueError``
+    - ``pass1_top_k < fused_top_k`` — warn and clamp up to ``fused_top_k``
+      (avoids silently dropping candidates supplied by retrieval)
+
+    Validation is performed even when ``enabled=False`` so mis-configurations
+    surface early (Stage 3 S3-002).
+    """
+    section = (
+        retrieval_cfg.get("two_pass_search", {}) if retrieval_cfg is not None else {}
+    )
+    if section is None:
+        section = {}
+    # Support both ``Config`` wrappers and plain dicts.
+    getter = section.get
+
+    enabled_raw = getter("enabled", False)
+    enabled = bool(enabled_raw)
+    pass1_top_k = getter("pass1_top_k", fused_top_k)
+    pass2_top_k = getter("pass2_top_k", evidence_max_chunks)
+
+    if not isinstance(pass1_top_k, int) or isinstance(pass1_top_k, bool):
+        raise ValueError(
+            "retrieval.two_pass_search.pass1_top_k must be an int, "
+            f"got {type(pass1_top_k).__name__}"
+        )
+    if not isinstance(pass2_top_k, int) or isinstance(pass2_top_k, bool):
+        raise ValueError(
+            "retrieval.two_pass_search.pass2_top_k must be an int, "
+            f"got {type(pass2_top_k).__name__}"
+        )
+    if pass2_top_k < 1:
+        raise ValueError(
+            f"retrieval.two_pass_search.pass2_top_k must be >= 1, got {pass2_top_k}"
+        )
+    if pass1_top_k < pass2_top_k:
+        raise ValueError(
+            "retrieval.two_pass_search.pass1_top_k must be >= pass2_top_k, "
+            f"got pass1_top_k={pass1_top_k}, pass2_top_k={pass2_top_k}"
+        )
+    if pass1_top_k < fused_top_k:
+        _logger.warning(
+            "retrieval.two_pass_search.pass1_top_k (%d) < retrieval.fused_top_k "
+            "(%d); clamping pass1_top_k up to fused_top_k to preserve retrieval "
+            "candidates.",
+            pass1_top_k,
+            fused_top_k,
+        )
+        pass1_top_k = fused_top_k
+    return enabled, pass1_top_k, pass2_top_k
+
+
+# ---------------------------------------------------------------------------
 # Utility functions
 # ---------------------------------------------------------------------------
 
@@ -391,6 +458,20 @@ class PhotonRAGPipeline:
         else:
             expansion_terms = None
 
+        is_follow_up = len(session.turns) > 0
+
+        # --- Two-pass search configuration (Issue #56) ---
+        two_pass_enabled, pass1_top_k, pass2_top_k = _resolve_two_pass_search_cfg(
+            cfg.retrieval,
+            fused_top_k=cfg.retrieval.fused_top_k,
+            evidence_max_chunks=cfg.evidence_pack.max_chunks,
+        )
+        effective_fused_top_k = (
+            max(cfg.retrieval.fused_top_k, pass1_top_k)
+            if two_pass_enabled and not is_follow_up
+            else cfg.retrieval.fused_top_k
+        )
+
         # --- Retrieval ---
         with prof.phase("retrieval"):
             raw = hybrid_search(
@@ -399,13 +480,11 @@ class PhotonRAGPipeline:
                 embedding_index=bl.embedding,
                 lexical_top_k=cfg.retrieval.lexical_top_k,
                 embedding_top_k=cfg.retrieval.embedding_top_k,
-                fused_top_k=cfg.retrieval.fused_top_k,
+                fused_top_k=effective_fused_top_k,
                 lexical_weight=cfg.retrieval.weights.lexical,
                 embedding_weight=cfg.retrieval.weights.embedding,
                 expanded_queries=[expansion_terms] if expansion_terms else [],
             )
-
-        is_follow_up = len(session.turns) > 0
 
         # --- Reranking ---
         # On follow-up turns, PHOTON pruning handles chunk selection.  On turn
@@ -442,8 +521,10 @@ class PhotonRAGPipeline:
                 neighborhood_after=cfg.retrieval.neighborhood_expansion.after,
             )
 
-        # --- Evidence pruning (PHOTON-guided, follow-up turns only) ---
-        # Uses the *previous* turn's coarse state (1-pass constraint, design §4).
+        # --- Evidence pruning (PHOTON-guided) and Pass 1 scoring (Issue #56) ---
+        # Uses the *previous* turn's coarse state on Turn 2+ (1-pass constraint,
+        # design §4); Turn 1 optionally scores with a question-derived transient
+        # coarse_vec when two_pass_search.enabled=true (Issue #56, DR1-003).
         inference_cfg = cfg.get("inference")
         pruning_enabled = (
             getattr(inference_cfg, "evidence_pruning_enabled", False)
@@ -456,21 +537,24 @@ class PhotonRAGPipeline:
             else 8
         )
         effective_max_chunks = cfg.evidence_pack.max_chunks
-        if pruning_enabled and is_follow_up:
-            # Fetch chunk texts for scoring
+        do_pass1 = two_pass_enabled and not is_follow_up
+        do_pass2plus = pruning_enabled and is_follow_up
+        if do_pass1 or do_pass2plus:
             chunks_for_scoring = bl.store.get_many(expanded_ids)
             chunk_texts = [c.content for c in chunks_for_scoring]
             chunk_ids_for_scoring = [c.chunk_id for c in chunks_for_scoring]
 
-            selected_indices = self.photon_inference.prune_evidence(
-                chunk_texts=chunk_texts,
-                chunk_ids=chunk_ids_for_scoring,
-                session_id=photon_session_id,
-                max_chunks=pruned_max_chunks,
-            )
-            # Filter expanded_ids to only selected chunks
+            scoring_max_chunks = pass2_top_k if do_pass1 else pruned_max_chunks
+            with prof.phase("pass1_scoring" if do_pass1 else "evidence_pruning"):
+                selected_indices = self.photon_inference.prune_evidence(
+                    chunk_texts=chunk_texts,
+                    chunk_ids=chunk_ids_for_scoring,
+                    session_id=photon_session_id,
+                    max_chunks=scoring_max_chunks,
+                    question=question if do_pass1 else None,
+                )
             expanded_ids = [chunk_ids_for_scoring[i] for i in selected_indices]
-            effective_max_chunks = pruned_max_chunks
+            effective_max_chunks = scoring_max_chunks
 
         # --- Evidence pack ---
         with prof.phase("evidence_pack"):

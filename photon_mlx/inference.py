@@ -246,6 +246,85 @@ class PhotonInference:
 
         return token_ids
 
+    def _encode_chunks_to_vecs(
+        self,
+        chunk_texts: list[str],
+        micro_batch_size: int | None = None,
+    ) -> tuple[list[int], mx.array | None]:
+        """Tokenise → pad → hierarchical_prefill (micro-batched) → masked-mean.
+
+        Returns ``(valid_indices, chunk_vecs)`` where ``chunk_vecs`` is either
+        ``None`` (no chunk produced any tokens) or an ``mx.array`` of shape
+        ``(len(valid_indices), D)``.  Steps ①〜④ of the design-policy data
+        flow are encapsulated here so Pass 1 scoring and Turn 2+ scoring share
+        identical chunk-vectorisation logic (DR1-001).
+
+        The helper is pure with respect to ``self._sessions`` — it reads the
+        tokenizer and model only. ``_TokenizerEncodeFailure`` raised by
+        :meth:`_tokenize_chunk` propagates out so the caller can fail-closed.
+        """
+        # ① Tokenize all chunks once, collect valid_indices and valid_top_steps.
+        valid_indices: list[int] = []
+        all_token_ids: list[list[int]] = []
+        for idx, text in enumerate(chunk_texts):
+            if not text or not text.strip():
+                continue
+            token_ids = self._tokenize_chunk(text)
+            if not token_ids:
+                continue
+            valid_indices.append(idx)
+            all_token_ids.append(token_ids)
+
+        if not valid_indices:
+            return valid_indices, None
+
+        alignment = self._chunk_alignment
+        valid_top_steps = [len(ids) // alignment for ids in all_token_ids]
+
+        # ② Right-pad to the maximum within the micro-batch group. We pad the
+        # whole valid set up to the global max once and slice per micro-batch
+        # below. The padding length is rounded up to ``alignment`` so the
+        # hierarchy reshape never sees a partial chunk.
+        max_batch_len = max(len(ids) for ids in all_token_ids)
+        rem = max_batch_len % alignment
+        if rem != 0:
+            max_batch_len += alignment - rem
+        padded = [
+            ids + [PAD_TOKEN_ID] * (max_batch_len - len(ids)) for ids in all_token_ids
+        ]
+        batch_input = mx.array(padded, dtype=mx.int32)
+
+        # ②' Resolve micro-batch size (DR1-006 fallback responsibility).
+        effective_micro = (
+            micro_batch_size if micro_batch_size is not None else MICRO_BATCH_SIZE
+        )
+
+        # ③+④ Forward each micro-batch through hierarchical_prefill, then
+        # apply masked-mean (path B per pre-check decision) to obtain one
+        # vector per chunk. Concatenate on the GPU; never tolist() between
+        # micro-batches.
+        valid_top_arr = mx.array(valid_top_steps, dtype=mx.int32)
+        n_valid = batch_input.shape[0]
+        chunk_vec_pieces: list[mx.array] = []
+        for start in range(0, n_valid, effective_micro):
+            end = min(start + effective_micro, n_valid)
+            sub_input = batch_input[start:end]
+            sub_steps = valid_top_arr[start:end]
+
+            _, h_state = self.hierarchical_prefill(sub_input)
+            chunk_tops = h_state.level_states[-1].astype(mx.float32)
+            # chunk_tops shape: (sub_B, T_top, D)
+            T_top = chunk_tops.shape[1]
+            pos = mx.arange(T_top, dtype=mx.int32)[None, :]
+            mask = (pos < sub_steps[:, None]).astype(mx.float32)
+            mask_3d = mask[..., None]
+            masked_sum = mx.sum(chunk_tops * mask_3d, axis=1)
+            valid_count = mx.maximum(mx.sum(mask, axis=1, keepdims=True), 1.0)
+            chunk_vec_pieces.append(masked_sum / valid_count)
+
+        chunk_vecs = mx.concatenate(chunk_vec_pieces, axis=0)  # (N_valid, D)
+        return valid_indices, chunk_vecs
+
     def _score_prune_candidates(
         self,
         chunk_texts: list[str],
@@ -284,42 +363,6 @@ class PhotonInference:
             # special-case None.
             return scores
 
-        # ① Tokenize all chunks once, collect valid_indices and valid_top_steps.
-        valid_indices: list[int] = []
-        all_token_ids: list[list[int]] = []
-        for idx, text in enumerate(chunk_texts):
-            if not text or not text.strip():
-                continue
-            token_ids = self._tokenize_chunk(text)
-            if not token_ids:
-                continue
-            valid_indices.append(idx)
-            all_token_ids.append(token_ids)
-
-        if not valid_indices:
-            return scores
-
-        alignment = self._chunk_alignment
-        valid_top_steps = [len(ids) // alignment for ids in all_token_ids]
-
-        # ② Right-pad to the maximum within the micro-batch group. We pad the
-        # whole valid set up to the global max once and slice per micro-batch
-        # below. The padding length is rounded up to ``alignment`` so the
-        # hierarchy reshape never sees a partial chunk.
-        max_batch_len = max(len(ids) for ids in all_token_ids)
-        rem = max_batch_len % alignment
-        if rem != 0:
-            max_batch_len += alignment - rem
-        padded = [
-            ids + [PAD_TOKEN_ID] * (max_batch_len - len(ids)) for ids in all_token_ids
-        ]
-        batch_input = mx.array(padded, dtype=mx.int32)
-
-        # ②' Resolve micro-batch size (DR1-006 fallback responsibility).
-        effective_micro = (
-            micro_batch_size if micro_batch_size is not None else MICRO_BATCH_SIZE
-        )
-
         # Coarse session vector (mean-pool along all leading dims).
         coarse_state = session.current_state.level_states[-1].astype(mx.float32)
         coarse_vec = mx.mean(
@@ -327,33 +370,67 @@ class PhotonInference:
             axis=tuple(range(coarse_state.ndim - 1)),
         )
 
-        # ③+④ Forward each micro-batch through hierarchical_prefill, then
-        # apply masked-mean (path B per pre-check decision) to obtain one
-        # vector per chunk. Concatenate on the GPU; never tolist() between
-        # micro-batches.
-        valid_top_arr = mx.array(valid_top_steps, dtype=mx.int32)
-        n_valid = batch_input.shape[0]
-        chunk_vec_pieces: list[mx.array] = []
-        for start in range(0, n_valid, effective_micro):
-            end = min(start + effective_micro, n_valid)
-            sub_input = batch_input[start:end]
-            sub_steps = valid_top_arr[start:end]
-
-            _, h_state = self.hierarchical_prefill(sub_input)
-            chunk_tops = h_state.level_states[-1].astype(mx.float32)
-            # chunk_tops shape: (sub_B, T_top, D)
-            T_top = chunk_tops.shape[1]
-            pos = mx.arange(T_top, dtype=mx.int32)[None, :]
-            mask = (pos < sub_steps[:, None]).astype(mx.float32)
-            mask_3d = mask[..., None]
-            masked_sum = mx.sum(chunk_tops * mask_3d, axis=1)
-            valid_count = mx.maximum(mx.sum(mask, axis=1, keepdims=True), 1.0)
-            chunk_vec_pieces.append(masked_sum / valid_count)
-
-        chunk_vecs = mx.concatenate(chunk_vec_pieces, axis=0)  # (N_valid, D)
+        # ①〜④ Chunk vectorisation (shared with Pass 1 scoring via helper).
+        valid_indices, chunk_vecs = self._encode_chunks_to_vecs(
+            chunk_texts, micro_batch_size=micro_batch_size
+        )
+        if chunk_vecs is None:
+            return scores
 
         # ⑤ Cosine similarity, single GPU→CPU sync.
         sims = _batch_cosine_similarity(coarse_vec, chunk_vecs)
+        mx.eval(sims)
+        sims_list = sims.tolist()
+
+        for k, idx in enumerate(valid_indices):
+            scores[idx] = (idx, float(sims_list[k]))
+
+        return scores
+
+    def _score_prune_candidates_from_question(
+        self,
+        chunk_texts: list[str],
+        question: str,
+        micro_batch_size: int | None = None,
+    ) -> list[tuple[int, float]]:
+        """Pass 1 scoring (Turn 1): score chunks against a transient
+        question-derived coarse vector.
+
+        Builds a one-off coarse_vec from ``question`` via
+        :meth:`hierarchical_prefill` (no ``session_forward``, so
+        ``self._sessions`` is never mutated — DR1-001) and cosine-scores each
+        chunk against it using the shared :meth:`_encode_chunks_to_vecs`
+        helper.
+
+        Raises :class:`_TokenizerEncodeFailure` if ``question`` or any chunk
+        fails to tokenize (the caller fails closed by returning all indices).
+        """
+        self._validate_micro_batch_size(micro_batch_size)
+
+        n = len(chunk_texts)
+        scores: list[tuple[int, float]] = [(i, -1.0) for i in range(n)]
+        if n == 0:
+            return scores
+
+        # ① Question → one-off coarse vector (no session mutation).
+        question_tokens = self._tokenize_chunk(question)
+        if not question_tokens:
+            return scores
+
+        q_input = mx.array([question_tokens], dtype=mx.int32)
+        _, q_state = self.hierarchical_prefill(q_input)
+        q_top = q_state.level_states[-1].astype(mx.float32)
+        question_coarse_vec = mx.mean(q_top, axis=tuple(range(q_top.ndim - 1)))
+
+        # ②〜④ Chunk vectorisation via shared helper.
+        valid_indices, chunk_vecs = self._encode_chunks_to_vecs(
+            chunk_texts, micro_batch_size=micro_batch_size
+        )
+        if chunk_vecs is None:
+            return scores
+
+        # ⑤ Cosine similarity, single GPU→CPU sync.
+        sims = _batch_cosine_similarity(question_coarse_vec, chunk_vecs)
         mx.eval(sims)
         sims_list = sims.tolist()
 
@@ -369,14 +446,20 @@ class PhotonInference:
         session_id: str,
         max_chunks: int = 8,
         micro_batch_size: int | None = None,
+        *,
+        question: str | None = None,
     ) -> list[int]:
         """Return indices of the most relevant chunks based on PHOTON coarse state.
 
-        For turn 1 (no session state), returns all indices (no pruning).
-        For turn 2+, batches all chunks through the hierarchical encoder,
-        masked-mean-pools the top-level encoder output per chunk, and scores
-        against the session's coarse state via cosine similarity. Returns
-        the top ``max_chunks`` indices in ascending order.
+        Dispatcher (Issue #56, DR1-004):
+        - Turn 2+ (session state exists): score against the session coarse_vec
+          via :meth:`_score_prune_candidates` (pre-existing behaviour).
+        - Turn 1 + ``question`` provided: score against a transient
+          question-derived coarse_vec via
+          :meth:`_score_prune_candidates_from_question` (Pass 1, session is
+          NOT mutated — DR1-001).
+        - Turn 1 + ``question is None`` (or blank): return all indices
+          (pre-Issue-#56 behaviour, DR1-006 backward compatibility).
 
         Args:
             chunk_texts: candidate chunk content (one string per candidate).
@@ -390,6 +473,10 @@ class PhotonInference:
                               (DR1-007): must be ``int >= 1``; ``bool``
                               (``True``/``False``) is rejected because it is
                               technically a Python ``int`` subclass.
+            question:    keyword-only. When provided on Turn 1 (no session
+                         state), enables Pass 1 scoring against a transient
+                         question-derived coarse vector (Issue #56). Default
+                         ``None`` preserves pre-Issue-#56 behaviour.
 
         Returns:
             list of indices into ``chunk_texts`` in ascending order.
@@ -401,29 +488,38 @@ class PhotonInference:
 
         all_indices = list(range(len(chunk_texts)))
 
-        # Early return (a): session/state not yet established (turn 1).
-        session = self._sessions.get(session_id)
-        if (
-            session is None
-            or session.current_state is None
-            or not session.current_state.level_states
-        ):
-            return all_indices
-
-        # Early return (b): already within budget.
+        # Structural early returns (§4.4 / DR1-008).
+        if len(chunk_texts) == 0:
+            return []
         if len(chunk_texts) <= max_chunks:
             return all_indices
 
-        # Scoring core — produces (index, raw_score) for each input chunk.
+        session = self._sessions.get(session_id)
+        has_state = (
+            session is not None
+            and session.current_state is not None
+            and bool(session.current_state.level_states)
+        )
+
         # Fail closed on tokenizer errors (Issue #58 CB-002): if encode raises
         # we cannot rank chunks reliably, so hand every chunk back to the
         # caller instead of returning an arbitrary prefix.
         try:
-            raw_scores = self._score_prune_candidates(
-                chunk_texts,
-                session_id,
-                micro_batch_size=micro_batch_size,
-            )
+            if has_state:
+                raw_scores = self._score_prune_candidates(
+                    chunk_texts,
+                    session_id,
+                    micro_batch_size=micro_batch_size,
+                )
+            elif question is not None and question.strip():
+                raw_scores = self._score_prune_candidates_from_question(
+                    chunk_texts,
+                    question,
+                    micro_batch_size=micro_batch_size,
+                )
+            else:
+                # Turn 1 without a question → preserve pre-Issue-#56 behaviour.
+                return all_indices
         except _TokenizerEncodeFailure:
             return all_indices
 
