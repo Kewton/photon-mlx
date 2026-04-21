@@ -27,6 +27,16 @@ from torch_ref.config import PhotonConfig  # noqa: E402
 _logger = logging.getLogger(__name__)
 
 
+class _TokenizerEncodeFailure(RuntimeError):
+    """Raised when ``self.tokenizer.encode`` fails inside prune scoring.
+
+    Issue #58 CB-002 requires ``prune_evidence`` to fail closed (return every
+    candidate index) when tokenisation is unreliable, so that the caller keeps
+    all evidence instead of silently ranking on a partial input. This sentinel
+    propagates from the scoring core back up to :meth:`prune_evidence`.
+    """
+
+
 # ────────────────────────────────────────────────────────────────────
 # Module-level constants and helpers (Issue #61: batched prune_evidence)
 # ────────────────────────────────────────────────────────────────────
@@ -202,9 +212,11 @@ class PhotonInference:
         3. Cap length at ``cfg.model.max_position_embeddings`` and re-align
            after truncation if necessary.
 
-        Returns an empty list if ``text`` is empty or the tokenizer cannot
-        encode it — callers skip empty lists so the chunk is dropped from
-        the batch rather than silently mis-ranked.
+        Returns an empty list if ``text`` is empty or yields no tokens.
+        Raises :class:`_TokenizerEncodeFailure` (Issue #58 CB-002) if the real
+        tokenizer raises — this propagates to :meth:`prune_evidence`, which
+        fails closed by returning every candidate index instead of silently
+        ranking on a partial input.
         """
         if not text:
             return []
@@ -212,10 +224,11 @@ class PhotonInference:
             token_ids = list(self.tokenizer.encode(text))
         except Exception as exc:
             _logger.warning(
-                "tokenizer.encode failed; skipping chunk (Issue #58 CB-002): %s",
+                "tokenizer.encode failed; disabling pruning (fail-closed, "
+                "Issue #58 CB-002): %s",
                 exc,
             )
-            return []
+            raise _TokenizerEncodeFailure(str(exc)) from exc
         if not token_ids:
             return []
 
@@ -402,11 +415,17 @@ class PhotonInference:
             return all_indices
 
         # Scoring core — produces (index, raw_score) for each input chunk.
-        raw_scores = self._score_prune_candidates(
-            chunk_texts,
-            session_id,
-            micro_batch_size=micro_batch_size,
-        )
+        # Fail closed on tokenizer errors (Issue #58 CB-002): if encode raises
+        # we cannot rank chunks reliably, so hand every chunk back to the
+        # caller instead of returning an arbitrary prefix.
+        try:
+            raw_scores = self._score_prune_candidates(
+                chunk_texts,
+                session_id,
+                micro_batch_size=micro_batch_size,
+            )
+        except _TokenizerEncodeFailure:
+            return all_indices
 
         # Selection: sort by score desc, take top max_chunks, return indices
         # in ascending order.
