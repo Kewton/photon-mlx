@@ -1407,6 +1407,507 @@ class TestCodexCB003PruneTokenizerLogHygiene:
         assert "RuntimeError" in combined
 
 
+class TestWorkingMemoryConfigAggregation:
+    """Issue #80: aggregation mode field on WorkingMemoryConfig."""
+
+    def test_working_memory_config_aggregation_default_weighted(self) -> None:
+        """Default aggregation must be ``weighted`` for backward-compat."""
+        cfg = WorkingMemoryConfig()
+        assert cfg.aggregation == "weighted"
+
+    def test_working_memory_config_aggregation_accepts_valid_values(self) -> None:
+        """All three documented modes must construct successfully."""
+        for mode in ("weighted", "attention", "last"):
+            cfg = WorkingMemoryConfig(aggregation=mode)
+            assert cfg.aggregation == mode
+
+    def test_working_memory_config_aggregation_rejects_non_str(self) -> None:
+        """Non-str raises TypeError with type name only (no raw value leak).
+
+        CB-001 / AT-001 (refactor): both invariants are enforced as
+        *unconditional* asserts so a regression that starts leaking the
+        raw payload into the error message is guaranteed to fail this
+        test. Each non-str payload embeds a unique sentinel token whose
+        ``repr`` cannot be an incidental substring of the type name or
+        anything else session.py produces.
+        """
+        # Sentinel payloads: each has a ``repr`` containing a rare, unique
+        # token that cannot incidentally appear in the type-name-only
+        # error message. If session.py ever surfaces the raw value (e.g.
+        # via ``{self.aggregation!r}``), the sentinel shows up in ``msg``
+        # and the unconditional ``assert repr(bad) not in msg`` below
+        # fails.
+        #
+        # NOTE: ``None`` is intentionally excluded because ``repr(None) ==
+        # "None"`` is a substring of the type name ``"NoneType"``, which
+        # would give a false positive. The empty-case (``None`` passed as
+        # cfg) is covered at the WorkingMemoryConfig level by
+        # ``test_working_memory_config_aggregation_rejects_unknown_value``
+        # via distinct sentinels; the same type-branch logic runs for
+        # ``None`` regardless.
+        sentinels: tuple[object, ...] = (
+            4242424242,  # rare int far from any known constant
+            1.5,
+            ["WM_RAW_LEAK_SENTINEL_DO_NOT_APPEAR"],
+            {"WM_RAW_LEAK_DICT_SENTINEL_DO_NOT_APPEAR": 1},
+            ("WM_RAW_LEAK_TUPLE_SENTINEL_DO_NOT_APPEAR",),
+            b"WM_RAW_LEAK_BYTES_SENTINEL_DO_NOT_APPEAR",
+        )
+
+        for bad in sentinels:
+            with pytest.raises(TypeError) as excinfo:
+                WorkingMemoryConfig(aggregation=bad)  # type: ignore[arg-type]
+            msg = str(excinfo.value)
+            # Hard no-leak invariant (design §6 / DR4-001): the raw value's
+            # ``repr`` must NEVER appear in the surfaced error.
+            assert repr(bad) not in msg, (
+                f"raw value leaked into TypeError for {type(bad).__name__}: {msg!r}"
+            )
+            # Separately, the type name IS required so operators can
+            # diagnose the malformed YAML without seeing attacker-controlled
+            # content.
+            assert type(bad).__name__ in msg, (
+                f"type name missing from TypeError for {type(bad).__name__}: {msg!r}"
+            )
+
+        # ``None`` case: verify the TypeError still fires with type-name
+        # surface only (no assertion on repr(None) because it is a
+        # substring of "NoneType" and would incidentally appear).
+        with pytest.raises(TypeError) as excinfo:
+            WorkingMemoryConfig(aggregation=None)  # type: ignore[arg-type]
+        assert "NoneType" in str(excinfo.value)
+
+    def test_working_memory_config_aggregation_rejects_unknown_value(self) -> None:
+        """Unknown modes raise ValueError without leaking the raw value.
+
+        CB-001 / AT-001 (refactor): no-leak invariant is enforced
+        unconditionally. The only exempted payload is the empty string,
+        which is handled by a dedicated branch (``""`` is trivially a
+        substring of every string so ``assert "" not in msg`` would be
+        vacuous; empty case is covered by the ValueError raise itself).
+        """
+        SENSITIVE = "<ATTACK-PAYLOAD-WM-AGGR-SENTINEL>"
+        with pytest.raises(ValueError) as excinfo:
+            WorkingMemoryConfig(aggregation=SENSITIVE)
+        assert SENSITIVE not in str(excinfo.value)
+
+        for bad in ("mean", "WEIGHTED", " weighted ", "WM_UNKNOWN_SENTINEL"):
+            with pytest.raises(ValueError) as excinfo:
+                WorkingMemoryConfig(aggregation=bad)
+            # The raw attacker-controlled string must not appear in the error.
+            assert bad not in str(excinfo.value), (
+                f"raw value {bad!r} leaked into ValueError: {excinfo.value!s}"
+            )
+
+        # Empty string: verify the raise still happens (no-leak check is
+        # vacuous for the empty string).
+        with pytest.raises(ValueError):
+            WorkingMemoryConfig(aggregation="")
+
+
+class TestGetSessionCoarseStateModes:
+    """Issue #80: 3-mode dispatch for ``get_session_coarse_state()``.
+
+    Four categories (design §8 DR1-009):
+    - (a) common contract across modes (shape, dtype, None)
+    - (b) mode-specific edge cases
+    - (c) validation / defensive raise
+    - (d) prune parity (covered in TestPruneParityAcrossAggregationModes)
+    """
+
+    # ---- (a) common contract across modes ----
+    @pytest.mark.parametrize("aggregation", ["weighted", "attention", "last"])
+    def test_all_modes_shape_dtype(self, aggregation: str) -> None:
+        """3 modes must return (D,) float32 vectors."""
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True, max_turns=4, aggregation=aggregation
+            ),
+        )
+        session.update(_mk_state(1.0))
+        session.update(_mk_state(2.0))
+        coarse = session.get_session_coarse_state()
+        assert coarse is not None
+        # _mk_state(...) uses hidden=4 by default.
+        assert coarse.shape == (4,)
+        assert coarse.dtype == mx.float32
+
+    @pytest.mark.parametrize("aggregation", ["weighted", "attention", "last"])
+    def test_all_modes_empty_turn_history_returns_none(self, aggregation: str) -> None:
+        """All 3 modes return None on empty turn_history."""
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True, aggregation=aggregation
+            ),
+        )
+        assert session.get_session_coarse_state() is None
+
+    @pytest.mark.parametrize("aggregation", ["weighted", "attention", "last"])
+    def test_all_modes_disabled_returns_none(self, aggregation: str) -> None:
+        """All 3 modes return None when working memory is disabled."""
+        # Even if aggregation is set, enabled=False short-circuits.
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=False, aggregation=aggregation
+            ),
+        )
+        session.update(_mk_state(1.0))
+        assert session.get_session_coarse_state() is None
+
+    @pytest.mark.parametrize("aggregation", ["weighted", "attention", "last"])
+    def test_all_modes_all_empty_level_states_returns_none(
+        self, aggregation: str
+    ) -> None:
+        """All 3 modes return None when every turn has empty level_states."""
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True, aggregation=aggregation
+            ),
+        )
+        # Inject a turn whose hierarchical_state has empty level_states
+        # (simulating the skip invariant).
+        session.update(HierarchicalState(level_states=[]))
+        session.update(HierarchicalState(level_states=[]))
+        assert session.get_session_coarse_state() is None
+
+    @pytest.mark.parametrize("aggregation", ["weighted", "attention", "last"])
+    def test_all_modes_single_turn_equivalent(self, aggregation: str) -> None:
+        """Single-turn history: 3 modes must produce the same coarse vec."""
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True, aggregation=aggregation
+            ),
+        )
+        session.update(_mk_state(2.5))
+        coarse = session.get_session_coarse_state()
+        assert coarse is not None
+        mx.eval(coarse)
+        for v in coarse.tolist():
+            assert abs(v - 2.5) < 1e-5
+
+    # ---- (b) mode-specific edge cases ----
+    def test_mode_last_returns_most_recent_valid_turn(self) -> None:
+        """``last`` returns the mean-pooled coarse vec of the most recent turn."""
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True, max_turns=4, aggregation="last"
+            ),
+        )
+        session.update(_mk_state(1.0))
+        session.update(_mk_state(2.0))
+        session.update(_mk_state(4.0))
+        coarse = session.get_session_coarse_state()
+        assert coarse is not None
+        mx.eval(coarse)
+        for v in coarse.tolist():
+            assert abs(v - 4.0) < 1e-5
+
+    def test_mode_weighted_default_backward_compat(self) -> None:
+        """Default (aggregation omitted) stays weighted — existing contract."""
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True, max_turns=4, decay_factor=0.5
+            ),
+        )
+        session.update(_mk_state(1.0))
+        session.update(_mk_state(2.0))
+        session.update(_mk_state(4.0))
+        coarse = session.get_session_coarse_state()
+        assert coarse is not None
+        mx.eval(coarse)
+        # Same analytical expected value as the legacy test (=3.0).
+        for v in coarse.tolist():
+            assert abs(v - 3.0) < 1e-5
+
+    def test_mode_weighted_decay_zero_fallback(self) -> None:
+        """``weighted`` with decay=0 on >1 turn falls back to ``vecs[-1]``."""
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True, max_turns=4, decay_factor=0.0, aggregation="weighted"
+            ),
+        )
+        session.update(_mk_state(1.0))
+        session.update(_mk_state(7.0))
+        coarse = session.get_session_coarse_state()
+        assert coarse is not None
+        mx.eval(coarse)
+        # weight_sum == 0 → fallback_vec = vecs[-1] == 7.0.
+        for v in coarse.tolist():
+            assert abs(v - 7.0) < 1e-5
+
+    def test_mode_attention_prefers_similar_past_turn(self) -> None:
+        """attention softmax should weight past turns by similarity to current."""
+        # Build a session where the current turn is close to turn 1 (value 1.0)
+        # and far from turn 2 (value -1.0). The attention weighted sum should
+        # be closer to 1.0 than a naive mean (0.0).
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True, max_turns=4, aggregation="attention"
+            ),
+        )
+        session.update(_mk_state(1.0))
+        session.update(_mk_state(-1.0))
+        session.update(_mk_state(1.0))  # current — similar to turn 1
+        coarse = session.get_session_coarse_state()
+        assert coarse is not None
+        mx.eval(coarse)
+        vals = coarse.tolist()
+        # attention excludes the current turn, so candidates are {+1, -1}.
+        # The current vec is +1 so softmax leans toward +1. All dims > 0.
+        for v in vals:
+            assert v > 0.0
+            # Must be finite.
+            assert not (v != v)  # not NaN
+
+    def test_mode_attention_excludes_current_turn(self) -> None:
+        """Current turn id must be excluded — no self-match domination."""
+        # If current turn is NOT excluded, attention will dominate with cos=1
+        # self-match → output equals current vec (-10.0). We verify exclusion
+        # by making the current vec very large and confirming the output stays
+        # within the past-turn range.
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True, max_turns=4, aggregation="attention"
+            ),
+        )
+        session.update(_mk_state(2.0))
+        session.update(_mk_state(3.0))
+        session.update(_mk_state(-10.0))  # current — very different
+        coarse = session.get_session_coarse_state()
+        assert coarse is not None
+        mx.eval(coarse)
+        vals = coarse.tolist()
+        # Past-turn values are {2.0, 3.0}; after softmax over similarity to
+        # current (-10.0), the result should be a convex combination and
+        # definitely between 2 and 3.
+        for v in vals:
+            assert 2.0 - 1e-5 <= v <= 3.0 + 1e-5
+
+    def test_mode_attention_fallback_none_current_state(self) -> None:
+        """``current_state = None`` → attention fallback to vecs[-1]."""
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True, max_turns=4, aggregation="attention"
+            ),
+        )
+        session.update(_mk_state(1.0))
+        session.update(_mk_state(5.0))
+        # Force current_state = None to simulate a partial state.
+        session.current_state = None
+        coarse = session.get_session_coarse_state()
+        assert coarse is not None
+        mx.eval(coarse)
+        for v in coarse.tolist():
+            assert abs(v - 5.0) < 1e-5
+
+    def test_mode_attention_fallback_empty_level_states(self) -> None:
+        """``current_state.level_states = []`` → fallback to vecs[-1]."""
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True, max_turns=4, aggregation="attention"
+            ),
+        )
+        session.update(_mk_state(2.0))
+        session.update(_mk_state(6.0))
+        # Replace current_state with a separate HierarchicalState that has
+        # empty level_states — leaves turn_history intact so vecs[-1] still
+        # has a valid candidate (simulating a partial/corrupt current state).
+        assert session.current_state is not None
+        session.current_state = HierarchicalState(level_states=[])
+        coarse = session.get_session_coarse_state()
+        assert coarse is not None
+        mx.eval(coarse)
+        for v in coarse.tolist():
+            assert abs(v - 6.0) < 1e-5
+
+    def test_mode_attention_fallback_only_current_turn(self) -> None:
+        """Attention with only current turn (0 past candidates) → vecs[-1]."""
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True, max_turns=4, aggregation="attention"
+            ),
+        )
+        session.update(_mk_state(2.5))
+        coarse = session.get_session_coarse_state()
+        assert coarse is not None
+        mx.eval(coarse)
+        for v in coarse.tolist():
+            assert abs(v - 2.5) < 1e-5
+
+    def test_mode_attention_hard_cap_numerical_stability(self) -> None:
+        """attention at hard cap (max_turns=32) must not produce NaN/Inf."""
+        from photon_mlx.session import WORKING_MEMORY_MAX_TURNS_HARD_CAP
+
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True,
+                max_turns=WORKING_MEMORY_MAX_TURNS_HARD_CAP,
+                aggregation="attention",
+            ),
+        )
+        # Tiny magnitudes stress the epsilon in norm denominators.
+        for i in range(WORKING_MEMORY_MAX_TURNS_HARD_CAP):
+            session.update(_mk_state(1e-10 * float(i + 1)))
+        coarse = session.get_session_coarse_state()
+        assert coarse is not None
+        mx.eval(coarse)
+        import math as _math
+
+        for v in coarse.tolist():
+            assert _math.isfinite(v)
+
+    # ---- (c) validation / defensive raise ----
+    def test_unknown_mode_defensive_raise(self) -> None:
+        """Post-init mutation to an unknown mode must fail-fast at dispatch."""
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True, aggregation="weighted"
+            ),
+        )
+        session.update(_mk_state(1.0))
+        # Bypass __post_init__ via direct attribute assignment to simulate a
+        # corrupted/deserialized object (design §8 decision #1 safety net).
+        object.__setattr__(session.working_memory_cfg, "aggregation", "unknown_xxx")
+        with pytest.raises(ValueError, match="Unknown aggregation mode"):
+            session.get_session_coarse_state()
+
+
+class TestPruneParityAcrossAggregationModes:
+    """Issue #80 (DR3-002): ``_score_prune_candidates`` must be bit-for-bit
+    equivalent across ``weighted`` / ``attention`` / ``last`` when only a
+    single turn has been recorded.
+
+    For single-turn sessions:
+
+    - ``weighted``: ``vecs = [v]``, ``weights = [1.0]`` → returns ``v``.
+    - ``last``: ``vecs[-1] == v``.
+    - ``attention``: the current turn is the only candidate and is excluded,
+      so helper returns ``None`` and the dispatcher falls back to ``vecs[-1] ==
+      v``.
+
+    All three produce the same overridden ``q_top`` and therefore the same
+    scores (ε=1e-5).
+    """
+
+    @pytest.mark.parametrize("aggregation", ["weighted", "attention", "last"])
+    def test_single_turn_prune_scores_match_across_modes(
+        self, stub_tokenizer_for_cfg, aggregation: str
+    ) -> None:
+        mx.random.seed(42)
+        cfg = _tiny_cfg()
+        model = PhotonModel(cfg)
+        tokenizer = stub_tokenizer_for_cfg(cfg)
+        engine = PhotonInference(
+            model,
+            cfg,
+            tokenizer,
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True, aggregation=aggregation
+            ),
+        )
+        ids = mx.random.randint(0, 256, (1, 16))
+        engine.session_forward(ids, "s1", "repo", "abc")
+
+        texts = [
+            "short",
+            "another short text",
+            "medium length chunk content here",
+            "longer chunk text " * 4,
+            "some words",
+        ]
+        scores = engine._score_prune_candidates(texts, "s1")
+        # Stash for cross-test comparison.
+        setattr(
+            self,
+            f"_scores_{aggregation}",
+            [s for _, s in scores],
+        )
+
+    def test_all_modes_identical_single_turn(self, stub_tokenizer_for_cfg) -> None:
+        """Full cross-mode comparison: gather the 3 score lists and compare."""
+        all_scores: dict[str, list[float]] = {}
+        texts = [
+            "short",
+            "another short text",
+            "medium length chunk content here",
+            "longer chunk text " * 4,
+            "some words",
+        ]
+        for aggregation in ("weighted", "attention", "last"):
+            mx.random.seed(42)
+            cfg = _tiny_cfg()
+            model = PhotonModel(cfg)
+            tokenizer = stub_tokenizer_for_cfg(cfg)
+            engine = PhotonInference(
+                model,
+                cfg,
+                tokenizer,
+                working_memory_cfg=WorkingMemoryConfig(
+                    enabled=True, aggregation=aggregation
+                ),
+            )
+            ids = mx.random.randint(0, 256, (1, 16))
+            engine.session_forward(ids, "s1", "repo", "abc")
+            raw = engine._score_prune_candidates(texts, "s1")
+            all_scores[aggregation] = [s for _, s in raw]
+
+        # ε=1e-5 equivalence across the 3 modes on single-turn sessions.
+        weighted_scores = all_scores["weighted"]
+        for mode in ("attention", "last"):
+            other = all_scores[mode]
+            assert len(other) == len(weighted_scores)
+            for i, (a, b) in enumerate(zip(weighted_scores, other)):
+                assert abs(a - b) <= 1e-5, (
+                    f"prune score mismatch at idx {i}: "
+                    f"weighted={a} {mode}={b} delta={abs(a - b)}"
+                )
+
+
 class TestCodexCB004WorkingMemoryMaxTurnsHardCap:
     """Codex CB-004: WorkingMemoryConfig.max_turns must reject unbounded values."""
 

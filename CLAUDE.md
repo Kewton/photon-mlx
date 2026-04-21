@@ -142,7 +142,7 @@ reports/                # ベンチマークレポート
 
 | チェック項目 | コマンド | 基準 |
 |-------------|----------|------|
-| テスト | `python -m pytest torch_ref/tests/ photon_mlx/tests/ baseline_reporag/tests/ tests/ -v` | 全テストパス (約 377/379、残り 2 件は `tests/test_generate_training_corpus.py` の既知の pre-existing failure) |
+| テスト | `python -m pytest torch_ref/tests/ photon_mlx/tests/ baseline_reporag/tests/ tests/ -v` | 全テストパス (約 507/509、残り 2 件は `tests/test_generate_training_corpus.py` の既知の pre-existing failure) |
 | リント | `ruff check .` | 警告0件 |
 | フォーマット | `ruff format --check .` | 差分なし |
 | Baseline疎通 | `python -m baseline_reporag.cli --config configs/baseline.yaml --repo-id fastapi_fastapi --question "test"` | 応答あり |
