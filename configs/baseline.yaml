@@ -137,11 +137,20 @@ retrieval:
     enabled: true
     before: 1
     after: 1
+    adaptive: false                  # Issue #91: chunk-kind-aware neighborhood
+    by_kind:
+      class: [2, 2]
+      function: [1, 1]
+      module: [0, 0]
 
   graph_expansion:
     enabled: true
     max_hops: 1
     max_nodes: 24
+    edge_weights:                    # Issue #91: edge-kind priorities (call/inherit/import)
+      call: 1.0
+      inherit: 0.8
+      import: 0.5
 
   file_type_boost: 0.0             # disabled: v6 eval showed +2.5pp regression at 0.15
 
