@@ -53,9 +53,9 @@ indexing:
   embedding:
     enabled: true
     provider: "local"
-    model_id: "BAAI/bge-small-en-v1.5"
+    model_id: "sentence-transformers/all-MiniLM-L6-v2"
     batch_size: 64
-    normalize: true  # NOTE: currently not consumed by code (hardcoded True in baseline_reporag/indexing/embedding.py)
+    normalize: true
 
   symbol_graph:
     enabled: true

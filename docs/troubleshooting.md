@@ -18,7 +18,7 @@ To verify models are cached:
 ```bash
 ls ~/.cache/huggingface/hub/models--mlx-community--Qwen2.5-Coder-14B-Instruct-4bit/
 ls ~/.cache/huggingface/hub/models--BAAI--bge-reranker-base/
-ls ~/.cache/huggingface/hub/models--BAAI--bge-small-en-v1.5/
+ls ~/.cache/huggingface/hub/models--sentence-transformers--all-MiniLM-L6-v2/
 ```
 
 ---
@@ -36,26 +36,6 @@ python scripts/build_symbol_graph.py --config configs/baseline.yaml
 ```
 
 Then restart the server.
-
----
-
-## Embedding Index Model Mismatch (ValueError)
-
-**Symptom**: Pipeline startup raises `ValueError: Embedding index at .../embedding was built with '<old>' but config specifies '<new>'. Rebuild with: ...`
-
-**Cause**: Introduced in Issue #90 (bge-small-en-v1.5 migration). `EmbeddingIndex.load()` now verifies that the persisted `model_id.txt` matches the `indexing.embedding.model_id` in your active config. A mismatch means the on-disk embedding vectors were produced by a different model and must not be reused silently.
-
-**Solution**: Rebuild the embedding index for each affected repo:
-
-```bash
-# 1. Remove the stale index(es)
-rm -rf data/indexes/*/embedding/
-
-# 2. Rebuild with the current config's model
-python scripts/build_indexes.py --repo-id <repo>  # e.g. fastapi_fastapi
-```
-
-First-time rebuild will download the new model (~130 MB for `BAAI/bge-small-en-v1.5`).
 
 ---
 

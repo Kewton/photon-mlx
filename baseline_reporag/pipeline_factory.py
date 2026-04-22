@@ -109,10 +109,7 @@ def _build_baseline_deps_no_mlx(cfg: Config) -> dict:
     idx_dir = Path(cfg.paths.data_root) / "indexes" / cfg.repo.repo_id
     store = ChunkStore(idx_dir / "chunks.db")
     lexical = LexicalIndex.load(idx_dir / "lexical.pkl")
-    embedding = EmbeddingIndex.load(
-        idx_dir / "embedding",
-        expected_model_id=cfg.indexing.embedding.model_id,
-    )
+    embedding = EmbeddingIndex.load(idx_dir / "embedding")
     graph = SymbolGraph.load(idx_dir / "symbol_graph.json")
     sessions = SessionManager(log_dir=Path(cfg.paths.log_root) / "sessions")
     generator = Generator(

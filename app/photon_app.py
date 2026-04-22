@@ -715,7 +715,6 @@ def page_index():
         "multilingual-e5-small (多言語対応)": "intfloat/multilingual-e5-small",
         "multilingual-e5-base (多言語・高精度)": "intfloat/multilingual-e5-base",
         "all-MiniLM-L12-v2 (英語・高精度)": "sentence-transformers/all-MiniLM-L12-v2",
-        "bge-small-en-v1.5 (英語・code-aware)": "BAAI/bge-small-en-v1.5",
     }
     embedding_label = st.selectbox(
         "Embedding モデル",
@@ -1032,10 +1031,7 @@ def _run_query(proj: Project, question: str, session_key: str) -> tuple[str, dic
                 config=cfg,
                 store=ChunkStore(idx_dir / "chunks.db"),
                 lexical=LexicalIndex.load(idx_dir / "lexical.pkl"),
-                embedding=EmbeddingIndex.load(
-                    idx_dir / "embedding",
-                    expected_model_id=cfg.indexing.embedding.model_id,
-                ),
+                embedding=EmbeddingIndex.load(idx_dir / "embedding"),
                 graph=SymbolGraph.load(idx_dir / "symbol_graph.json"),
                 sessions=SessionManager(log_dir=Path(cfg.paths.log_root) / "sessions"),
                 generator=Generator(
