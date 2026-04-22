@@ -125,9 +125,11 @@ session_memory:
     decay_factor: 0.5
     relevant_turn_threshold: 0.7
     storage_mode: "top_level_only"
-    # Issue #80: session coarse state aggregation mode.
-    # One of {"weighted", "attention", "last"}. Default "weighted" keeps
-    # the pre-#80 decayed-mean behaviour.
+    # Issue #80 / #92: session coarse state aggregation mode.
+    # One of {"weighted", "attention", "last", "dynamic"}. Default
+    # "weighted" keeps the pre-#80 decayed-mean behaviour. "dynamic"
+    # (Issue #92) selects weighted/attention/hybrid at call time via
+    # ``dynamic_strategy`` ∈ {"turn_position","drift_based","hybrid"}.
     aggregation: weighted
 
 tokenizer:
