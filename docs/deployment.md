@@ -10,7 +10,9 @@
 | **Storage** | ~10 GB (model + indexes) | 20 GB+ |
 
 > The Qwen2.5-Coder-14B-Instruct-4bit model loads approximately 8 GB into memory.
-> Sentence-transformers embedding model and cross-encoder reranker require additional ~1 GB.
+> Sentence-transformers embedding model (~100 MB) and the multilingual
+> `BAAI/bge-reranker-base` cross-encoder reranker (~550 MB) require additional
+> ~1.5 GB of disk cache and a few hundred MB of resident memory at runtime.
 
 ---
 
@@ -78,7 +80,7 @@ The main configuration file is `configs/baseline.yaml`.
 | Section | Parameter | Default | Description |
 |---------|-----------|---------|-------------|
 | `model.model_id` | LLM model | `mlx-community/Qwen2.5-Coder-14B-Instruct-4bit` | Auto-downloaded on first run |
-| `retrieval.reranker.model_id` | Reranker | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Auto-downloaded on first run |
+| `retrieval.reranker.model_id` | Reranker | `BAAI/bge-reranker-base` | Auto-downloaded on first run (~550 MB) |
 | `retrieval.weights` | Fusion weights | lexical: 0.45, embedding: 0.45, graph: 0.10 | Hybrid retrieval blending |
 | `retrieval.rerank_top_k` | Rerank cutoff | 12 | Number of chunks after reranking |
 | `evidence_pack.max_chunks` | Max evidence chunks | 16 | Reduce to save memory |

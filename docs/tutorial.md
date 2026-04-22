@@ -21,7 +21,7 @@ cd /path/to/photon-mlx
 pip install -r requirements.txt
 ```
 
-初回のみ。Qwen 14B モデル (~8 GB) と cross-encoder (~100 MB) は初回実行時に自動 DL されます。
+初回のみ。Qwen 14B モデル (~8 GB) と cross-encoder reranker `BAAI/bge-reranker-base` (~550 MB) は初回実行時に自動 DL されます。
 
 ---
 

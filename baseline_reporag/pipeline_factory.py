@@ -124,9 +124,7 @@ def _build_baseline_deps_no_mlx(cfg: Config) -> dict:
     reranker_cfg = cfg.retrieval.reranker
     reranker = (
         CrossEncoderReranker(
-            model_id=reranker_cfg.get(
-                "model_id", "cross-encoder/ms-marco-MiniLM-L-6-v2"
-            )
+            model_id=reranker_cfg.get("model_id", "BAAI/bge-reranker-base")
         )
         if reranker_cfg.get("enabled", False)
         else None
