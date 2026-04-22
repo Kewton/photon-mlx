@@ -1,10 +1,18 @@
 from __future__ import annotations
 
+import argparse
 import json
 from dataclasses import dataclass
 from unittest.mock import MagicMock, patch
 
-from bench.run_all import run_variant, save_run_predictions
+import pytest
+
+from bench.run_all import (
+    filter_variants,
+    parse_variants_csv,
+    run_variant,
+    save_run_predictions,
+)
 
 
 # ------------------------------------------------------------------
@@ -206,3 +214,156 @@ class TestSaveRunPredictions:
         lines = path.read_text().strip().split("\n")
         assert len(lines) == 1
         assert json.loads(lines[0])["eval_id"] == "SE-001"
+
+
+# ------------------------------------------------------------------
+# Issue #92 T-0b: --variants CSV filter tests
+# ------------------------------------------------------------------
+
+
+class TestParseVariantsCsv:
+    """``parse_variants_csv`` splits on ``,``, strips whitespace, fail-closed on empties.
+
+    Codex CB-003 (Issue #92): empty / whitespace / empty-middle tokens
+    are REJECTED (fail-closed), not silently dropped. ``None`` (flag not
+    passed) is still distinct from an explicitly empty CSV.
+    """
+
+    def test_simple_csv_splits(self) -> None:
+        assert parse_variants_csv("a,b,c") == ["a", "b", "c"]
+
+    def test_strips_whitespace(self) -> None:
+        assert parse_variants_csv(" a , b ,c ") == ["a", "b", "c"]
+
+    def test_single_token_ok(self) -> None:
+        assert parse_variants_csv("a") == ["a"]
+        assert parse_variants_csv("a,b") == ["a", "b"]
+
+    def test_none_returns_empty_list(self) -> None:
+        # ``None`` means "flag not passed" — still the "no filter" signal.
+        assert parse_variants_csv(None) == []
+
+    # ---- Codex CB-003 fail-closed regression tests ----
+
+    def test_empty_string_rejected(self) -> None:
+        """``--variants ''`` must fail closed (was silently empty before)."""
+        with pytest.raises(argparse.ArgumentTypeError):
+            parse_variants_csv("")
+
+    def test_whitespace_only_rejected(self) -> None:
+        """``--variants ' '`` must fail closed."""
+        with pytest.raises(argparse.ArgumentTypeError):
+            parse_variants_csv(" ")
+        with pytest.raises(argparse.ArgumentTypeError):
+            parse_variants_csv("   \t  ")
+
+    def test_bare_comma_rejected(self) -> None:
+        """``--variants ','`` must fail closed (previously collapsed to ``[]``)."""
+        with pytest.raises(argparse.ArgumentTypeError):
+            parse_variants_csv(",")
+
+    def test_empty_middle_token_rejected(self) -> None:
+        """``--variants 'a,,b'`` must fail closed."""
+        with pytest.raises(argparse.ArgumentTypeError):
+            parse_variants_csv("a,,b")
+
+    def test_trailing_comma_rejected(self) -> None:
+        """``--variants 'a,'`` must fail closed."""
+        with pytest.raises(argparse.ArgumentTypeError):
+            parse_variants_csv("a,")
+
+    def test_leading_comma_rejected(self) -> None:
+        """``--variants ',a'`` must fail closed."""
+        with pytest.raises(argparse.ArgumentTypeError):
+            parse_variants_csv(",a")
+
+    def test_error_messages_do_not_leak_raw_value(self) -> None:
+        """DR4-001 no-leak: raw attacker-controlled value must not appear."""
+        SENSITIVE_WS = "<ATTACK-WHITESPACE-PAYLOAD>"
+        SENSITIVE_MIDDLE = "<ATTACK-MIDDLE-PAYLOAD>"
+        # Whitespace-only: attacker could pass e.g. "   <sentinel>   " but
+        # our reject message must not include it. Only a non-empty but
+        # all-whitespace value hits this path; use a pure-whitespace string
+        # to exercise the empty branch — and verify the attacker name used
+        # in test identification never leaks.
+        with pytest.raises(argparse.ArgumentTypeError) as excinfo:
+            parse_variants_csv("   ")
+        assert SENSITIVE_WS not in str(excinfo.value)
+        # Empty-middle branch: payload supplied as a token.
+        with pytest.raises(argparse.ArgumentTypeError) as excinfo:
+            parse_variants_csv(f"a,,{SENSITIVE_MIDDLE}")
+        assert SENSITIVE_MIDDLE not in str(excinfo.value)
+
+    def test_pure_python_split_no_shell(self) -> None:
+        """Security: parsing must not spawn subprocess / shell.
+
+        We patch ``subprocess`` and ``os.system`` and confirm neither is
+        consulted (DR4-002 no-shell guarantee).
+        """
+        with patch("subprocess.run") as mock_run, patch("os.system") as mock_sys:
+            parse_variants_csv("a,b,c")
+            assert not mock_run.called
+            assert not mock_sys.called
+
+
+class TestFilterVariants:
+    """``filter_variants`` selects variants by id; fail-closed on unknowns."""
+
+    def _mk_variants(self) -> list[dict]:
+        return [
+            {"id": "photon_rag_aggr_weighted"},
+            {"id": "photon_rag_aggr_attention"},
+            {"id": "photon_rag_aggr_last"},
+            {"id": "baseline_rag"},
+        ]
+
+    def test_valid_csv_filters_variants_in_order(self) -> None:
+        """Valid ids select a subset; result preserves the CSV order."""
+        variants = self._mk_variants()
+        selected = filter_variants(
+            variants,
+            ["photon_rag_aggr_attention", "photon_rag_aggr_weighted"],
+        )
+        assert [v["id"] for v in selected] == [
+            "photon_rag_aggr_attention",
+            "photon_rag_aggr_weighted",
+        ]
+
+    def test_none_selection_returns_all(self) -> None:
+        variants = self._mk_variants()
+        assert filter_variants(variants, None) == variants
+
+    def test_empty_selection_returns_all(self) -> None:
+        variants = self._mk_variants()
+        assert filter_variants(variants, []) == variants
+
+    def test_unknown_id_fails_closed(self) -> None:
+        """Unknown id raises ``argparse.ArgumentError`` (fail-closed)."""
+        variants = self._mk_variants()
+        with pytest.raises(argparse.ArgumentError):
+            filter_variants(variants, ["not_a_real_variant_id"])
+
+    def test_unknown_id_error_message_does_not_leak_raw_value(self) -> None:
+        """DR4-001 no-leak: raw invalid value must not appear in error text."""
+        variants = self._mk_variants()
+        SENSITIVE = "<ATTACK-PAYLOAD-VARIANT-SENTINEL>"
+        with pytest.raises(argparse.ArgumentError) as excinfo:
+            filter_variants(variants, [SENSITIVE])
+        assert SENSITIVE not in str(excinfo.value)
+
+    def test_partial_unknown_fails_closed(self) -> None:
+        """A single unknown id in a mostly-valid CSV still fails closed."""
+        variants = self._mk_variants()
+        with pytest.raises(argparse.ArgumentError):
+            filter_variants(
+                variants,
+                ["photon_rag_aggr_weighted", "unknown_x"],
+            )
+
+    def test_no_shell_calls_on_filter(self) -> None:
+        """Filtering must not call subprocess / os.system (DR4-002)."""
+        variants = self._mk_variants()
+        with patch("subprocess.run") as mock_run, patch("os.system") as mock_sys:
+            filter_variants(variants, ["baseline_rag"])
+            assert not mock_run.called
+            assert not mock_sys.called

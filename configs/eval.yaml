@@ -81,11 +81,17 @@ variants:
         photon_generation_enabled: true
         generation_fallback_policy: "qwen"
 
-  # Issue #80 — aggregation mode comparison variants (3 modes).
-  # Run with:
+  # Issue #80 — static aggregation mode comparison variants (3 modes).
+  # Issue #92 — dynamic aggregation variants added below (3 strategies).
+  # Run the full A/B/C with:
   #   python -m bench.run_all --config configs/eval.yaml \
-  #     --variants photon_rag_aggr_weighted,photon_rag_aggr_attention,photon_rag_aggr_last
-  # Each variant only toggles ``aggregation`` so results are A/B/C comparable.
+  #     --variants photon_rag_aggr_weighted,photon_rag_aggr_attention,photon_rag_aggr_last,\
+  #                photon_rag_aggr_dynamic_turn,photon_rag_aggr_dynamic_drift,photon_rag_aggr_dynamic_hybrid
+  # Re-run the dynamic 3 only with:
+  #   python -m bench.run_all --config configs/eval.yaml \
+  #     --variants photon_rag_aggr_dynamic_turn,photon_rag_aggr_dynamic_drift,photon_rag_aggr_dynamic_hybrid
+  # Each variant only toggles ``aggregation`` (and ``dynamic_strategy``) so
+  # results are A/B/C comparable.
   - id: "photon_rag_aggr_weighted"
     label: "PHOTON-RAG+Aggr(weighted)"
     kind: "photon"
@@ -127,6 +133,63 @@ variants:
         working_memory:
           enabled: true
           aggregation: last
+
+  # Issue #92 — dynamic aggregation: ターン位置ベース。
+  # weighted_until_turn までは weighted、それ以降は attention。
+  - id: "photon_rag_aggr_dynamic_turn"
+    label: "PHOTON-RAG+Aggr(dynamic,turn_position)"
+    kind: "photon"
+    config_path: "./configs/photon_small.yaml"
+    override:
+      inference:
+        safe_recgen_enabled: false
+      safe_recgen:
+        enabled: false
+      session_memory:
+        working_memory:
+          enabled: true
+          aggregation: dynamic
+          dynamic_strategy: turn_position
+          weighted_until_turn: 3
+
+  # Issue #92 — dynamic aggregation: drift ベース。
+  # latest_drift().latent_cosine_drift_top > threshold で attention。
+  - id: "photon_rag_aggr_dynamic_drift"
+    label: "PHOTON-RAG+Aggr(dynamic,drift_based)"
+    kind: "photon"
+    config_path: "./configs/photon_small.yaml"
+    override:
+      inference:
+        safe_recgen_enabled: false
+      safe_recgen:
+        enabled: false
+      session_memory:
+        working_memory:
+          enabled: true
+          aggregation: dynamic
+          dynamic_strategy: drift_based
+          attention_drift_threshold: 0.5
+
+  # Issue #92 — dynamic aggregation: ハイブリッド。
+  # alpha = clamp(base + per_turn * max(0, N - until), 0, 1) で
+  # (1-alpha)*weighted + alpha*attention を混合。
+  - id: "photon_rag_aggr_dynamic_hybrid"
+    label: "PHOTON-RAG+Aggr(dynamic,hybrid)"
+    kind: "photon"
+    config_path: "./configs/photon_small.yaml"
+    override:
+      inference:
+        safe_recgen_enabled: false
+      safe_recgen:
+        enabled: false
+      session_memory:
+        working_memory:
+          enabled: true
+          aggregation: dynamic
+          dynamic_strategy: hybrid
+          weighted_until_turn: 3
+          hybrid_alpha_base: 0.5
+          hybrid_alpha_per_turn: 0.1
 
 fairness:
   fix_repo_snapshot: true
