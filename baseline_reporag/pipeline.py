@@ -158,7 +158,7 @@ class RepoRAGPipeline:
                     results=raw,
                     store=self.store,
                     top_k=cfg.retrieval.rerank_top_k,
-                    rerank_query=expansion_terms,  # English expansion alongside original query
+                    rerank_query=expansion_terms,  # English terms for cross-encoder
                 )
 
         # --- File-type boost (post-reranking) ---

@@ -1021,7 +1021,9 @@ def _run_query(proj: Project, question: str, session_key: str) -> tuple[str, dic
             reranker_cfg = cfg.retrieval.reranker
             reranker = (
                 CrossEncoderReranker(
-                    model_id=reranker_cfg.get("model_id", "BAAI/bge-reranker-base")
+                    model_id=reranker_cfg.get(
+                        "model_id", "cross-encoder/ms-marco-MiniLM-L-6-v2"
+                    )
                 )
                 if reranker_cfg.get("enabled", False)
                 else None
