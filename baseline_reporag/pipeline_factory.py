@@ -109,10 +109,7 @@ def _build_baseline_deps_no_mlx(cfg: Config) -> dict:
     idx_dir = Path(cfg.paths.data_root) / "indexes" / cfg.repo.repo_id
     store = ChunkStore(idx_dir / "chunks.db")
     lexical = LexicalIndex.load(idx_dir / "lexical.pkl")
-    embedding = EmbeddingIndex.load(
-        idx_dir / "embedding",
-        expected_model_id=cfg.indexing.embedding.model_id,
-    )
+    embedding = EmbeddingIndex.load(idx_dir / "embedding")
     graph = SymbolGraph.load(idx_dir / "symbol_graph.json")
     sessions = SessionManager(log_dir=Path(cfg.paths.log_root) / "sessions")
     generator = Generator(
@@ -127,7 +124,9 @@ def _build_baseline_deps_no_mlx(cfg: Config) -> dict:
     reranker_cfg = cfg.retrieval.reranker
     reranker = (
         CrossEncoderReranker(
-            model_id=reranker_cfg.get("model_id", "BAAI/bge-reranker-base")
+            model_id=reranker_cfg.get(
+                "model_id", "cross-encoder/ms-marco-MiniLM-L-6-v2"
+            )
         )
         if reranker_cfg.get("enabled", False)
         else None

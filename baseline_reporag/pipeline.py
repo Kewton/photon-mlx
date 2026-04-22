@@ -158,7 +158,7 @@ class RepoRAGPipeline:
                     results=raw,
                     store=self.store,
                     top_k=cfg.retrieval.rerank_top_k,
-                    rerank_query=expansion_terms,  # English expansion alongside original query
+                    rerank_query=expansion_terms,  # English terms for cross-encoder
                 )
 
         # --- File-type boost (post-reranking) ---
@@ -168,24 +168,16 @@ class RepoRAGPipeline:
 
         # --- Graph expansion ---
         with prof.phase("graph_expansion"):
-            graph_cfg = cfg.retrieval.graph_expansion
-            nbh_cfg = cfg.retrieval.neighborhood_expansion
-            edge_weights = getattr(graph_cfg, "edge_weights", None)
-            adaptive = getattr(nbh_cfg, "adaptive", False)
-            by_kind = getattr(nbh_cfg, "by_kind", None)
             expanded_ids = expand_with_graph(
                 results=raw,
                 store=self.store,
                 graph=self.graph,
                 repo_id=repo_id,
                 repo_commit=cfg.repo.repo_commit,
-                max_hops=graph_cfg.max_hops,
-                max_nodes=graph_cfg.max_nodes,
-                neighborhood_before=nbh_cfg.before,
-                neighborhood_after=nbh_cfg.after,
-                edge_weights=edge_weights,
-                adaptive_neighborhood=bool(adaptive),
-                neighborhood_by_kind=by_kind,
+                max_hops=cfg.retrieval.graph_expansion.max_hops,
+                max_nodes=cfg.retrieval.graph_expansion.max_nodes,
+                neighborhood_before=cfg.retrieval.neighborhood_expansion.before,
+                neighborhood_after=cfg.retrieval.neighborhood_expansion.after,
             )
 
         # --- Evidence pack ---
