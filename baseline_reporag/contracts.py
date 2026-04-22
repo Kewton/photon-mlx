@@ -1,0 +1,58 @@
+"""MLX-free shared contracts for baseline and PHOTON pipelines.
+
+CB2-001 (codex-fix): ``QueryResult`` used to live in
+``baseline_reporag.pipeline``, which eagerly imports the MLX-backed
+``Generator`` at module load.  That made any module referencing the
+dataclass transitively depend on MLX — including
+``baseline_reporag.pipeline_factory``, defeating the factory's entire
+"MLX-free at import time" guarantee.
+
+This module is deliberately lightweight: only ``dataclasses`` and
+``typing`` from stdlib are imported at load.  It lets pure-baseline
+callers (cli, server, eval scripts) reference ``QueryResult`` without
+dragging in ``mlx_lm`` / ``mlx.core``.
+
+``baseline_reporag.pipeline.QueryResult`` is re-exported from here for
+backward compatibility.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    # Forward-reference only: the profiler module is MLX-free but we
+    # still avoid an eager import so ``contracts`` stays minimal.
+    from .profiler import LatencyBreakdown, MemorySnapshot
+
+
+@dataclass
+class QueryResult:
+    """Result of a single pipeline query turn.
+
+    The fields mirror the historical ``baseline_reporag.pipeline.QueryResult``
+    so existing callers keep working through the re-export.
+    """
+
+    answer: str
+    session_id: str
+    turn_id: int
+    cited_chunk_ids: list[str]
+    wrong_citation_indices: list[int]
+    no_citation: bool
+    latency: "LatencyBreakdown"
+    memory: "MemorySnapshot"
+    drift_metrics: dict[str, Any] | None = None
+    confidence: float | None = None
+    fallback_decision: dict[str, Any] | None = None
+    citation_postprocessed: bool = False
+    # Issue #62 Phase 1 (CB-003 codex-fix): expose the generator that
+    # actually produced ``answer`` so side-by-side comparison tools can
+    # distinguish a real PHOTON answer from a Qwen fallback.  None on
+    # historical rows (pre-#62) and on paths that have not populated it.
+    # Closed enum: None | "qwen" | "photon".
+    generator_used: str | None = None
+    # Closed enum (§7.2): None | "_TokenizerEncodeFailure" | "ValueError"
+    #                    | "RuntimeError" | "empty_output".
+    generator_fallback_reason: str | None = None

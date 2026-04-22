@@ -102,7 +102,10 @@ baseline_reporag/       # Baseline RepoRAG (プロダクト線)
 ├── retrieval/          # hybrid retrieval・graph expansion
 ├── memory/             # session memory
 ├── generation/         # evidence pack・prompt・mlx_lm generator
-├── pipeline.py         # 共通クエリパイプライン
+├── contracts.py        # MLX-free 共有型 (QueryResult)
+├── pipeline.py         # 共通クエリパイプライン (Qwen)
+├── pipeline_factory.py # provider 分岐 factory (lazy MLX import)
+├── photon_pipeline.py  # PHOTON-enhanced pipeline (opt-in PHOTON 生成)
 ├── profiler.py         # latency + memory profiling
 ├── citation.py         # [C:N] 解析
 ├── server.py           # FastAPI server
@@ -112,13 +115,13 @@ photon_mlx/             # PHOTON 階層デコーダ (研究開発線)
 ├── blocks.py           # TransformerBlock + RoPE (MLX)
 ├── model.py            # PhotonModel (bottom-up + top-down)
 ├── inference.py        # session inference + drift tracking
-├── session.py          # PhotonSessionState + DriftMetrics
+├── session.py          # PhotonSessionState + DriftMetrics + TurnState + WorkingMemoryConfig
 ├── safe_recgen.py      # Safe RecGen controller
 ├── loss.py             # next-token + recursive loss
 ├── trainer.py          # training loop + checkpoint
 ├── data.py             # JSONL → pack → batch
 ├── optimize.py         # Mac optimization utilities
-└── tests/              # 61 tests
+└── tests/              # 168 tests
 
 torch_ref/              # PyTorch reference LM (正しさ確認用)
 ├── model.py            # MinimalLM (LLaMA-style)
@@ -139,7 +142,7 @@ reports/                # ベンチマークレポート
 
 | チェック項目 | コマンド | 基準 |
 |-------------|----------|------|
-| テスト | `python -m pytest torch_ref/tests/ photon_mlx/tests/ -v` | 全テストパス (72/72) |
+| テスト | `python -m pytest torch_ref/tests/ photon_mlx/tests/ baseline_reporag/tests/ tests/ -v` | 全テストパス (約 507/509、残り 2 件は `tests/test_generate_training_corpus.py` の既知の pre-existing failure) |
 | リント | `ruff check .` | 警告0件 |
 | フォーマット | `ruff format --check .` | 差分なし |
 | Baseline疎通 | `python -m baseline_reporag.cli --config configs/baseline.yaml --repo-id fastapi_fastapi --question "test"` | 応答あり |
@@ -149,9 +152,9 @@ reports/                # ベンチマークレポート
 ## プロダクトライン
 
 - **プロダクトライン**: baseline_rag (Gate 2 v2 判定: No-Go → PHOTON 凍結)
-- **現在のメトリクス** (2026-04-17):
-  - Static no-citation: 17.5% (True NC: 12.4%)
-  - MT no-citation: 13.3%
+- **現在のメトリクス** (Gate 2 v4, 出典: `reports/gate2_judgment_v4_final.md`):
+  - Static no-citation: baseline 21.7% / PHOTON 20.0%
+  - MT no-citation: 6.7%
   - Retrieval noise: 0%
 - **運用ドキュメント**: `docs/deployment.md`, `docs/troubleshooting.md`
 

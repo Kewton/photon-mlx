@@ -93,6 +93,11 @@ retrieval:
     max_hops: 1
     max_nodes: 24
 
+  two_pass_search:
+    enabled: false       # Issue #56: enable to add Pass 1 PHOTON scoring on Turn 1
+    pass1_top_k: 64      # candidates fetched by retrieval for Pass 1
+    pass2_top_k: 16      # top-K passed to evidence pack (keep aligned with evidence_pack.max_chunks)
+
 evidence_pack:
   max_chunks: 16
   max_tokens: 16000
@@ -113,6 +118,20 @@ session_memory:
   pin_recent_chunks_max: 8
   pin_cited_chunks_max: 12
   track_topic_state: true
+
+  # Issue #64 / #79: cross-turn hierarchical working memory.
+  # storage_mode="full" keeps the whole HierarchicalState per turn with
+  # automatic mean-pool compression of overflowed turns (Issue #79 §3.7).
+  working_memory:
+    enabled: true
+    max_turns: 8
+    decay_factor: 0.5
+    relevant_turn_threshold: 0.7
+    storage_mode: "full"
+    # Issue #80: session coarse state aggregation mode.
+    # One of {"weighted", "attention", "last"}. Default "weighted" keeps
+    # the pre-#80 decayed-mean behaviour.
+    aggregation: weighted
 
 tokenizer:
   tokenizer_id: "mlx-community/Qwen2.5-Coder-14B-Instruct-4bit"
@@ -194,12 +213,23 @@ training:
   save_every_steps: 100
   log_every_steps: 20
 
+  # Early stopping (Issue #60): enabled for production small config.
+  early_stopping:
+    enabled: true
+    patience: 3
+    min_delta: 0.001
+    restore_best: true
+
 inference:
   hierarchical_prefill: true
   recgen_enabled: true
   safe_recgen_enabled: true
   evidence_pruning_enabled: true
   pruned_max_chunks: 8  # follow-up turns use 8 instead of 16
+
+  # Issue #62 Phase 1: opt-in PHOTON single-path generation (default false).
+  photon_generation_enabled: false
+  generation_fallback_policy: "qwen"
 
   answer_max_new_tokens: 768
   temperature: 0.2

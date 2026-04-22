@@ -1,11 +1,16 @@
 version: 1
 
+# Issue #62 Phase 1: opt-in PHOTON single-path generation variant.
+# Mirrors ``configs/photon_tiny.yaml`` but enables
+# ``inference.photon_generation_enabled=true`` so benchmarks can exercise
+# the PHOTON-only generation path end-to-end.
+
 project:
   name: "photon-reporag"
-  mode: "photon_600m_paper"
+  mode: "photon_tiny_recgen"
 
 run:
-  name_prefix: "photon_600m_paper"
+  name_prefix: "photon_tiny_recgen"
   seed: 42
   deterministic: true
 
@@ -26,7 +31,7 @@ runtime:
   num_workers: 8
   profile_latency: true
   profile_memory: true
-  compile_decode_step: true
+  compile_decode_step: false
 
 repo:
   repo_id: "fastapi_fastapi"
@@ -83,9 +88,9 @@ retrieval:
     max_nodes: 24
 
   two_pass_search:
-    enabled: false       # Issue #56: enable to add Pass 1 PHOTON scoring on Turn 1
-    pass1_top_k: 64      # candidates fetched by retrieval for Pass 1
-    pass2_top_k: 16      # top-K passed to evidence pack (keep aligned with evidence_pack.max_chunks)
+    enabled: false
+    pass1_top_k: 64
+    pass2_top_k: 16
 
 evidence_pack:
   max_chunks: 16
@@ -108,37 +113,27 @@ session_memory:
   pin_cited_chunks_max: 12
   track_topic_state: true
 
-  # Issue #64 / #79: cross-turn hierarchical working memory.
-  # Re-enabled with storage_mode="top_level_only" (Issue #79 Phase 2).
-  # At 600M-paper scale the full hierarchy for 8 turns exceeds the
-  # 100 MiB ceiling, so we retain only level_states[-1] per turn.
-  working_memory:
-    enabled: true
-    max_turns: 8
-    decay_factor: 0.5
-    relevant_turn_threshold: 0.7
-    storage_mode: "top_level_only"
-    # Issue #80: session coarse state aggregation mode.
-    # One of {"weighted", "attention", "last"}. Default "weighted" keeps
-    # the pre-#80 decayed-mean behaviour.
-    aggregation: weighted
+  # Issue #64 / #79: working_memory is intentionally omitted for RecGen
+  # profiles — RecGen is a single-path generator that does not need the
+  # cross-turn coarse aggregate, and keeping the section absent exercises
+  # the fail-closed "missing section" branch in
+  # baseline_reporag.photon_pipeline._extract_working_memory_cfg.
 
 tokenizer:
   tokenizer_id: "meta-llama/Llama-2-7b-hf"
   vocab_size: 32000
 
 model:
+  provider: "photon"
   architecture: "photon_decoder"
 
-  # Paper Table 10 aligned (600M)
-  # base_embed_dim: 416, hidden_size: 1664, FFN: 4096, 32 heads, enc/dec 4 layers each
-  base_embed_dim: 416
-  hidden_size: 1664
-  intermediate_size: 4096
+  base_embed_dim: 160
+  hidden_size: 640
+  intermediate_size: 1664
 
-  num_attention_heads: 32
-  num_key_value_heads: 32
-  head_dim: 52
+  num_attention_heads: 10
+  num_key_value_heads: 10
+  head_dim: 64
 
   max_position_embeddings: 2048
   rope_theta: 1000000.0
@@ -150,7 +145,6 @@ model:
 hierarchy:
   levels: 2
 
-  # Paper-conformal default
   chunk_sizes: [4, 4]
   converter_prefix_lengths: [2, 2]
 
@@ -158,8 +152,8 @@ hierarchy:
     level1_type: "concat"
     upper_type: "linear"
 
-  encoder_layers_per_level: [4, 4]
-  decoder_layers_per_level: [4, 4]
+  encoder_layers_per_level: [2, 2]
+  decoder_layers_per_level: [2, 2]
 
   context_encoder_arch: "llama_decoder_style"
   context_decoder_arch: "llama_decoder_style"
@@ -169,41 +163,37 @@ hierarchy:
   bottleneck_consistency_target: "top_level"
 
 training:
-  # Architecture-matched config.
-  # Paper の H200 フル学習の再現は意図しない。forward/eval の整合確認用。
-  enabled: false
-  stage: "paper600m_arch_only"
+  enabled: true
+  stage: "tiny"
 
-  train_corpus: "./data/processed/train_small.jsonl"
-  val_corpus: "./data/processed/val_small.jsonl"
+  train_corpus: "./data/processed/train_tiny.jsonl"
+  val_corpus: "./data/processed/val_tiny.jsonl"
 
   context_length: 2048
-  micro_batch_size: 1
-  gradient_accumulation_steps: 32
+  micro_batch_size: 4
+  gradient_accumulation_steps: 8
 
-  learning_rate: 0.00012
-  min_learning_rate: 0.000012
+  learning_rate: 0.0002
+  min_learning_rate: 0.00002
   warmup_ratio: 0.03
   weight_decay: 0.1
   max_grad_norm: 1.0
 
-  max_steps: 2000
+  max_steps: 5000
   eval_every_steps: 200
   save_every_steps: 500
   log_every_steps: 20
 
-  # Early stopping (Issue #60): explicit opt-out for this reference-only
-  # config (training.enabled is false; no real run is launched from it).
   early_stopping:
     enabled: false
 
 inference:
   hierarchical_prefill: true
-  recgen_enabled: true
+  recgen_enabled: false
   safe_recgen_enabled: false
 
-  # Issue #62 Phase 1: opt-in PHOTON single-path generation (default false).
-  photon_generation_enabled: false
+  # Issue #62 Phase 1: this variant opts IN to PHOTON single-path generation.
+  photon_generation_enabled: true
   generation_fallback_policy: "qwen"
 
   answer_max_new_tokens: 768
@@ -211,15 +201,11 @@ inference:
   top_p: 0.9
   do_sample: false
 
-safe_recgen:
-  enabled: false
-
 drift_monitoring:
   enabled: true
   track_latent_cosine_drift: true
   track_token_agreement: true
   track_logit_kl: true
-  save_turn_level_metrics: true
 
 logging:
   level: "INFO"

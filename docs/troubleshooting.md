@@ -117,3 +117,23 @@ top -pid $(pgrep -f baseline_reporag)
 1. **Eval set exists?** Ensure evaluation data is present under `data/eval_sets/`.
 2. **Indexes built?** Run the full indexing pipeline before evaluation.
 3. **Config matches?** Ensure the `--config` flag points to the correct YAML file.
+
+---
+
+## 長コンテキストで RAM 不足 (Issue #55)
+
+**Symptom**: `configs/photon_long_context.yaml` + 長 prompt（16k+ トークン）で OOM または極端に遅い。
+
+**Checklist**:
+
+1. **`use_kv_cache=False` を試す**: 実測では 16,384 prompt 時、KV cache 無効の方が **RAM 約 7 GB 節約** かつ **11% 高速**。top-level KV cache の encoder_replay / top_level_increment / local_tail_decode の累積コストが、nocache prefill を上回るため。`PhotonInference.generate(..., use_kv_cache=False)` もしくは設定で `photon.use_kv_cache: false`（実装に応じて）。
+
+2. **`training.context_length` を段階的に下げる**: 65,536 → 32,768 → 16,384 の順で試す。RoPE テーブル自体は 65,536 固定でも、実際に流す prompt 長を下げれば attention 側のメモリが二次的に減る。
+
+3. **YAML タイポを疑う**: `rope_scale` (typo) は silently 無視されるため warning ログで検出。ログに `unknown config key ignored: rope_scale` が出ていないか確認。正しくは `rope_scaling: ntk`。
+
+4. **`rope_scaling: none` と `rope_scale_factor: 32.0` を併記していないか**: この組み合わせは factor が silently 無視される（WARNING ログが出る）。`rope_scaling: ntk` に修正する。
+
+5. **`torch_ref` 経路で長コンテキスト**: `torch_ref` は 128 位置までしか扱えない。長コンテキストは必ず MLX 経路（`PhotonModel`）で使うこと。`torch_ref/_precompute_rope` で `scaling != "none"` を渡すと `NotImplementedError` が明示的に raise される（silent fallback なし）。
+
+参考: `reports/issue-55-long-context.md`

@@ -1,10 +1,19 @@
 """
 generate_photon.py  –  Greedy decode from a trained PHOTON checkpoint.
 
-Usage:
+Usage (manual CLI training – final/ is the stop-time weights unless
+restore_best=true):
     python scripts/generate_photon.py \
         --config configs/photon_tiny.yaml \
-        --checkpoint checkpoints/photon_tiny/step_005000 \
+        --checkpoint checkpoints/final \
+        --prompt "def get_current_user(" \
+        --max-new-tokens 96
+
+Usage (Streamlit-app-launched run – per-run namespace; best/ exists only
+when early_stopping is enabled, otherwise point at final/):
+    python scripts/generate_photon.py \
+        --config configs/photon_<repo_id>.yaml \
+        --checkpoint checkpoints/<repo_id>/<job_id>/best \
         --prompt "def get_current_user(" \
         --max-new-tokens 96
 """
@@ -119,7 +128,7 @@ def main() -> None:
     print(f"Generated tokens: {max_new}")
     print(f"Time: {elapsed:.2f}s")
     print(f"Speed: {tokens_per_sec:.1f} tok/s")
-    print("(KV cache not implemented — latency is expected)")
+    print("KV cache enabled (Phase 1, top-level only)")
 
 
 if __name__ == "__main__":

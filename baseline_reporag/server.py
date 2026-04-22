@@ -7,60 +7,31 @@ Start with:
 
 from __future__ import annotations
 
-import time
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 from fastapi import FastAPI
 from pydantic import BaseModel
 
 from .config import Config, load_config
-from .generation.generator import Generator
-from .indexing.embedding import EmbeddingIndex
-from .indexing.lexical import LexicalIndex
-from .indexing.symbol_graph import SymbolGraph
-from .ingestion.store import ChunkStore
-from .logger import RunLogger
-from .memory.session import SessionManager
+
+# CB-004 (codex-fix): import from the lightweight factory so baseline-only
+# deployments can boot the FastAPI server without MLX installed.  The
+# PHOTON pipeline type is only needed for the type annotation below.
 from .pipeline import RepoRAGPipeline
-from .retrieval.reranker import CrossEncoderReranker
+from .pipeline_factory import build_pipeline
+
+if TYPE_CHECKING:  # pragma: no cover - type hint only
+    from .photon_pipeline import PhotonRAGPipeline
 
 app = FastAPI(title="baseline-reporag")
-_pipeline: RepoRAGPipeline | None = None
+_pipeline: "RepoRAGPipeline | PhotonRAGPipeline | None" = None
 
 
-def _build_pipeline(config: Config) -> RepoRAGPipeline:
-    idx_dir = Path(config.paths.data_root) / "indexes" / config.repo.repo_id
-    run_id = (
-        f"baseline_{config.repo.repo_id}"
-        f"_{time.strftime('%Y%m%d')}"
-        f"_{config.repo.repo_commit[:7]}"
-    )
-    reranker_cfg = config.retrieval.reranker
-    reranker = (
-        CrossEncoderReranker(
-            model_id=reranker_cfg.get(
-                "model_id", "cross-encoder/ms-marco-MiniLM-L-6-v2"
-            )
-        )
-        if reranker_cfg.get("enabled", False)
-        else None
-    )
-    return RepoRAGPipeline(
-        config=config,
-        store=ChunkStore(idx_dir / "chunks.db"),
-        lexical=LexicalIndex.load(idx_dir / "lexical.pkl"),
-        embedding=EmbeddingIndex.load(idx_dir / "embedding"),
-        graph=SymbolGraph.load(idx_dir / "symbol_graph.json"),
-        sessions=SessionManager(log_dir=Path(config.paths.log_root) / "sessions"),
-        generator=Generator(
-            model_id=config.model.model_id,
-            max_new_tokens=config.generation.max_new_tokens,
-            temperature=config.generation.temperature,
-            top_p=config.generation.top_p,
-        ),
-        logger=RunLogger(config.paths.log_root, run_id),
-        reranker=reranker,
-    )
+def _build_pipeline(config: Config) -> "RepoRAGPipeline | PhotonRAGPipeline":
+    """Delegate to the provider-aware factory so ``model.provider`` wires
+    to the right pipeline (Issue #62 Phase 1 Stage 3 DR3-001).
+    """
+    return build_pipeline(config)
 
 
 class QueryRequest(BaseModel):
@@ -97,6 +68,7 @@ def query(req: QueryRequest) -> QueryResponse:
 
 def main() -> None:
     import argparse
+
     import uvicorn
 
     global _pipeline

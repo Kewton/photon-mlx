@@ -22,10 +22,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Build the symbol graph")
     parser.add_argument("--repo-id", required=True)
     parser.add_argument("--config", default="configs/baseline.yaml")
+    parser.add_argument(
+        "--commit", default=None, help="Override repo_commit from config"
+    )
     args = parser.parse_args()
 
     cfg = load_config(args.config)
-    repo_commit = cfg.repo.repo_commit
+    repo_commit = args.commit if args.commit else cfg.repo.repo_commit
     idx_dir = Path(cfg.paths.data_root) / "indexes" / args.repo_id
 
     store = ChunkStore(idx_dir / "chunks.db")

@@ -31,7 +31,30 @@ class RMSNorm(nn.Module):
         return (x.float() * norm).type_as(x) * self.weight
 
 
-def _precompute_rope(dim: int, max_len: int, theta: float) -> torch.Tensor:
+def _precompute_rope(
+    dim: int,
+    max_len: int,
+    theta: float,
+    *,
+    scaling: str = "none",
+    scale_factor: float = 1.0,
+) -> torch.Tensor:
+    """Precompute complex64 RoPE table.
+
+    Issue #55: signature kept in sync with ``photon_mlx.blocks.precompute_rope``
+    for LSP (Liskov Substitution) compatibility.  The torch_ref reference is
+    NOT expected to support RoPE scaling — it exists primarily to validate
+    correctness of the vanilla forward pass.  Passing any ``scaling`` value
+    other than ``"none"`` raises ``NotImplementedError`` to make the
+    limitation explicit (long-context inference must use the MLX path).
+    """
+    if scaling != "none":
+        raise NotImplementedError(
+            "torch_ref does not support RoPE scaling; use photon_mlx"
+        )
+    # scale_factor is silently ignored when scaling='none' (consistent with
+    # ModelConfig.__post_init__ which only emits a warning in that case).
+    del scale_factor
     freqs = 1.0 / (theta ** (torch.arange(0, dim, 2).float() / dim))
     t = torch.arange(max_len).float()
     angles = torch.outer(t, freqs)

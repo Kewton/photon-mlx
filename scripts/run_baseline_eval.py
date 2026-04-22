@@ -11,21 +11,15 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from baseline_reporag.config import load_config
-from baseline_reporag.generation.generator import Generator
-from baseline_reporag.indexing.embedding import EmbeddingIndex
-from baseline_reporag.indexing.lexical import LexicalIndex
-from baseline_reporag.indexing.symbol_graph import SymbolGraph
-from baseline_reporag.ingestion.store import ChunkStore
-from baseline_reporag.logger import RunLogger
-from baseline_reporag.memory.session import SessionManager
-from baseline_reporag.pipeline import RepoRAGPipeline
-from baseline_reporag.retrieval.reranker import CrossEncoderReranker
+
+# CB-004 (codex-fix): lightweight factory import — baseline-only envs no
+# longer have to install MLX to run this evaluation script.
+from baseline_reporag.pipeline_factory import build_pipeline
 
 
 def main() -> None:
@@ -38,35 +32,18 @@ def main() -> None:
 
     cfg = load_config(args.config)
     repo_id = cfg.repo.repo_id
-    idx_dir = Path(cfg.paths.data_root) / "indexes" / repo_id
-    run_id = f"baseline_eval_{repo_id}_{time.strftime('%Y%m%d_%H%M%S')}"
 
-    reranker_cfg = cfg.retrieval.reranker
-    reranker = (
-        CrossEncoderReranker(
-            model_id=reranker_cfg.get(
-                "model_id", "cross-encoder/ms-marco-MiniLM-L-6-v2"
-            )
-        )
-        if reranker_cfg.get("enabled", False)
-        else None
-    )
-    pipeline = RepoRAGPipeline(
-        config=cfg,
-        store=ChunkStore(idx_dir / "chunks.db"),
-        lexical=LexicalIndex.load(idx_dir / "lexical.pkl"),
-        embedding=EmbeddingIndex.load(idx_dir / "embedding"),
-        graph=SymbolGraph.load(idx_dir / "symbol_graph.json"),
-        sessions=SessionManager(log_dir=Path(cfg.paths.log_root) / "sessions"),
-        generator=Generator(
-            model_id=cfg.model.model_id,
-            max_new_tokens=cfg.generation.max_new_tokens,
-            temperature=cfg.generation.temperature,
-            top_p=cfg.generation.top_p,
-        ),
-        logger=RunLogger(cfg.paths.log_root, run_id),
-        reranker=reranker,
-    )
+    # Route via ``build_pipeline`` so PHOTON / baseline providers both
+    # receive a fully-wired pipeline and so evaluation runs observe
+    # ``photon_generation_enabled`` (Stage 3 DR3-001).
+    pipeline = build_pipeline(cfg)
+
+    # The factory builds the run logger internally; reuse its id when it
+    # exists so log line-up is preserved (baseline path only exposes it
+    # indirectly — use cfg/repo metadata in the output filename).
+    import time
+
+    run_id = f"baseline_eval_{repo_id}_{time.strftime('%Y%m%d_%H%M%S')}"
 
     # Load eval questions
     questions = []

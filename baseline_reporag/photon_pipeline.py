@@ -9,6 +9,7 @@ Provides:
 
 from __future__ import annotations
 
+import logging
 import uuid
 from math import prod
 from typing import Any
@@ -18,12 +19,85 @@ import mlx.core as mx
 from .citation import resolve_citations
 from .config import Config
 from .generation.evidence_pack import build_evidence_pack
-from .generation.prompt import _EVIDENCE_HEADER, build_messages
+from .generation.prompt import (
+    _EVIDENCE_HEADER,
+    build_messages,
+    flatten_messages_for_plain_lm,
+)
 from .pipeline import QueryResult, RepoRAGPipeline, apply_citation_postprocess
 from .profiler import TurnProfiler
 from .retrieval.graph_expansion import expand_with_graph
 from .retrieval.hybrid import apply_file_type_boost, hybrid_search
 from .retrieval.query_expansion import expand_query
+
+_logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Two-pass search configuration (Issue #56)
+# ---------------------------------------------------------------------------
+
+
+def _resolve_two_pass_search_cfg(
+    retrieval_cfg: Any,
+    fused_top_k: int,
+    evidence_max_chunks: int,
+) -> tuple[bool, int, int]:
+    """Resolve and validate ``retrieval.two_pass_search`` settings.
+
+    Returns ``(enabled, pass1_top_k, pass2_top_k)``. ``enabled`` defaults to
+    ``False`` when the section is missing so existing configs continue to work.
+
+    Validation rules (design §4.5 / DR1-008):
+    - ``pass1_top_k >= pass2_top_k >= 1`` — violation raises ``ValueError``
+    - ``pass1_top_k < fused_top_k`` — warn and clamp up to ``fused_top_k``
+      (avoids silently dropping candidates supplied by retrieval)
+
+    Validation is performed even when ``enabled=False`` so mis-configurations
+    surface early (Stage 3 S3-002).
+    """
+    section = (
+        retrieval_cfg.get("two_pass_search", {}) if retrieval_cfg is not None else {}
+    )
+    if section is None:
+        section = {}
+    # Support both ``Config`` wrappers and plain dicts.
+    getter = section.get
+
+    enabled_raw = getter("enabled", False)
+    enabled = bool(enabled_raw)
+    pass1_top_k = getter("pass1_top_k", fused_top_k)
+    pass2_top_k = getter("pass2_top_k", evidence_max_chunks)
+
+    if not isinstance(pass1_top_k, int) or isinstance(pass1_top_k, bool):
+        raise ValueError(
+            "retrieval.two_pass_search.pass1_top_k must be an int, "
+            f"got {type(pass1_top_k).__name__}"
+        )
+    if not isinstance(pass2_top_k, int) or isinstance(pass2_top_k, bool):
+        raise ValueError(
+            "retrieval.two_pass_search.pass2_top_k must be an int, "
+            f"got {type(pass2_top_k).__name__}"
+        )
+    if pass2_top_k < 1:
+        raise ValueError(
+            f"retrieval.two_pass_search.pass2_top_k must be >= 1, got {pass2_top_k}"
+        )
+    if pass1_top_k < pass2_top_k:
+        raise ValueError(
+            "retrieval.two_pass_search.pass1_top_k must be >= pass2_top_k, "
+            f"got pass1_top_k={pass1_top_k}, pass2_top_k={pass2_top_k}"
+        )
+    if pass1_top_k < fused_top_k:
+        _logger.warning(
+            "retrieval.two_pass_search.pass1_top_k (%d) < retrieval.fused_top_k "
+            "(%d); clamping pass1_top_k up to fused_top_k to preserve retrieval "
+            "candidates.",
+            pass1_top_k,
+            fused_top_k,
+        )
+        pass1_top_k = fused_top_k
+    return enabled, pass1_top_k, pass2_top_k
 
 
 # ---------------------------------------------------------------------------
@@ -35,19 +109,29 @@ def tokenize_evidence_pack(
     text: str,
     tokenizer: Any,
     cfg: Any,
-    max_tokens: int = 2048,
+    max_tokens: int | None = None,
 ) -> mx.array:
     """Tokenize evidence text with chunk-aligned padding.
 
     Args:
         text: raw evidence text.
-        tokenizer: tokenizer with encode() and pad_token_id.
-        cfg: config with hierarchy.chunk_sizes.
-        max_tokens: hard cap on token count.
+        tokenizer: tokenizer with ``encode()`` and ``pad_token_id``.
+        cfg: a :class:`torch_ref.config.PhotonConfig` instance.  The baseline
+            ``Config`` (from ``configs/baseline.yaml``) does **not** define
+            ``model.max_position_embeddings`` and must not be passed here.
+        max_tokens: hard cap on token count.  When ``None`` (default), the
+            cap is taken from ``cfg.model.max_position_embeddings``.  Must be
+            positive; a :class:`ValueError` is raised otherwise (DR1-001).
 
     Returns:
         mx.array of token ids, length is a multiple of prod(chunk_sizes).
     """
+    if max_tokens is None:
+        max_tokens = cfg.model.max_position_embeddings
+
+    if max_tokens <= 0:
+        raise ValueError(f"max_tokens must be positive, got {max_tokens}")
+
     ids = tokenizer.encode(text)
     if not ids:
         return mx.array([], dtype=mx.int32)
@@ -84,55 +168,78 @@ def compute_confidence(logits: mx.array) -> float:
 
 
 def _build_baseline_deps(cfg: Config) -> dict[str, Any]:
-    """Construct real baseline pipeline dependencies from config."""
-    from pathlib import Path
-    import uuid
+    """Construct real baseline pipeline dependencies from config.
 
-    from .generation.generator import Generator
-    from .indexing.embedding import EmbeddingIndex
-    from .indexing.lexical import LexicalIndex
-    from .indexing.symbol_graph import SymbolGraph
-    from .ingestion.store import ChunkStore
-    from .logger import RunLogger
-    from .memory.session import SessionManager
-    from .retrieval.reranker import CrossEncoderReranker
+    The canonical implementation lives in
+    :func:`baseline_reporag.pipeline_factory._build_baseline_deps_no_mlx`
+    so the factory module can stay MLX-free at import time. This wrapper
+    is preserved as a module attribute so existing tests that patch
+    ``baseline_reporag.photon_pipeline._build_baseline_deps`` keep working
+    (Issue #62 Phase 1 refactor R-1: single source of truth, no
+    lockstep-drift risk).
+    """
+    from .pipeline_factory import _build_baseline_deps_no_mlx
 
-    idx_dir = Path(cfg.paths.data_root) / "indexes" / cfg.repo.repo_id
-    store = ChunkStore(idx_dir / "chunks.db")
-    lexical = LexicalIndex.load(idx_dir / "lexical.pkl")
-    embedding = EmbeddingIndex.load(idx_dir / "embedding")
-    graph = SymbolGraph.load(idx_dir / "symbol_graph.json")
-    sessions = SessionManager(log_dir=Path(cfg.paths.log_root) / "sessions")
-    generator = Generator(
-        model_id=cfg.model.model_id,
-        max_new_tokens=cfg.generation.max_new_tokens,
-        temperature=cfg.generation.temperature,
-        top_p=cfg.generation.top_p,
-    )
-    run_id = f"bench_variant_{uuid.uuid4().hex[:8]}"
-    logger = RunLogger(cfg.paths.log_root, run_id)
+    return _build_baseline_deps_no_mlx(cfg)
 
-    reranker_cfg = cfg.retrieval.reranker
-    reranker = (
-        CrossEncoderReranker(
-            model_id=reranker_cfg.get(
-                "model_id", "cross-encoder/ms-marco-MiniLM-L-6-v2"
-            )
+
+def _resolve_working_memory_cfg(raw: Any) -> Any:
+    """Normalise ``session_memory.working_memory`` into a ``WorkingMemoryConfig``.
+
+    Accepts ``None`` (feature disabled), a dict (YAML form), or an already
+    constructed :class:`photon_mlx.session.WorkingMemoryConfig`. Anything
+    else triggers a warning (type name only; raw values are never surfaced,
+    design §7) and fails closed to ``None`` so the query path continues.
+
+    Returns either a ``WorkingMemoryConfig`` instance or ``None``.
+    """
+    from photon_mlx.session import WorkingMemoryConfig
+
+    if raw is None:
+        return None
+    if isinstance(raw, WorkingMemoryConfig):
+        return raw
+    # Support the baseline Config wrapper (has .to_dict()) and plain dicts.
+    raw_dict: dict[str, Any]
+    if isinstance(raw, Config):
+        raw_dict = raw.to_dict()
+    elif isinstance(raw, dict):
+        raw_dict = dict(raw)
+    else:
+        _logger.warning(
+            "session_memory.working_memory has unsupported type %s; "
+            "disabling working memory for this session",
+            type(raw).__name__,
         )
-        if reranker_cfg.get("enabled", False)
-        else None
-    )
+        return None
+    try:
+        return WorkingMemoryConfig(**raw_dict)
+    except (TypeError, ValueError) as exc:
+        # Intentionally omit the raw dict (may contain attacker-controlled
+        # values from YAML). Only the exception class name is logged.
+        _logger.warning(
+            "WorkingMemoryConfig rejected session_memory.working_memory "
+            "(%s); disabling working memory for this session",
+            type(exc).__name__,
+        )
+        return None
 
-    return {
-        "store": store,
-        "lexical": lexical,
-        "embedding": embedding,
-        "graph": graph,
-        "sessions": sessions,
-        "generator": generator,
-        "logger": logger,
-        "reranker": reranker,
-    }
+
+def _extract_working_memory_cfg(cfg: Config) -> Any:
+    """Pull ``session_memory.working_memory`` out of a baseline ``Config``.
+
+    Uses ``getattr`` / ``get`` so missing sections surface as ``None``
+    rather than raising (design §3-3 fail-closed rules).
+    """
+    session_memory = getattr(cfg, "session_memory", None)
+    if session_memory is None:
+        return None
+    raw = None
+    if hasattr(session_memory, "get"):
+        raw = session_memory.get("working_memory", None)
+    else:
+        raw = getattr(session_memory, "working_memory", None)
+    return _resolve_working_memory_cfg(raw)
 
 
 def _build_photon_deps(cfg: Config) -> dict[str, Any]:
@@ -153,6 +260,11 @@ def _build_photon_deps(cfg: Config) -> dict[str, Any]:
         TokenizerConfig,
     )
 
+    # Issue #55: wire long-context RoPE fields from baseline cfg so
+    # `photon_long_context.yaml` reaches PhotonModel unchanged.  When the
+    # baseline cfg lacks these keys (e.g. legacy 2048 profiles), we fall
+    # back to ModelConfig defaults via ``rope_scaling_from``.
+    scaling, factor = ModelConfig.rope_scaling_from(cfg.model)
     model_cfg = ModelConfig(
         architecture=cfg.model.get("architecture", "photon_decoder"),
         base_embed_dim=cfg.model.base_embed_dim,
@@ -160,6 +272,11 @@ def _build_photon_deps(cfg: Config) -> dict[str, Any]:
         intermediate_size=cfg.model.intermediate_size,
         num_attention_heads=cfg.model.get("num_heads", 4),
         num_key_value_heads=cfg.model.get("num_heads", 4),
+        head_dim=getattr(cfg.model, "head_dim", 64),
+        max_position_embeddings=getattr(cfg.model, "max_position_embeddings", 2048),
+        rope_theta=getattr(cfg.model, "rope_theta", 1_000_000.0),
+        rope_scaling=scaling,
+        rope_scale_factor=factor,
     )
     hierarchy_cfg = HierarchyConfig(
         levels=cfg.hierarchy.levels,
@@ -176,8 +293,14 @@ def _build_photon_deps(cfg: Config) -> dict[str, Any]:
         tokenizer=tok_cfg,
     )
 
+    # Build the tokenizer before PhotonInference so both paths (question+evidence
+    # prefill in PhotonRAGPipeline and chunk scoring in prune_evidence) share
+    # the same stub instance (Issue #58).
+    tokenizer = _get_stub_tokenizer(photon_cfg.tokenizer.vocab_size)
     model = PhotonModel(photon_cfg)
-    photon_inference = PhotonInference(model, photon_cfg)
+    # Issue #64 / Codex CB-001: extract working memory policy once, pass it
+    # into PhotonInference alongside the Issue #63 drift_level_weights below.
+    working_memory_cfg = _extract_working_memory_cfg(cfg)
 
     safe_recgen_enabled = getattr(cfg.get("inference"), "safe_recgen_enabled", True)
     if safe_recgen_enabled:
@@ -185,6 +308,33 @@ def _build_photon_deps(cfg: Config) -> dict[str, Any]:
         if sr_cfg_data is not None:
             triggers = sr_cfg_data.get("triggers")
             thresholds = sr_cfg_data.get("thresholds")
+            # Issue #63 / DR1-010: alias resolution happens here, not inside
+            # SafeRecGenConfig. The legacy YAML key
+            # ``thresholds.latent_cosine_drift`` maps onto the new
+            # ``latent_cosine_drift_top_threshold``; when both are present,
+            # the new explicit ``latent_cosine_drift_top`` wins.
+            legacy_top_threshold = (
+                getattr(thresholds, "latent_cosine_drift", 0.18) if thresholds else 0.18
+            )
+            top_threshold = (
+                getattr(thresholds, "latent_cosine_drift_top", legacy_top_threshold)
+                if thresholds
+                else legacy_top_threshold
+            )
+            # DR2-005: fall back to defaults for missing new keys.
+            mid_threshold = (
+                getattr(thresholds, "latent_cosine_drift_mid", 0.40)
+                if thresholds
+                else 0.40
+            )
+            token_threshold = (
+                getattr(thresholds, "latent_cosine_drift_token", 0.30)
+                if thresholds
+                else 0.30
+            )
+            drift_level_weights = sr_cfg_data.get("drift_level_weights")
+            if drift_level_weights is None:
+                drift_level_weights = (0.2, 0.3, 0.5)
             sr_config = SafeRecGenConfig(
                 enabled=True,
                 trigger_exact_quote=getattr(triggers, "exact_quote", True)
@@ -205,11 +355,9 @@ def _build_photon_deps(cfg: Config) -> dict[str, Any]:
                 trigger_low_confidence=getattr(triggers, "low_confidence", True)
                 if triggers
                 else True,
-                latent_cosine_drift_threshold=getattr(
-                    thresholds, "latent_cosine_drift", 0.18
-                )
-                if thresholds
-                else 0.18,
+                # Legacy top-only threshold (kept in sync with the new field
+                # for backward-compat log/schema consumers).
+                latent_cosine_drift_threshold=top_threshold,
                 topic_shift_score_threshold=getattr(
                     thresholds, "topic_shift_score", 0.65
                 )
@@ -221,14 +369,32 @@ def _build_photon_deps(cfg: Config) -> dict[str, Any]:
                 logit_kl_threshold=getattr(thresholds, "logit_kl", 0.75)
                 if thresholds
                 else 0.75,
+                # Issue #63 new fields.
+                latent_cosine_drift_top_threshold=top_threshold,
+                latent_cosine_drift_mid_threshold=mid_threshold,
+                latent_cosine_drift_token_threshold=token_threshold,
+                drift_level_weights=drift_level_weights,
             )
         else:
             sr_config = SafeRecGenConfig(enabled=True)
         safe_recgen = SafeRecGenController(sr_config)
     else:
+        sr_config = None
         safe_recgen = None
 
-    tokenizer = _get_stub_tokenizer(photon_cfg.tokenizer.vocab_size)
+    # Issue #63 / DR1-005: pass drift_level_weights (not the whole
+    # SafeRecGenConfig) into PhotonInference so the inference layer only
+    # depends on what it actually needs (ISP).
+    drift_weights_for_inference = (
+        sr_config.drift_level_weights if sr_config is not None else None
+    )
+    photon_inference = PhotonInference(
+        model,
+        photon_cfg,
+        tokenizer,
+        drift_level_weights=drift_weights_for_inference,
+        working_memory_cfg=working_memory_cfg,
+    )
 
     return {
         "photon_inference": photon_inference,
@@ -256,26 +422,41 @@ def _get_stub_tokenizer(vocab_size: int) -> _StubTokenizer:
     return _StubTokenizer(vocab_size)
 
 
+def _clear_photon_session_state(photon_inference: Any, session_id: str) -> None:
+    """Drop PHOTON coarse/prev state and cached logits for ``session_id``.
+
+    Centralised fail-closed reset used in three places (design §8):
+    - ``tokenize_evidence_pack`` failure in the pipeline (CB-001).
+    - ``reprefill_hierarchy`` Safe RecGen action.
+    - ``fallback_to_baseline_path`` Safe RecGen action.
+
+    ``prev_logits`` must be cleared alongside ``current_state`` /
+    ``prev_state`` because ``PhotonSessionState.update()`` derives
+    ``token_agreement`` / ``logit_kl`` from ``prev_logits`` independently
+    of the hierarchy; leaving it set would leak stale drift into the next
+    turn (Codex CB-004).
+    """
+    photon_session = photon_inference._sessions.get(session_id)
+    if photon_session is None:
+        return
+    # Issue #64: delegate to PhotonSessionState.reset_working_memory() so
+    # ``turn_history`` is cleared atomically alongside the stale latents
+    # while ``drift_history`` / ``turn_count`` are preserved for telemetry.
+    photon_session.reset_working_memory()
+
+
 def build_pipeline(cfg: Config) -> RepoRAGPipeline | PhotonRAGPipeline:
-    """Factory: create the right pipeline based on cfg.model.provider."""
-    provider = getattr(cfg.model, "provider", None) or "baseline"
-    deps = _build_baseline_deps(cfg)
+    """Factory: create the right pipeline based on cfg.model.provider.
 
-    if provider == "photon":
-        photon_deps = _build_photon_deps(cfg)
-        return PhotonRAGPipeline(cfg=cfg, baseline_deps=deps, photon_deps=photon_deps)
+    CB-004 (codex-fix): the canonical factory lives in
+    ``baseline_reporag.pipeline_factory`` so baseline-only entry points can
+    route via a module that does not import MLX at load time.  This
+    function is a thin backward-compat re-export; prefer importing from
+    ``baseline_reporag.pipeline_factory`` directly.
+    """
+    from .pipeline_factory import build_pipeline as _factory_build_pipeline
 
-    return RepoRAGPipeline(
-        config=cfg,
-        store=deps["store"],
-        lexical=deps["lexical"],
-        embedding=deps["embedding"],
-        graph=deps["graph"],
-        sessions=deps["sessions"],
-        generator=deps["generator"],
-        logger=deps["logger"],
-        reranker=deps["reranker"],
-    )
+    return _factory_build_pipeline(cfg)
 
 
 # ---------------------------------------------------------------------------
@@ -309,6 +490,117 @@ class PhotonRAGPipeline:
         self.photon_cfg = photon_deps["photon_cfg"]
         self.tokenizer = photon_deps["tokenizer"]
 
+    # ---------------------------------------------------------------
+    # Issue #62 Phase 1: opt-in PHOTON single-path generation
+    # ---------------------------------------------------------------
+
+    @staticmethod
+    def _resolve_photon_max_new_tokens(
+        followup_tokens: int | None,
+        inference_cfg: Any,
+        cfg: Config,
+    ) -> int:
+        """Resolve the Phase 1 ``max_new_tokens`` contract (DR-62-005 / DR1-004).
+
+        Precedence:
+        1. ``followup_tokens`` when non-None (multi-turn cap).
+        2. ``inference.answer_max_new_tokens`` when set.
+        3. ``generation.max_new_tokens`` when a top-level generation section
+           exists (non-photon configs).
+        4. Hard default ``512`` (matches Qwen first-turn behaviour).
+
+        Strict type enforcement (DR4-003): rejects ``bool`` and non-``int``,
+        rejects values < 1.
+        """
+        if followup_tokens is not None:
+            raw_value: Any = followup_tokens
+        else:
+            raw_value = getattr(inference_cfg, "answer_max_new_tokens", None)
+            if raw_value is None:
+                generation_cfg = cfg.get("generation")
+                if generation_cfg is not None:
+                    raw_value = getattr(generation_cfg, "max_new_tokens", 512)
+                else:
+                    raw_value = 512
+
+        if isinstance(raw_value, bool) or not isinstance(raw_value, int):
+            raise ValueError(
+                "PHOTON max_new_tokens must be a positive int, "
+                f"got {type(raw_value).__name__}"
+            )
+        if raw_value < 1:
+            raise ValueError(f"PHOTON max_new_tokens must be >= 1, got {raw_value}")
+        return raw_value
+
+    def _run_photon_generation(
+        self,
+        *,
+        messages: list[dict],
+        bl: RepoRAGPipeline,
+        cfg: Config,
+        inference_cfg: Any,
+        followup_tokens: int | None,
+        fallback_policy: str,
+    ) -> tuple[str, str, str | None]:
+        """Execute the PHOTON generation branch with fail-closed semantics.
+
+        Returns ``(answer, generator_used, generator_fallback_reason)``.
+
+        Contract (design §8.2 + §9):
+
+        - ``_TokenizerEncodeFailure`` / ``ValueError`` / ``RuntimeError`` →
+          fall back to Qwen unless ``fallback_policy == "abort"`` in which
+          case a ``RuntimeError`` is raised with a sanitized message.
+        - Empty PHOTON output → fall back with ``generator_fallback_reason
+          == "empty_output"``.
+        - Security logging: warning message uses ``type(exc).__name__``
+          only; the raw exception body is never logged (Stage 4 DR4-002).
+        """
+        from photon_mlx.inference import _TokenizerEncodeFailure
+
+        prompt_text = flatten_messages_for_plain_lm(messages)  # DR-62-003
+        photon_max_new = self._resolve_photon_max_new_tokens(
+            followup_tokens, inference_cfg, cfg
+        )
+
+        try:
+            photon_answer = self.photon_inference.generate_answer(
+                prompt_text,
+                max_new_tokens=photon_max_new,
+            )
+        except (_TokenizerEncodeFailure, ValueError, RuntimeError) as exc:
+            reason = type(exc).__name__
+            if fallback_policy == "abort":
+                # Sanitized error — do NOT include exc body in the message.
+                raise RuntimeError(
+                    "PHOTON generation failed and fallback policy=abort"
+                ) from None
+            # Stage 4 DR4-002: log the closed-enum reason only; the raw
+            # exception body must not appear in the warning.
+            _logger.warning(
+                "PHOTON generation failed; falling back to Qwen (reason=%s)",
+                reason,
+            )
+            qwen_answer = bl.generator.generate(
+                messages, max_new_tokens=followup_tokens
+            )
+            return qwen_answer, "qwen", reason
+
+        # DR1-001: empty / whitespace-only output is fail-closed.
+        if not photon_answer or not photon_answer.strip():
+            _logger.warning(
+                "PHOTON returned empty answer; falling back to Qwen (reason=%s)",
+                "empty_output",
+            )
+            if fallback_policy == "abort":
+                raise RuntimeError("PHOTON generation failed and fallback policy=abort")
+            qwen_answer = bl.generator.generate(
+                messages, max_new_tokens=followup_tokens
+            )
+            return qwen_answer, "qwen", "empty_output"
+
+        return photon_answer, "photon", None
+
     def query(
         self,
         question: str,
@@ -334,31 +626,7 @@ class PhotonRAGPipeline:
             cfg.repo.repo_commit,
         )
 
-        # --- PHOTON prefill for drift / confidence ---
         photon_session_id = session_id or "default"
-        evidence_tokens = tokenize_evidence_pack(question, self.tokenizer, cfg)
-        if evidence_tokens.size > 0:
-            input_ids = evidence_tokens.reshape(1, -1)
-            logits, drift = self.photon_inference.session_forward(
-                input_ids,
-                session_id=photon_session_id,
-                repo_id=repo_id or "unknown",
-                repo_commit="HEAD",
-            )
-            confidence = compute_confidence(logits)
-            drift_dict = drift.as_dict() if drift else None
-        else:
-            confidence = 1.0
-            drift = None
-            drift_dict = None
-
-        # --- Safe RecGen evaluation ---
-        fallback_dict = None
-        if self.safe_recgen is not None and drift is not None:
-            decision = self.safe_recgen.evaluate(
-                question, drift=drift, confidence=confidence
-            )
-            fallback_dict = decision.as_dict()
 
         # --- Query expansion ---
         qe_cfg = cfg.retrieval.query_expansion
@@ -368,6 +636,20 @@ class PhotonRAGPipeline:
         else:
             expansion_terms = None
 
+        is_follow_up = len(session.turns) > 0
+
+        # --- Two-pass search configuration (Issue #56) ---
+        two_pass_enabled, pass1_top_k, pass2_top_k = _resolve_two_pass_search_cfg(
+            cfg.retrieval,
+            fused_top_k=cfg.retrieval.fused_top_k,
+            evidence_max_chunks=cfg.evidence_pack.max_chunks,
+        )
+        effective_fused_top_k = (
+            max(cfg.retrieval.fused_top_k, pass1_top_k)
+            if two_pass_enabled and not is_follow_up
+            else cfg.retrieval.fused_top_k
+        )
+
         # --- Retrieval ---
         with prof.phase("retrieval"):
             raw = hybrid_search(
@@ -376,15 +658,18 @@ class PhotonRAGPipeline:
                 embedding_index=bl.embedding,
                 lexical_top_k=cfg.retrieval.lexical_top_k,
                 embedding_top_k=cfg.retrieval.embedding_top_k,
-                fused_top_k=cfg.retrieval.fused_top_k,
+                fused_top_k=effective_fused_top_k,
                 lexical_weight=cfg.retrieval.weights.lexical,
                 embedding_weight=cfg.retrieval.weights.embedding,
                 expanded_queries=[expansion_terms] if expansion_terms else [],
             )
 
-        is_follow_up = len(session.turns) > 0
-
-        # --- Reranking (skip on follow-up: PHOTON pruning handles selection) ---
+        # --- Reranking ---
+        # On follow-up turns, PHOTON pruning handles chunk selection.  On turn
+        # 1 (or when no reranker is configured), reranking runs as usual.  The
+        # current-turn Safe RecGen fallback decision is now computed *after*
+        # the evidence pack is built (see design §5.3 / Issue #58), so it no
+        # longer gates reranking or pruning within this turn.
         with prof.phase("reranking"):
             if bl.reranker is not None and not is_follow_up:
                 raw = bl.reranker.rerank(
@@ -414,7 +699,10 @@ class PhotonRAGPipeline:
                 neighborhood_after=cfg.retrieval.neighborhood_expansion.after,
             )
 
-        # --- Evidence pruning (PHOTON-guided, follow-up turns only) ---
+        # --- Evidence pruning (PHOTON-guided) and Pass 1 scoring (Issue #56) ---
+        # Uses the *previous* turn's coarse state on Turn 2+ (1-pass constraint,
+        # design §4); Turn 1 optionally scores with a question-derived transient
+        # coarse_vec when two_pass_search.enabled=true (Issue #56, DR1-003).
         inference_cfg = cfg.get("inference")
         pruning_enabled = (
             getattr(inference_cfg, "evidence_pruning_enabled", False)
@@ -427,21 +715,24 @@ class PhotonRAGPipeline:
             else 8
         )
         effective_max_chunks = cfg.evidence_pack.max_chunks
-        if pruning_enabled and is_follow_up:
-            # Fetch chunk texts for scoring
+        do_pass1 = two_pass_enabled and not is_follow_up
+        do_pass2plus = pruning_enabled and is_follow_up
+        if do_pass1 or do_pass2plus:
             chunks_for_scoring = bl.store.get_many(expanded_ids)
             chunk_texts = [c.content for c in chunks_for_scoring]
             chunk_ids_for_scoring = [c.chunk_id for c in chunks_for_scoring]
 
-            selected_indices = self.photon_inference.prune_evidence(
-                chunk_texts=chunk_texts,
-                chunk_ids=chunk_ids_for_scoring,
-                session_id=photon_session_id,
-                max_chunks=pruned_max_chunks,
-            )
-            # Filter expanded_ids to only selected chunks
+            scoring_max_chunks = pass2_top_k if do_pass1 else pruned_max_chunks
+            with prof.phase("pass1_scoring" if do_pass1 else "evidence_pruning"):
+                selected_indices = self.photon_inference.prune_evidence(
+                    chunk_texts=chunk_texts,
+                    chunk_ids=chunk_ids_for_scoring,
+                    session_id=photon_session_id,
+                    max_chunks=scoring_max_chunks,
+                    question=question if do_pass1 else None,
+                )
             expanded_ids = [chunk_ids_for_scoring[i] for i in selected_indices]
-            effective_max_chunks = pruned_max_chunks
+            effective_max_chunks = scoring_max_chunks
 
         # --- Evidence pack ---
         with prof.phase("evidence_pack"):
@@ -453,7 +744,107 @@ class PhotonRAGPipeline:
                 max_tokens=cfg.evidence_pack.max_tokens,
             )
 
-        # --- Generation ---
+        # --- PHOTON prefill on question + evidence (new coarse state) ---
+        # Issue #58: the coarse state is now built from the concatenation of
+        # the question and the evidence text so drift, Safe RecGen, and the
+        # next turn's prune_evidence operate in a richer semantic space.
+        # Fail-closed: if tokenization fails we clear the PHOTON session
+        # state and fall through to the baseline generation path rather than
+        # silently reusing a stale coarse state on the next turn (design §8
+        # + CB-001).
+        evidence_text_for_photon = pack.format_for_prompt()
+        photon_input_text = question + "\n\n" + evidence_text_for_photon
+        drift = None
+        drift_dict = None
+        confidence = 1.0
+        tokenization_failed = False
+        try:
+            evidence_tokens = tokenize_evidence_pack(
+                photon_input_text,
+                self.tokenizer,
+                self.photon_cfg,
+            )
+        except Exception as exc:
+            # Security logging (Issue #58 CB-001 + Issue #64 Codex CB-002):
+            # log only the closed-enum exception class name. The tokenizer
+            # was handed ``question + evidence_pack``; a pathological or
+            # mis-configured tokenizer could echo that payload back in its
+            # exception message, so surfacing ``str(exc)`` / ``%s % exc``
+            # would leak question/evidence fragments to log sinks (design §7
+            # bars raw question_text and attacker-controlled values from
+            # fail-closed telemetry).
+            _logger.warning(
+                "tokenize_evidence_pack failed; clearing PHOTON session "
+                "state and falling back to baseline path for this turn "
+                "(fail-closed, CB-001, Codex CB-002, reason=%s)",
+                type(exc).__name__,
+            )
+            tokenization_failed = True
+            evidence_tokens = mx.array([], dtype=mx.int32)
+            # Explicit fail-closed: drop any prior coarse/prev state so the
+            # next turn cannot reuse a stale hierarchy.  No raw input text,
+            # token ids, or latents are retained (design §8).
+            _clear_photon_session_state(self.photon_inference, photon_session_id)
+
+        if evidence_tokens.size > 0:
+            input_ids = evidence_tokens.reshape(1, -1)
+            logits, drift = self.photon_inference.session_forward(
+                input_ids,
+                session_id=photon_session_id,
+                repo_id=repo_id or "unknown",
+                repo_commit="HEAD",
+                question=question,
+            )
+            confidence = compute_confidence(logits)
+            drift_dict = drift.as_dict() if drift else None
+
+        # --- Safe RecGen evaluation (uses new coarse state) ---
+        fallback_dict = None
+        if self.safe_recgen is not None and drift is not None:
+            decision = self.safe_recgen.evaluate(
+                question, drift=drift, confidence=confidence
+            )
+            fallback_dict = decision.as_dict()
+        fallback_actions = (
+            set(fallback_dict.get("actions", [])) if fallback_dict else set()
+        )
+
+        # A fallback that invalidates the PHOTON hierarchy must clear the
+        # session state (including prev_logits) so subsequent turns do not
+        # reuse a coarse state or drift reference from a stale topic
+        # (design §8 fail-closed; Codex CB-004).
+        if fallback_actions & {"reprefill_hierarchy", "fallback_to_baseline_path"}:
+            _clear_photon_session_state(self.photon_inference, photon_session_id)
+
+        # --- Generation (Issue #62 Phase 1: opt-in PHOTON single-path) ---
+        # DR-62-001 / DR4-003: strict bool validation for the opt-in flag.
+        raw_photon_gen_enabled = (
+            getattr(inference_cfg, "photon_generation_enabled", False)
+            if inference_cfg is not None
+            else False
+        )
+        if not isinstance(raw_photon_gen_enabled, bool):
+            raise ValueError(
+                "inference.photon_generation_enabled must be bool, "
+                f"got {type(raw_photon_gen_enabled).__name__}"
+            )
+        photon_gen_enabled = raw_photon_gen_enabled
+
+        # DR4-004: closed-enum validation for the deployment policy knob.
+        fallback_policy = (
+            getattr(inference_cfg, "generation_fallback_policy", "qwen")
+            if inference_cfg is not None
+            else "qwen"
+        )
+        if fallback_policy not in {"qwen", "abort"}:
+            raise ValueError(
+                "inference.generation_fallback_policy must be 'qwen' or 'abort', "
+                f"got {fallback_policy!r}"
+            )
+
+        generator_used = "qwen"
+        generator_fallback_reason: str | None = None
+
         with prof.phase("generation"):
             evidence_text = pack.format_for_prompt()
             is_first_turn = len(session.turns) == 0
@@ -466,7 +857,22 @@ class PhotonRAGPipeline:
                 include_few_shot=is_first_turn,
             )
             followup_tokens = 512 if not is_first_turn else None
-            answer = bl.generator.generate(messages, max_new_tokens=followup_tokens)
+
+            if photon_gen_enabled:
+                (
+                    answer,
+                    generator_used,
+                    generator_fallback_reason,
+                ) = self._run_photon_generation(
+                    messages=messages,
+                    bl=bl,
+                    cfg=cfg,
+                    inference_cfg=inference_cfg,
+                    followup_tokens=followup_tokens,
+                    fallback_policy=fallback_policy,
+                )
+            else:
+                answer = bl.generator.generate(messages, max_new_tokens=followup_tokens)
 
         # --- Citation ---
         with prof.phase("citation"):
@@ -518,7 +924,15 @@ class PhotonRAGPipeline:
                 "fallback_reason": (
                     fallback_dict.get("reasons") if fallback_dict else None
                 ),
-                "evidence_pruning_applied": pruning_enabled and is_follow_up,
+                "evidence_pruning_applied": (pruning_enabled and is_follow_up),
+                "photon_tokenization_failed": tokenization_failed,
+                # Issue #62 Phase 1: generation-level observability.
+                # ``generator_used`` ∈ {"photon", "qwen"} and
+                # ``generator_fallback_reason`` is a closed enum (§7.2):
+                # None | "_TokenizerEncodeFailure" | "ValueError"
+                #      | "RuntimeError" | "empty_output".
+                "generator_used": generator_used,
+                "generator_fallback_reason": generator_fallback_reason,
             }
         )
 
@@ -532,6 +946,12 @@ class PhotonRAGPipeline:
             latency=latency,
             memory=memory,
             citation_postprocessed=citation_postprocessed,
+            # Issue #62 Phase 1 (CB-003 codex-fix): expose the generator
+            # that produced ``answer`` on the structured result so
+            # comparison tools can distinguish a real PHOTON answer from
+            # a Qwen fallback without having to parse the log stream.
+            generator_used=generator_used,
+            generator_fallback_reason=generator_fallback_reason,
         )
 
         # Attach PHOTON metadata

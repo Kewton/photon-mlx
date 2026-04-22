@@ -1,0 +1,55 @@
+{
+  "config": "/Users/maenokota/share/work/github_kewton/photon-mlx-feature-issue-54-kv-cache/configs/photon_tiny.yaml",
+  "prompt_len": 32,
+  "max_new_tokens": 4,
+  "n_runs": 1,
+  "cached": {
+    "avg_sec": 0.0196,
+    "per_token_ms": 4.91,
+    "tokens_per_sec": 203.68,
+    "peak_mb": 330.51,
+    "runs_sec": [
+      0.0196
+    ],
+    "phases": {
+      "prefill": {
+        "count": 1,
+        "mean_ms": 5.6442,
+        "p50_ms": 5.6442,
+        "p95_ms": 5.6442,
+        "total_ms": 5.6442
+      },
+      "encoder_replay": {
+        "count": 3,
+        "mean_ms": 1.4706,
+        "p50_ms": 1.4863,
+        "p95_ms": 1.4882,
+        "total_ms": 4.4117
+      },
+      "top_level_increment": {
+        "count": 3,
+        "mean_ms": 0.5615,
+        "p50_ms": 0.509,
+        "p95_ms": 0.6813,
+        "total_ms": 1.6845
+      },
+      "local_tail_decode": {
+        "count": 3,
+        "mean_ms": 2.2923,
+        "p50_ms": 2.2836,
+        "p95_ms": 2.3246,
+        "total_ms": 6.8768
+      }
+    }
+  },
+  "nocache": {
+    "avg_sec": 0.0149,
+    "per_token_ms": 3.732,
+    "tokens_per_sec": 267.95,
+    "peak_mb": 337.79,
+    "runs_sec": [
+      0.0149
+    ]
+  },
+  "speedup_x": 0.76
+}
