@@ -17,7 +17,7 @@ To verify models are cached:
 
 ```bash
 ls ~/.cache/huggingface/hub/models--mlx-community--Qwen2.5-Coder-14B-Instruct-4bit/
-ls ~/.cache/huggingface/hub/models--cross-encoder--ms-marco-MiniLM-L-6-v2/
+ls ~/.cache/huggingface/hub/models--BAAI--bge-reranker-base/
 ls ~/.cache/huggingface/hub/models--sentence-transformers--all-MiniLM-L6-v2/
 ```
 

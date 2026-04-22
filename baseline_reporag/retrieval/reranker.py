@@ -5,9 +5,12 @@ Two-stage approach:
    rank highly due to surface-term overlap (llm-prompt.md, sponsors.yml,
    DISCUSSION_TEMPLATE, etc.).
 2. Cross-encoder rerank: score remaining candidates by query-passage
-   relevance using ms-marco-MiniLM-L-6-v2.  Uses English expansion terms
-   as the reranking query when available, since the model is trained on
-   English MS MARCO data.
+   relevance using a multilingual cross-encoder (default
+   ``BAAI/bge-reranker-base``).  When the caller supplies ``rerank_query``,
+   that text is used for scoring instead of ``query``; this lets the
+   pipeline pass English expansion terms alongside a non-English original
+   query.  The default model is multilingual, so passing the raw query
+   directly is also safe.
 """
 
 from __future__ import annotations
@@ -36,23 +39,34 @@ def _is_noise(chunk_id: str) -> bool:
 class CrossEncoderReranker:
     """Wraps sentence-transformers CrossEncoder for passage reranking.
 
-    The model is loaded once at construction time.  ``rerank()`` is
-    the only hot-path method (~50 ms for 16 candidates after warmup).
+    The model is loaded once at construction time.  ``rerank()`` is the
+    only hot-path method (~a few hundred ms for 16 candidates with
+    ``BAAI/bge-reranker-base`` after warmup).
 
     Args:
-        model_id: HuggingFace model ID.  Defaults to the lightweight
-            ms-marco-MiniLM-L-6-v2 (22 M params).
-        max_length: Tokenizer truncation.  256 covers most code chunks.
+        model_id: HuggingFace model ID.  Defaults to ``BAAI/bge-reranker-base``
+            (278 M params, multilingual IR fine-tuned).
+        max_length: Tokenizer truncation.  256 covers most code chunks and
+            is consistent with the upstream ``content[:600]`` character
+            trim below.
+        _model: Pre-constructed model instance for dependency injection in
+            tests.  When provided, skips the real sentence-transformers
+            download; otherwise the model is loaded from HuggingFace.
     """
 
     def __init__(
         self,
-        model_id: str = "cross-encoder/ms-marco-MiniLM-L-6-v2",
+        model_id: str = "BAAI/bge-reranker-base",
         max_length: int = 256,
+        *,
+        _model=None,
     ) -> None:
-        from sentence_transformers import CrossEncoder  # lazy import
+        if _model is not None:
+            self._model = _model
+        else:
+            from sentence_transformers import CrossEncoder  # lazy import
 
-        self._model = CrossEncoder(model_id, max_length=max_length)
+            self._model = CrossEncoder(model_id, max_length=max_length)
 
     def rerank(
         self,
@@ -66,8 +80,9 @@ class CrossEncoderReranker:
 
         Steps:
         1. Remove chunks matching ``_NOISE_PATTERNS``.
-        2. Score remaining candidates using ``rerank_query`` (English
-           expansion terms) if provided, else ``query``.
+        2. Score remaining candidates using ``rerank_query`` when provided
+           (e.g. English expansion terms alongside a non-English query),
+           else ``query`` itself.
         3. Return top ``top_k`` by cross-encoder score.
 
         If noise filtering removes all candidates, scoring falls back to
@@ -82,8 +97,6 @@ class CrossEncoderReranker:
             clean = results  # safety fallback
 
         # Stage 2: cross-encoder scoring
-        # Use English expansion terms when the original query is non-ASCII;
-        # the cross-encoder was trained on English and degrades on Japanese.
         scoring_query = rerank_query if rerank_query else query
 
         chunks = store.get_many([r.chunk_id for r in clean])
