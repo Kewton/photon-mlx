@@ -18,7 +18,7 @@ class EmbeddingResult(NamedTuple):
 class EmbeddingIndex:
     def __init__(
         self,
-        model_id: str = "sentence-transformers/all-MiniLM-L6-v2",
+        model_id: str = "BAAI/bge-small-en-v1.5",
     ) -> None:
         self._model_id = model_id
         self._model: SentenceTransformer | None = None
@@ -73,9 +73,21 @@ class EmbeddingIndex:
         (dir_path / "model_id.txt").write_text(self._model_id, encoding="utf-8")
 
     @classmethod
-    def load(cls, dir_path: str | Path) -> EmbeddingIndex:
+    def load(
+        cls,
+        dir_path: str | Path,
+        *,
+        expected_model_id: str | None = None,
+    ) -> EmbeddingIndex:
         dir_path = Path(dir_path)
         model_id = (dir_path / "model_id.txt").read_text(encoding="utf-8").strip()
+        if expected_model_id is not None and model_id != expected_model_id:
+            raise ValueError(
+                f"Embedding index at {dir_path} was built with "
+                f"'{model_id}' but config specifies '{expected_model_id}'. "
+                f"Rebuild with: rm -rf {dir_path} && "
+                f"python scripts/build_indexes.py --repo-id <repo>"
+            )
         idx = cls(model_id=model_id)
         idx._embeddings = np.load(dir_path / "embeddings.npy")
         idx._chunk_ids = json.loads(
