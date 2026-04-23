@@ -56,6 +56,8 @@ _drift_panel = _load_component("drift_panel")
 _turn_history_panel = _load_component("turn_history_panel")
 # Issue #82 Wave 4: eval_panel orchestration helpers (streamlit-free).
 _eval_panel = _load_component("eval_panel")
+# Issue #82 Wave 5: project wizard helpers (YAML safe_load + best-practice merge).
+_wizard = _load_component("wizard")
 
 STATE_FILE = PROJECT_ROOT / ".cache" / "photon_app_state.json"
 
@@ -1212,6 +1214,108 @@ def page_projects():
     )
     config_path = st.selectbox("Config ファイル", options=available_configs)
 
+    # Issue #82 Wave 5 (W5-T2): opt-in PHOTON wizard. The expander keeps
+    # the default UX minimal — users who only care about config_path /
+    # checkpoint leave the panel collapsed and the wizard is a no-op.
+    # When the user opens the expander AND PHOTON is enabled, submit
+    # writes ``projects/<safe_id(name)>/photon.yaml`` via
+    # ``wizard.generate_yaml_from_wizard`` (+ optional best-practice
+    # merge) and overrides ``photon_config_path`` accordingly.
+    with st.expander("PHOTON settings (Wave 2-4 toggles)", expanded=False):
+        use_wizard = st.checkbox(
+            "この form で PHOTON YAML を生成して保存",
+            value=False,
+            key="wizard_enable",
+            help=(
+                "オンにすると下記トグルから projects/<name>/photon.yaml を "
+                "生成し、photon_config_path に自動設定します。"
+            ),
+        )
+        wiz_base_profile = st.selectbox(
+            "Config template",
+            options=["photon_small", "photon_tiny", "photon_long_context"],
+            key="wizard_base_profile",
+        )
+        wiz_recgen = st.checkbox(
+            "RecGen enabled (inference.photon_generation_enabled)",
+            value=False,
+            key="wizard_recgen",
+        )
+        wiz_fallback: str | None = None
+        if wiz_recgen:
+            wiz_fallback = st.radio(
+                "Fallback policy (inference.generation_fallback_policy)",
+                options=list(_wizard.ALLOWED_FALLBACK_POLICIES),
+                index=0,
+                key="wizard_fallback",
+                horizontal=True,
+            )
+        wiz_two_pass = st.checkbox(
+            "2-pass search enabled (retrieval.two_pass_search.enabled)",
+            value=False,
+            key="wizard_two_pass",
+        )
+        wiz_pass1 = st.number_input(
+            "pass1_top_k",
+            min_value=1,
+            value=64,
+            step=1,
+            key="wizard_pass1_top_k",
+            disabled=not wiz_two_pass,
+        )
+        wiz_pass2 = st.number_input(
+            "pass2_top_k",
+            min_value=1,
+            value=16,
+            step=1,
+            key="wizard_pass2_top_k",
+            disabled=not wiz_two_pass,
+        )
+        wiz_wm = st.checkbox(
+            "Working memory enabled (session_memory.working_memory.enabled)",
+            value=True,
+            key="wizard_wm",
+        )
+        wiz_wm_max_turns = st.number_input(
+            "max_turns",
+            min_value=1,
+            value=8,
+            step=1,
+            key="wizard_wm_max_turns",
+            disabled=not wiz_wm,
+        )
+        wiz_wm_agg = st.selectbox(
+            "aggregation",
+            options=["weighted", "attention", "last"],
+            index=0,
+            key="wizard_wm_agg",
+            disabled=not wiz_wm,
+        )
+        wiz_wm_storage = st.selectbox(
+            "storage_mode",
+            options=["full", "top_level_only"],
+            index=0,
+            key="wizard_wm_storage",
+            disabled=not wiz_wm,
+        )
+        wiz_pinning = st.checkbox(
+            "past_turn_pinning_enabled",
+            value=False,
+            key="wizard_pinning",
+            disabled=not wiz_wm,
+        )
+        wiz_apply_best = st.checkbox(
+            "Apply best-practice when saving",
+            value=False,
+            key="wizard_apply_best",
+            help=(
+                "5 キー（safe_recgen / evidence_pruning / working_memory / "
+                "photon_generation=false / two_pass_search=false）を選択 "
+                "template にマージします。intentional conflict の profile "
+                "では警告として表示されます。"
+            ),
+        )
+
     if st.button(
         "登録",
         type="primary",
@@ -1220,30 +1324,79 @@ def page_projects():
         # Issue #82 Wave 2 (W2-T1): validate project_name before any path
         # composition. Reject metacharacters / traversal via _safe_id.
         try:
-            _safe_id(name, label="project_name")
+            safe_name = _safe_id(name, label="project_name")
         except ValueError as exc:
             st.error(f"プロジェクト名が不正です: {exc}")
             return
         # Path-containment assertion for defense-in-depth: the project dir
         # (when saved) MUST resolve inside PROJECT_ROOT / "projects".
         projects_root = (PROJECT_ROOT / "projects").resolve()
-        save_dir = (PROJECT_ROOT / "projects" / name).resolve()
+        save_dir = (PROJECT_ROOT / "projects" / safe_name).resolve()
         assert save_dir.is_relative_to(projects_root), (
             f"project save dir escaped projects root: {save_dir}"
         )
+
+        # Issue #82 Wave 5 (W5-T2): if the wizard panel opted in AND the
+        # selected checkpoint enables PHOTON, generate a fresh YAML from
+        # the chosen template + wizard toggles and (optionally) merge
+        # best-practice keys. The resulting file lives inside the
+        # validated ``save_dir`` so photon_config_path is contained.
+        photon_config_for_project = config_path if use_photon else ""
+        if use_photon and use_wizard:
+            user_toggles: dict[str, Any] = {
+                "recgen_enabled": bool(wiz_recgen),
+                "two_pass_search_enabled": bool(wiz_two_pass),
+                "two_pass_pass1_top_k": int(wiz_pass1),
+                "two_pass_pass2_top_k": int(wiz_pass2),
+                "working_memory_enabled": bool(wiz_wm),
+                "working_memory_max_turns": int(wiz_wm_max_turns),
+                "working_memory_aggregation": str(wiz_wm_agg),
+                "working_memory_storage_mode": str(wiz_wm_storage),
+                "past_turn_pinning_enabled": bool(wiz_pinning),
+            }
+            if wiz_recgen and wiz_fallback is not None:
+                user_toggles["fallback_policy"] = wiz_fallback
+
+            try:
+                generated_yaml = _wizard.generate_yaml_from_wizard(
+                    wiz_base_profile,
+                    user_toggles,
+                )
+                if wiz_apply_best:
+                    generated_yaml, warnings = _wizard.apply_best_practice(
+                        generated_yaml,
+                        wiz_base_profile,
+                    )
+                    for w in warnings:
+                        st.warning(w)
+            except ValueError as exc:
+                st.error(f"wizard YAML 生成に失敗しました: {exc}")
+                return
+
+            save_dir.mkdir(parents=True, exist_ok=True)
+            photon_yaml_path = (save_dir / "photon.yaml").resolve()
+            # Defense-in-depth: ensure the final written path is still
+            # inside projects_root after resolve().
+            assert photon_yaml_path.is_relative_to(projects_root), (
+                f"photon.yaml escaped projects root: {photon_yaml_path}"
+            )
+            _atomic_write_text(photon_yaml_path, generated_yaml)
+            photon_config_for_project = str(photon_yaml_path)
+            st.success(f"wizard YAML を保存しました: {photon_yaml_path}")
+
         project = Project(
-            name=name,
+            name=safe_name,
             repo_id=repo_id,
             index_dir=str(idx_dir / repo_id),
             config_path=config_path,
-            photon_config_path=config_path if use_photon else "",
+            photon_config_path=photon_config_for_project,
             checkpoint_dir=checkpoint if use_photon else "",
             use_photon=use_photon,
             created_at=datetime.now().isoformat(),
         )
-        state.projects[name] = project
+        state.projects[safe_name] = project
         save()
-        st.success(f"プロジェクト '{name}' を登録しました")
+        st.success(f"プロジェクト '{safe_name}' を登録しました")
         st.rerun()
 
     # --- List ---

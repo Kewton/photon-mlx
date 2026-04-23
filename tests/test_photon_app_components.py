@@ -610,6 +610,180 @@ class TestFormatTurnHistoryPanel:
         assert result["rows"] == []
 
 
+# ---------------------------------------------------------------
+# T-C5: apply_best_practice (Wave 5 — wizard.py)
+# ---------------------------------------------------------------
+
+
+class TestApplyBestPractice:
+    """T-C5: apply_best_practice merges 5 keys with profile-aware warnings."""
+
+    def test_photon_small_no_changes(self) -> None:
+        # photon_small already has all 5 best-practice values → no warnings
+        yaml_text = (
+            "inference:\n"
+            "  photon_generation_enabled: false\n"
+            "retrieval:\n"
+            "  two_pass_search:\n"
+            "    enabled: false\n"
+            "session_memory:\n"
+            "  working_memory:\n"
+            "    enabled: true\n"
+            "safe_recgen:\n"
+            "  enabled: true\n"
+            "generation:\n"
+            "  evidence_pruning_enabled: true\n"
+        )
+        _new_text, warnings = wizard.apply_best_practice(yaml_text, "photon_small")
+        assert warnings == []
+
+    def test_photon_long_context_creates_missing_two_pass_section(self) -> None:
+        yaml_text = (
+            "inference:\n"
+            "  photon_generation_enabled: false\n"
+            "session_memory:\n"
+            "  working_memory:\n"
+            "    enabled: true\n"
+            "safe_recgen:\n"
+            "  enabled: true\n"
+            "generation:\n"
+            "  evidence_pruning_enabled: true\n"
+        )
+        new_text, warnings = wizard.apply_best_practice(
+            yaml_text, "photon_long_context"
+        )
+        assert any("retrieval.two_pass_search.enabled" in w for w in warnings)
+        loaded = yaml.safe_load(new_text)
+        assert loaded["retrieval"]["two_pass_search"]["enabled"] is False
+
+    def test_photon_tiny_recgen_warns_on_conflict(self) -> None:
+        # photon_tiny_recgen has photon_generation_enabled: true (intentional)
+        # and working_memory deliberately omitted.
+        yaml_text = (
+            "inference:\n"
+            "  photon_generation_enabled: true\n"
+            "retrieval:\n"
+            "  two_pass_search:\n"
+            "    enabled: false\n"
+            "safe_recgen:\n"
+            "  enabled: true\n"
+            "generation:\n"
+            "  evidence_pruning_enabled: true\n"
+        )
+        new_text, warnings = wizard.apply_best_practice(yaml_text, "photon_tiny_recgen")
+        # Expect conflict warning for photon_generation_enabled (was True,
+        # target False, profile is intentional-conflict) and an additive
+        # warning for the missing working_memory.enabled path.
+        assert any("photon_generation_enabled" in w for w in warnings)
+        assert any("session_memory.working_memory.enabled" in w for w in warnings)
+        loaded = yaml.safe_load(new_text)
+        assert loaded["inference"]["photon_generation_enabled"] is False
+        assert loaded["session_memory"]["working_memory"]["enabled"] is True
+
+    def test_non_mapping_raises(self) -> None:
+        with pytest.raises(ValueError):
+            wizard.apply_best_practice("- a\n- b\n", "photon_small")
+
+    def test_round_trip_preserves_other_keys(self) -> None:
+        yaml_text = (
+            "version: 1\n"
+            "project:\n"
+            "  name: demo\n"
+            "safe_recgen:\n"
+            "  enabled: true\n"
+            "generation:\n"
+            "  evidence_pruning_enabled: true\n"
+            "session_memory:\n"
+            "  working_memory:\n"
+            "    enabled: true\n"
+            "inference:\n"
+            "  photon_generation_enabled: false\n"
+            "retrieval:\n"
+            "  two_pass_search:\n"
+            "    enabled: false\n"
+        )
+        new_text, _warnings = wizard.apply_best_practice(yaml_text, "photon_small")
+        loaded = yaml.safe_load(new_text)
+        assert loaded["version"] == 1
+        assert loaded["project"]["name"] == "demo"
+
+
+# ---------------------------------------------------------------
+# T-C6: generate_yaml_from_wizard (Wave 5 — wizard.py)
+# ---------------------------------------------------------------
+
+
+class TestGenerateYamlFromWizard:
+    """T-C6: generate_yaml_from_wizard applies toggles + validates fallback."""
+
+    def test_invalid_fallback_policy_raises(self) -> None:
+        with pytest.raises(ValueError, match="fallback_policy"):
+            wizard.generate_yaml_from_wizard(
+                "photon_small",
+                {"fallback_policy": "invalid"},
+                base_yaml_text="model: {}\n",
+            )
+
+    def test_accepts_qwen_and_abort(self) -> None:
+        for policy in ("qwen", "abort"):
+            result = wizard.generate_yaml_from_wizard(
+                "photon_small",
+                {"fallback_policy": policy},
+                base_yaml_text="model: {}\n",
+            )
+            loaded = yaml.safe_load(result)
+            assert loaded["inference"]["generation_fallback_policy"] == policy
+
+    def test_applies_toggles_to_base(self) -> None:
+        base = "model:\n  architecture: photon_decoder\n"
+        result = wizard.generate_yaml_from_wizard(
+            "photon_small",
+            {
+                "recgen_enabled": True,
+                "two_pass_search_enabled": True,
+                "two_pass_pass1_top_k": 32,
+            },
+            base_yaml_text=base,
+        )
+        loaded = yaml.safe_load(result)
+        assert loaded["inference"]["photon_generation_enabled"] is True
+        assert loaded["retrieval"]["two_pass_search"]["enabled"] is True
+        assert loaded["retrieval"]["two_pass_search"]["pass1_top_k"] == 32
+        # base key preserved
+        assert loaded["model"]["architecture"] == "photon_decoder"
+
+    def test_working_memory_toggles_all_applied(self) -> None:
+        result = wizard.generate_yaml_from_wizard(
+            "photon_small",
+            {
+                "working_memory_enabled": True,
+                "working_memory_max_turns": 12,
+                "working_memory_aggregation": "attention",
+                "working_memory_storage_mode": "top_level_only",
+                "past_turn_pinning_enabled": True,
+            },
+            base_yaml_text="model: {}\n",
+        )
+        loaded = yaml.safe_load(result)
+        wm = loaded["session_memory"]["working_memory"]
+        assert wm["enabled"] is True
+        assert wm["max_turns"] == 12
+        assert wm["aggregation"] == "attention"
+        assert wm["storage_mode"] == "top_level_only"
+        assert wm["past_turn_pinning_enabled"] is True
+
+    def test_ignores_unknown_toggles(self) -> None:
+        # Unknown keys must not raise so the UI can feed a full form dict.
+        result = wizard.generate_yaml_from_wizard(
+            "photon_small",
+            {"recgen_enabled": True, "ignored_extra": "whatever"},
+            base_yaml_text="model: {}\n",
+        )
+        loaded = yaml.safe_load(result)
+        assert loaded["inference"]["photon_generation_enabled"] is True
+        assert "ignored_extra" not in loaded
+
+
 if __name__ == "__main__":  # pragma: no cover - manual run only
     import pytest as _pytest
 
