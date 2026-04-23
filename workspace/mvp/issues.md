@@ -51,10 +51,26 @@ Wave 6 batch merge で MT NC 5.6% → 17.8% に regression、全件 revert（PR 
 
 ## Open Issues（MVP 作業として残存）
 
+### Phase 2: 制度文書ドメイン検証（2026-04-24 登録、Epic #117）
+
+| Group | Issue | タイトル | 工数 | 依存 |
+|-------|-------|---------|------|------|
+| — | **#117** | **[Epic] Phase 2 制度文書ドメイン検証** | — | — |
+| G1 | #109 | feat(ingestion): markdown chunker + symbol graph conditional skip | 3 日 | なし |
+| G1 | #110 | feat(eval): 制度文書 eval set 自動生成 | 4 日 | なし |
+| G1 | #111 | feat(retrieval): query_expansion / noise_patterns 汎用化 | 3 日 | なし |
+| G2 | #112 | feat(configs): 制度文書プロファイル + index + baseline Static eval | 3 日 | G1 |
+| G3 | **#113** | **measure: 現行 PHOTON で MT eval 実測（学習要否の判定根拠）** | 2 日 | #112 |
+| G3 | #114 | feat(retrieval): 多言語 embedding / reranker A/B | 4 日 | #112 |
+| G4 | #115 | feat(app): wizard domain template + 日本語 prompt | 2 日 | #112, #114 |
+| G4 | #116 | docs: Phase 2 完了レポート（再現率比較） | 1 日 | 全 Issue |
+
+### その他（継続課題）
+
 | Issue | タイトル | 種別 | 優先 |
 |-------|---------|------|------|
-| #81 | [Epic] Static NC < 15% 達成のための retrieval チューニング | enhancement | 中（#88 harness で grid 実行可）|
-| #49 | PHOTON Medium (1B) スケールアップ検討 | research | 低（MVP 後）|
+| #81 | [Epic] Static NC < 15% 達成のための retrieval チューニング | enhancement | 中（#88 harness で grid 実行可、Phase 2 と並走可能）|
+| #49 | PHOTON Medium (1B) スケールアップ検討 | research | 低（MVP 後、#113 結果次第では前倒し候補）|
 
 ---
 
@@ -70,15 +86,20 @@ Wave 6 batch merge で MT NC 5.6% → 17.8% に regression、全件 revert（PR 
 | test_photon_pipeline 修正 | ✅ 現状 832/834 pass（既知 2 pre-existing failure のみ）|
 | 異常入力テスト | ✅ `_safe_id` / YAML safe_load guardrail で Wave 2 に反映 |
 
-### Phase 2: 汎用化 — ❌ 未着手（MVP のボトルネック）
+### Phase 2: 制度文書ドメイン検証 — 🏃 進行中（Epic #117、2026-04-24 pivot）
 
-| タスク | 工数見積 | 状態 |
-|-------|--------|------|
-| Django repo eval 検証 | 3 日 | 未着手 |
-| Pydantic repo eval 検証 | 2 日 | 未着手 |
-| query_expansion 汎用化 | 2 日 | 未着手（FastAPI 固有マッピング残存）|
-| noise patterns 設定化 | 1 日 | 未着手 |
-| eval set 自動生成スクリプト | 3 日 | 未着手 |
+**方針変更**: Django / Pydantic での code 汎用化は skip。**日本語制度文書（4,228 ファイル）への pivot**。
+
+| タスク | Issue | 工数 | 状態 |
+|-------|-------|------|------|
+| Markdown chunker + symbol graph skip | #109 | 3 日 | 未着手 |
+| 制度文書 eval set 自動生成 | #110 | 4 日 | 未着手 |
+| query_expansion / noise_patterns 汎用化 | #111 | 3 日 | 未着手 |
+| 制度文書 config + baseline eval | #112 | 3 日 | 依存待ち |
+| **現行 PHOTON で MT eval（学習要否判定）** | **#113** | **2 日** | **クリティカル** |
+| 多言語 embedding / reranker A/B | #114 | 4 日 | 依存待ち |
+| wizard + 日本語 prompt | #115 | 2 日 | 依存待ち |
+| Phase 2 完了レポート | #116 | 1 日 | 最終 |
 
 ### Phase 3: 配布（pip） — ❌ 未着手
 
