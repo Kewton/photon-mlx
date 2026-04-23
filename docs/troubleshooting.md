@@ -137,3 +137,34 @@ top -pid $(pgrep -f baseline_reporag)
 5. **`torch_ref` 経路で長コンテキスト**: `torch_ref` は 128 位置までしか扱えない。長コンテキストは必ず MLX 経路（`PhotonModel`）で使うこと。`torch_ref/_precompute_rope` で `scaling != "none"` を渡すと `NotImplementedError` が明示的に raise される（silent fallback なし）。
 
 参考: `reports/issue-55-long-context.md`
+
+---
+
+## Streamlit アプリ: drift_metrics が `N/A` のまま表示される (Issue #82)
+
+**Symptom**: PHOTON プロジェクトのチャット画面で drift metrics パネルが常に `N/A (baseline_rag or first turn)` を表示し、4 指標が取れない。
+
+**Checklist**:
+
+1. **`cfg.model.provider` が `"photon"` か**: `build_pipeline(cfg)` は `cfg.model.provider == "photon"` の場合のみ `PhotonRAGPipeline` を返す。プロジェクトの `photon_config_path` が指す YAML を確認し、`model.provider: "photon"` が設定されているか (`configs/photon_small.yaml:155` 等が参考)。
+2. **MLX がインストールされているか**: baseline-only マシンでは `ModuleNotFoundError: mlx.core` が `build_pipeline` 内で発生し、UI は `photon_unavailable_{project_name}` フラグを立てて送信をブロックする。チャット画面上部の赤色エラーバナーを確認。
+3. **初回ターン**: drift metrics は 2 ターン目以降から値が入る仕様。最初の質問では `N/A (first turn)` は正常。
+4. **`use_photon=False` の baseline プロジェクト**: これは仕様通り `N/A (baseline_rag)`。PHOTON を試したい場合は新規プロジェクトを `use_photon=True` + PHOTON config で作成。
+
+---
+
+## Streamlit アプリ: eval ジョブが進まない / 消えない (Issue #82)
+
+**Symptom**: `[Run Static Eval]` を押したがステータスが `running` のまま止まる、または Streamlit 再起動後に孤児ジョブが残る。
+
+**Checklist**:
+
+1. **state ファイルで PID 確認**: `.cache/photon_app_state.json` を開き、該当 `eval_jobs[<job_id>]` の `pid` を確認。
+2. **プロセス存在確認**: `ps -p <pid>`。プロセスがいなければマーカーが作られなかったまま死んだ（OOM や SIGKILL が典型）。この場合次回 `_sync_eval_job` が走ったタイミングで `status='failed'` に遷移する（即時反映したい場合は Streamlit を一度再起動）。
+3. **Wall-clock timeout**: 経過 3600 秒を超えると自動的に `status='failed'` + `error_message='wall-clock timeout'` に遷移する（Apple Silicon で 120Q の Static eval でも通常 40 分で終わる想定）。
+4. **手動 kill**: `kill -15 <pid>`（SIGTERM）で停止。`kill -9 <pid>`（SIGKILL）は log/marker が不完全になるため最終手段に。
+5. **ログ確認**: `logs/eval/<job_id>.log` の末尾を確認。tokenizer エラーや MLX 初期化エラーが典型。
+6. **マニュアル cleanup（retention）**: `AppState.eval_jobs` は自動削除されないため、不要になったエントリは `.cache/photon_app_state.json` を直接編集して削除するか、Streamlit を停止 → JSON 編集 → 再起動。成果物（`reports/eval_runs/*.json`、`logs/eval/*.log`、`reports/eval_runs/*.done`）は安全に削除可能（gitignore 済み）。
+7. **Concurrent 起動**: `MAX_CONCURRENT_EVAL=1` のため、既に running の eval がある場合は Start ボタンが disabled になる（仕様）。
+
+参考: 設計方針書 `workspace/design/issue-82-app-photon-features-design-policy.md` §6.4 / §7.2
