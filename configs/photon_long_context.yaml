@@ -131,6 +131,9 @@ session_memory:
     # (Issue #92) selects weighted/attention/hybrid at call time via
     # ``dynamic_strategy`` ∈ {"turn_position","drift_based","hybrid"}.
     aggregation: weighted
+    # Issue #103: opt-in past-turn pinning (default off until eval gate).
+    past_turn_pinning_enabled: false
+    max_pinned_chunks: 3
 
 tokenizer:
   tokenizer_id: "mlx-community/Qwen2.5-Coder-14B-Instruct-4bit"

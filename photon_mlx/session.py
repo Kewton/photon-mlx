@@ -364,6 +364,22 @@ class WorkingMemoryConfig:
     exceeds ``weighted_until_turn``. The dispatcher clamps to ``[0.0,
     1.0]`` (Issue #92 §4)."""
 
+    # --- Issue #103: past-turn pinning (opt-in until eval gate passes). ---
+    past_turn_pinning_enabled: bool = False
+    """When ``True``, ``PhotonRAGPipeline`` calls
+    :meth:`PhotonSessionState.find_relevant_past_turn` after each turn and
+    pins the matched turn's ``cited_chunk_ids`` into the next turn's
+    evidence pack via ``additional_pinned_ids`` (design §4-3, §8 Step 5).
+    Default ``False`` keeps existing pipelines unchanged until the 2-run
+    MT eval gate flips defaults (design §8 Step 9)."""
+
+    max_pinned_chunks: int = 3
+    """Upper bound on the number of cited chunks promoted from the matched
+    past turn into the next turn's pin set. ``< 1`` raises ``ValueError``
+    (range error, DR1-001 / DR2-005, mirrors ``max_turns < 1``). Values
+    ``> 16`` only ``warnings.warn`` because ``evidence_pack.max_chunks`` /
+    ``max_tokens`` provide the hard cap (design §4-1)."""
+
     def __post_init__(self) -> None:
         if not isinstance(self.enabled, bool):
             raise TypeError(f"enabled must be bool, got {type(self.enabled).__name__}")
@@ -492,6 +508,51 @@ class WorkingMemoryConfig:
         self.hybrid_alpha_per_turn = _validate_finite_float(
             "hybrid_alpha_per_turn", self.hybrid_alpha_per_turn
         )
+
+        # --- Issue #103: past-turn pinning fields (design §4-1). ---
+        if not isinstance(self.past_turn_pinning_enabled, bool):
+            raise TypeError(
+                "past_turn_pinning_enabled must be bool, got "
+                f"{type(self.past_turn_pinning_enabled).__name__}"
+            )
+        if isinstance(self.max_pinned_chunks, bool) or not isinstance(
+            self.max_pinned_chunks, int
+        ):
+            raise TypeError(
+                "max_pinned_chunks must be int, got "
+                f"{type(self.max_pinned_chunks).__name__}"
+            )
+        if self.max_pinned_chunks < 1:
+            # DR1-001 / DR2-005: range errors map to ``ValueError`` (mirrors
+            # ``max_turns < 1`` and ``weighted_until_turn < 0``); type errors
+            # already mapped to ``TypeError`` above. ``_resolve_working_memory_cfg``
+            # downgrades both classes to a warning + fail-closed disable.
+            raise ValueError(
+                f"max_pinned_chunks must be >= 1, got {self.max_pinned_chunks}"
+            )
+        if self.max_pinned_chunks > 16:
+            warnings.warn(
+                f"max_pinned_chunks={self.max_pinned_chunks} exceeds soft cap "
+                "16; evidence pack max_chunks / max_tokens may be exceeded",
+                stacklevel=2,
+            )
+
+        # Codex CB-002 fix: ``summary_only`` storage mode never populates
+        # ``turn_history`` (see :meth:`PhotonSessionState._append_summary_only`),
+        # so :meth:`PhotonSessionState.find_relevant_past_turn` always returns
+        # ``None``. Combining it with ``past_turn_pinning_enabled=True`` would
+        # silently no-op the entire pinning feature. Emit an actionable
+        # ``UserWarning`` (not ``raise``) since this is a soft configuration
+        # mismatch, matching the existing ``warnings.warn`` pattern used by
+        # ``max_pinned_chunks > 16`` and ``weighted_until_turn > max_turns``.
+        if self.past_turn_pinning_enabled and self.storage_mode == "summary_only":
+            warnings.warn(
+                "past_turn_pinning_enabled=True is a no-op when "
+                "storage_mode='summary_only' because turn_history is never "
+                "populated; set storage_mode='full' to enable past-turn "
+                "pinning",
+                stacklevel=2,
+            )
 
         # DR1-004: emit DeprecationWarning only when the caller mixed the
         # deprecated ``compress_old_turns`` with a non-default ``storage_mode``.

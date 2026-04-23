@@ -136,6 +136,13 @@ session_memory:
     # along with the related knobs (weighted_until_turn,
     # attention_drift_threshold, hybrid_alpha_base, hybrid_alpha_per_turn).
     aggregation: weighted
+    # Issue #103: opt-in past-turn pinning. When enabled, PHOTON pipeline
+    # calls find_relevant_past_turn after each turn and pins the matched
+    # turn's cited_chunk_ids into the next turn's evidence pack via
+    # ``additional_pinned_ids`` (design §4-3, §8 Step 5). Default false
+    # until the 2-run MT eval gate flips this on globally.
+    past_turn_pinning_enabled: false
+    max_pinned_chunks: 3
 
 tokenizer:
   tokenizer_id: "mlx-community/Qwen2.5-Coder-14B-Instruct-4bit"

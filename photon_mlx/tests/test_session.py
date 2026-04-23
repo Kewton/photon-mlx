@@ -3283,3 +3283,77 @@ class TestCompressedHistoryRejectsZeroLengthSummaries:
             )
         )
         assert session.get_session_coarse_state() is None
+
+
+# ---------------------------------------------------------------------------
+# Issue #103: WorkingMemoryConfig past-turn pinning fields validation.
+# ---------------------------------------------------------------------------
+
+
+class TestWorkingMemoryConfigPastTurnPinning:
+    """Issue #103: ``past_turn_pinning_enabled`` / ``max_pinned_chunks`` fields.
+
+    Validation contract (design §4-1, DR1-001 / DR2-005):
+
+    * ``past_turn_pinning_enabled`` defaults to ``False`` (opt-in only).
+    * ``max_pinned_chunks`` defaults to ``3``.
+    * ``past_turn_pinning_enabled`` non-bool → ``TypeError``.
+    * ``max_pinned_chunks`` ``bool`` or non-int → ``TypeError``.
+    * ``max_pinned_chunks`` ``< 1`` → ``ValueError`` (range error,
+      consistent with existing ``max_turns < 1`` pattern).
+    * ``max_pinned_chunks`` ``> 16`` → ``warnings.warn`` only (soft cap).
+    """
+
+    def test_past_turn_pinning_enabled_default_false(self) -> None:
+        """Default must be ``False`` so the feature is opt-in."""
+        cfg = WorkingMemoryConfig()
+        assert cfg.past_turn_pinning_enabled is False
+
+    def test_max_pinned_chunks_default_3(self) -> None:
+        """Default must be ``3`` per design §4-1."""
+        cfg = WorkingMemoryConfig()
+        assert cfg.max_pinned_chunks == 3
+
+    def test_max_pinned_chunks_rejects_bool(self) -> None:
+        """``bool`` payloads must be rejected (Python's ``bool`` ⊂ ``int``)."""
+        with pytest.raises(TypeError):
+            WorkingMemoryConfig(max_pinned_chunks=True)  # type: ignore[arg-type]
+        with pytest.raises(TypeError):
+            WorkingMemoryConfig(max_pinned_chunks=False)  # type: ignore[arg-type]
+
+    def test_max_pinned_chunks_rejects_zero(self) -> None:
+        """``< 1`` is a *range* error → ``ValueError`` (DR1-001)."""
+        with pytest.raises(ValueError):
+            WorkingMemoryConfig(max_pinned_chunks=0)
+        with pytest.raises(ValueError):
+            WorkingMemoryConfig(max_pinned_chunks=-1)
+
+    def test_max_pinned_chunks_warns_above_cap(self) -> None:
+        """``> 16`` emits ``warnings.warn`` but still constructs."""
+        import warnings as _warnings
+
+        with _warnings.catch_warnings(record=True) as records:
+            _warnings.simplefilter("always")
+            cfg = WorkingMemoryConfig(max_pinned_chunks=17)
+        assert cfg.max_pinned_chunks == 17
+        # Ensure at least one warning surfaced about the soft cap.
+        assert any("max_pinned_chunks" in str(r.message) for r in records), (
+            f"expected soft-cap warning, got: {[str(r.message) for r in records]}"
+        )
+
+    def test_summary_only_with_pinning_warns(self) -> None:
+        """Issue #103 / CB-002 regression: combining
+        ``storage_mode='summary_only'`` with ``past_turn_pinning_enabled=True``
+        must emit a ``warnings.warn`` (not raise).
+
+        ``summary_only`` never populates ``turn_history``, so
+        :meth:`PhotonSessionState.find_relevant_past_turn` always returns
+        ``None`` — the pinning feature would silently no-op. The fix
+        emits an actionable ``UserWarning`` so operators see that the
+        pinning is disabled and that ``storage_mode='full'`` is required.
+        """
+        with pytest.warns(UserWarning, match="past_turn_pinning_enabled"):
+            WorkingMemoryConfig(
+                storage_mode="summary_only",
+                past_turn_pinning_enabled=True,
+            )
