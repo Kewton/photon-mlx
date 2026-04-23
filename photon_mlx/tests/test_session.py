@@ -270,8 +270,17 @@ class TestSessionState:
         assert drift.topic_shift_score < 1e-5
 
     def test_drift_metrics_as_dict_superset(self) -> None:
-        """DriftMetrics.as_dict() superset contract (DR3-002): legacy keys
-        stay present, three new keys are added."""
+        """DriftMetrics.as_dict() superset contract (DR3-002 + Issue #92 T-3):
+
+        * Legacy keys stay present (numeric drift fields — finite-checked).
+        * Three per-level keys added in Issue #63 stay present.
+        * Two new Issue #92 keys are present with their default values
+          (``selected_aggregation_mode`` / ``selected_aggregation_alpha``).
+        * Finite-check for the numeric drift fields is separate from the
+          type check for the mode/alpha fields (Issue body (g)).
+        """
+        import math as _math
+
         session = PhotonSessionState("s1", "repo", "abc123")
         s1 = HierarchicalState(
             level_states=[mx.ones((1, 4, 64)), mx.ones((1, 1, 64))],
@@ -284,7 +293,7 @@ class TestSessionState:
         )
         drift = session.update(s2)
         d = drift.as_dict()
-        # Legacy keys preserved.
+        # Legacy numeric keys preserved — all must be finite.
         for key in (
             "turn_id",
             "latent_cosine_drift",
@@ -300,8 +309,49 @@ class TestSessionState:
             "latent_cosine_drift_token",
         ):
             assert key in d
+        # Finite-check (separated from mode/alpha in Issue #92 T-3).
+        numeric_keys = (
+            "latent_cosine_drift",
+            "latent_cosine_drift_top",
+            "latent_cosine_drift_mid",
+            "latent_cosine_drift_token",
+            "token_agreement",
+            "logit_kl",
+            "topic_shift_score",
+        )
+        for key in numeric_keys:
+            assert _math.isfinite(d[key]), f"{key} must be finite"
         # Alias still returns top.
         assert d["latent_cosine_drift"] == d["latent_cosine_drift_top"]
+
+        # Issue #92: new telemetry fields present by default as ``None``.
+        assert "selected_aggregation_mode" in d
+        assert "selected_aggregation_alpha" in d
+        assert d["selected_aggregation_mode"] is None
+        assert d["selected_aggregation_alpha"] is None
+
+    def test_drift_metrics_as_dict_mode_alpha_types(self) -> None:
+        """Issue #92 T-3 (g): mode/alpha fields carry correct types when set.
+
+        Separated from the legacy numeric ``as_dict`` test so that the
+        type-check for mode (str) and alpha (float) does NOT run through
+        the numeric finite-check path.
+        """
+        m = DriftMetrics(turn_id=2)
+        m.selected_aggregation_mode = "hybrid"
+        m.selected_aggregation_alpha = 0.375
+        d = m.as_dict()
+        assert d["selected_aggregation_mode"] == "hybrid"
+        assert isinstance(d["selected_aggregation_mode"], str)
+        assert d["selected_aggregation_alpha"] == pytest.approx(0.375)
+        assert isinstance(d["selected_aggregation_alpha"], float)
+
+        # When only mode is set (weighted/attention/last), alpha stays None.
+        m2 = DriftMetrics(turn_id=3)
+        m2.selected_aggregation_mode = "weighted"
+        d2 = m2.as_dict()
+        assert d2["selected_aggregation_mode"] == "weighted"
+        assert d2["selected_aggregation_alpha"] is None
 
     def test_custom_drift_level_weights(self) -> None:
         """Custom weights propagate into topic_shift_score."""
@@ -1276,9 +1326,21 @@ class TestWorkingMemorySecurityRegression:
         assert out["token_agreement"] == 0.0
         assert out["logit_kl"] == 0.0
         assert abs(out["topic_shift_score"] - 0.25) < 1e-9
-        # JSON-safety: no NaN / Inf tokens in the dict.
-        for v in out.values():
-            assert _math.isfinite(v)
+        # JSON-safety: no NaN / Inf tokens in the NUMERIC fields. Issue #92
+        # adds mode/alpha fields of types str | None and float | None so we
+        # finite-check only the drift numeric keys here.
+        numeric_keys = {
+            "turn_id",
+            "latent_cosine_drift",
+            "latent_cosine_drift_top",
+            "latent_cosine_drift_mid",
+            "latent_cosine_drift_token",
+            "token_agreement",
+            "logit_kl",
+            "topic_shift_score",
+        }
+        for key in numeric_keys:
+            assert _math.isfinite(out[key])
         # A warning was surfaced for each non-finite coercion. The alias
         # ``latent_cosine_drift`` and the authoritative ``_top`` field both
         # resolve to NaN, so at minimum the 4 coercions (drift + alias +
@@ -1416,8 +1478,12 @@ class TestWorkingMemoryConfigAggregation:
         assert cfg.aggregation == "weighted"
 
     def test_working_memory_config_aggregation_accepts_valid_values(self) -> None:
-        """All three documented modes must construct successfully."""
-        for mode in ("weighted", "attention", "last"):
+        """All four documented modes must construct successfully.
+
+        Issue #92 adds ``"dynamic"`` to the closed-enum. The three legacy
+        modes (weighted/attention/last) continue to construct unchanged.
+        """
+        for mode in ("weighted", "attention", "last", "dynamic"):
             cfg = WorkingMemoryConfig(aggregation=mode)
             assert cfg.aggregation == mode
 
@@ -1505,27 +1571,189 @@ class TestWorkingMemoryConfigAggregation:
             WorkingMemoryConfig(aggregation="")
 
 
+class TestDynamicStrategyConfigValidation:
+    """Issue #92 T-2: validation rules for the five new dynamic fields.
+
+    Closed-enum and finite-float invariants follow the existing DR4-001
+    no-leak pattern — raw attacker-controlled values must never surface in
+    the error messages.
+    """
+
+    # ---- dynamic_strategy (closed enum) ----
+    @pytest.mark.parametrize("strategy", ["turn_position", "drift_based", "hybrid"])
+    def test_dynamic_strategy_accepts_valid_values(self, strategy: str) -> None:
+        cfg = WorkingMemoryConfig(aggregation="dynamic", dynamic_strategy=strategy)
+        assert cfg.dynamic_strategy == strategy
+
+    def test_dynamic_strategy_default_is_turn_position(self) -> None:
+        cfg = WorkingMemoryConfig()
+        assert cfg.dynamic_strategy == "turn_position"
+
+    def test_dynamic_strategy_rejects_non_str(self) -> None:
+        for bad in (1, 1.5, ["hybrid"], None):
+            with pytest.raises(TypeError) as excinfo:
+                WorkingMemoryConfig(dynamic_strategy=bad)  # type: ignore[arg-type]
+            # Type name is surfaced; raw repr of the payload is not
+            # (except when ``None`` where ``repr(None)="None"`` is a
+            # substring of ``NoneType`` — we skip that assert for None).
+            assert type(bad).__name__ in str(excinfo.value)
+            if bad is not None:
+                assert repr(bad) not in str(excinfo.value)
+
+    def test_dynamic_strategy_rejects_unknown_value_no_leak(self) -> None:
+        SENSITIVE = "<ATTACK-DYN-STRATEGY-SENTINEL>"
+        with pytest.raises(ValueError) as excinfo:
+            WorkingMemoryConfig(dynamic_strategy=SENSITIVE)
+        assert SENSITIVE not in str(excinfo.value)
+
+        for bad in ("turnposition", "hybrid_plus", "TURN_POSITION"):
+            with pytest.raises(ValueError) as excinfo:
+                WorkingMemoryConfig(dynamic_strategy=bad)
+            assert bad not in str(excinfo.value)
+
+    # ---- weighted_until_turn ----
+    def test_weighted_until_turn_default_is_three(self) -> None:
+        cfg = WorkingMemoryConfig()
+        assert cfg.weighted_until_turn == 3
+
+    @pytest.mark.parametrize("value", [0, 1, 3, 8])
+    def test_weighted_until_turn_accepts_non_negative(self, value: int) -> None:
+        cfg = WorkingMemoryConfig(weighted_until_turn=value)
+        assert cfg.weighted_until_turn == value
+
+    def test_weighted_until_turn_rejects_negative(self) -> None:
+        with pytest.raises(ValueError, match="weighted_until_turn"):
+            WorkingMemoryConfig(weighted_until_turn=-1)
+
+    def test_weighted_until_turn_rejects_non_int(self) -> None:
+        for bad in (1.5, "3", True):
+            with pytest.raises(TypeError):
+                WorkingMemoryConfig(weighted_until_turn=bad)  # type: ignore[arg-type]
+
+    def test_weighted_until_turn_warns_when_above_max_turns(self) -> None:
+        import warnings as _warnings
+
+        with _warnings.catch_warnings(record=True) as captured:
+            _warnings.simplefilter("always")
+            cfg = WorkingMemoryConfig(max_turns=3, weighted_until_turn=10)
+        assert cfg.weighted_until_turn == 10  # stored even though above cap
+        assert any("weighted_until_turn" in str(w.message) for w in captured)
+
+    # ---- attention_drift_threshold (finite float in [0, 1]) ----
+    def test_attention_drift_threshold_default(self) -> None:
+        cfg = WorkingMemoryConfig()
+        assert cfg.attention_drift_threshold == 0.5
+
+    @pytest.mark.parametrize("value", [0.0, 0.25, 0.5, 0.75, 1.0])
+    def test_attention_drift_threshold_accepts_in_range(self, value: float) -> None:
+        cfg = WorkingMemoryConfig(attention_drift_threshold=value)
+        assert cfg.attention_drift_threshold == value
+
+    def test_attention_drift_threshold_rejects_out_of_range(self) -> None:
+        import math as _math
+
+        for bad in (-0.1, 1.1, 2.0, _math.nan, _math.inf, -_math.inf):
+            with pytest.raises(ValueError, match="attention_drift_threshold"):
+                WorkingMemoryConfig(attention_drift_threshold=bad)
+
+    def test_attention_drift_threshold_rejects_non_float(self) -> None:
+        for bad in ("0.5", [0.5], None, True):
+            with pytest.raises(TypeError):
+                WorkingMemoryConfig(attention_drift_threshold=bad)  # type: ignore[arg-type]
+
+    # ---- hybrid_alpha_base ----
+    def test_hybrid_alpha_base_default(self) -> None:
+        cfg = WorkingMemoryConfig()
+        assert cfg.hybrid_alpha_base == 0.5
+
+    @pytest.mark.parametrize("value", [-5.0, 0.0, 0.25, 1.0, 10.0])
+    def test_hybrid_alpha_base_accepts_finite(self, value: float) -> None:
+        # Finite floats are accepted; clamp happens at dispatch time.
+        cfg = WorkingMemoryConfig(hybrid_alpha_base=value)
+        assert cfg.hybrid_alpha_base == value
+
+    def test_hybrid_alpha_base_rejects_non_finite(self) -> None:
+        import math as _math
+
+        for bad in (_math.nan, _math.inf, -_math.inf):
+            with pytest.raises(ValueError, match="hybrid_alpha_base"):
+                WorkingMemoryConfig(hybrid_alpha_base=bad)
+
+    def test_hybrid_alpha_base_rejects_non_float(self) -> None:
+        for bad in ("0.5", [0.5], None, True):
+            with pytest.raises(TypeError):
+                WorkingMemoryConfig(hybrid_alpha_base=bad)  # type: ignore[arg-type]
+
+    # ---- hybrid_alpha_per_turn ----
+    def test_hybrid_alpha_per_turn_default(self) -> None:
+        cfg = WorkingMemoryConfig()
+        assert cfg.hybrid_alpha_per_turn == 0.1
+
+    @pytest.mark.parametrize("value", [-1.0, 0.0, 0.1, 5.0])
+    def test_hybrid_alpha_per_turn_accepts_finite(self, value: float) -> None:
+        cfg = WorkingMemoryConfig(hybrid_alpha_per_turn=value)
+        assert cfg.hybrid_alpha_per_turn == value
+
+    def test_hybrid_alpha_per_turn_rejects_non_finite(self) -> None:
+        import math as _math
+
+        for bad in (_math.nan, _math.inf, -_math.inf):
+            with pytest.raises(ValueError, match="hybrid_alpha_per_turn"):
+                WorkingMemoryConfig(hybrid_alpha_per_turn=bad)
+
+
+def _mk_mode_cfg(aggregation_param: str, **kwargs: object) -> WorkingMemoryConfig:
+    """Build a :class:`WorkingMemoryConfig` for parametrized mode tests.
+
+    Accepts either a static mode (``"weighted"``/``"attention"``/``"last"``)
+    or a ``"dynamic-<strategy>"`` tag (Issue #92 T-6). This collapses the
+    Issue #80 3-mode matrix and the Issue #92 3-strategy matrix into a
+    single 6-value parametrize for the (a) common-contract tests.
+    """
+    if aggregation_param.startswith("dynamic-"):
+        strategy = aggregation_param.split("-", 1)[1]
+        return WorkingMemoryConfig(
+            aggregation="dynamic",
+            dynamic_strategy=strategy,
+            **kwargs,  # type: ignore[arg-type]
+        )
+    return WorkingMemoryConfig(aggregation=aggregation_param, **kwargs)  # type: ignore[arg-type]
+
+
+# Parametrize ids used by TestGetSessionCoarseStateModes (a) common
+# contract: legacy 3 static + 3 dynamic strategies (Issue #92 T-6 (b)).
+_MODE_IDS_ALL: tuple[str, ...] = (
+    "weighted",
+    "attention",
+    "last",
+    "dynamic-turn_position",
+    "dynamic-drift_based",
+    "dynamic-hybrid",
+)
+
+
 class TestGetSessionCoarseStateModes:
-    """Issue #80: 3-mode dispatch for ``get_session_coarse_state()``.
+    """Issue #80 + #92: mode dispatch for ``get_session_coarse_state()``.
 
     Four categories (design §8 DR1-009):
     - (a) common contract across modes (shape, dtype, None)
     - (b) mode-specific edge cases
     - (c) validation / defensive raise
     - (d) prune parity (covered in TestPruneParityAcrossAggregationModes)
+
+    Issue #92 T-6 (b) extends the (a) common-contract parametrize to also
+    cover the 3 new dynamic strategies.
     """
 
     # ---- (a) common contract across modes ----
-    @pytest.mark.parametrize("aggregation", ["weighted", "attention", "last"])
+    @pytest.mark.parametrize("aggregation", list(_MODE_IDS_ALL))
     def test_all_modes_shape_dtype(self, aggregation: str) -> None:
-        """3 modes must return (D,) float32 vectors."""
+        """All modes (static 3 + dynamic 3) must return (D,) float32 vectors."""
         session = PhotonSessionState(
             "s1",
             "repo",
             "abc",
-            working_memory_cfg=WorkingMemoryConfig(
-                enabled=True, max_turns=4, aggregation=aggregation
-            ),
+            working_memory_cfg=_mk_mode_cfg(aggregation, max_turns=4),
         )
         session.update(_mk_state(1.0))
         session.update(_mk_state(2.0))
@@ -1535,46 +1763,40 @@ class TestGetSessionCoarseStateModes:
         assert coarse.shape == (4,)
         assert coarse.dtype == mx.float32
 
-    @pytest.mark.parametrize("aggregation", ["weighted", "attention", "last"])
+    @pytest.mark.parametrize("aggregation", list(_MODE_IDS_ALL))
     def test_all_modes_empty_turn_history_returns_none(self, aggregation: str) -> None:
-        """All 3 modes return None on empty turn_history."""
+        """All modes return None on empty turn_history."""
         session = PhotonSessionState(
             "s1",
             "repo",
             "abc",
-            working_memory_cfg=WorkingMemoryConfig(
-                enabled=True, aggregation=aggregation
-            ),
+            working_memory_cfg=_mk_mode_cfg(aggregation),
         )
         assert session.get_session_coarse_state() is None
 
-    @pytest.mark.parametrize("aggregation", ["weighted", "attention", "last"])
+    @pytest.mark.parametrize("aggregation", list(_MODE_IDS_ALL))
     def test_all_modes_disabled_returns_none(self, aggregation: str) -> None:
-        """All 3 modes return None when working memory is disabled."""
+        """All modes return None when working memory is disabled."""
         # Even if aggregation is set, enabled=False short-circuits.
         session = PhotonSessionState(
             "s1",
             "repo",
             "abc",
-            working_memory_cfg=WorkingMemoryConfig(
-                enabled=False, aggregation=aggregation
-            ),
+            working_memory_cfg=_mk_mode_cfg(aggregation, enabled=False),
         )
         session.update(_mk_state(1.0))
         assert session.get_session_coarse_state() is None
 
-    @pytest.mark.parametrize("aggregation", ["weighted", "attention", "last"])
+    @pytest.mark.parametrize("aggregation", list(_MODE_IDS_ALL))
     def test_all_modes_all_empty_level_states_returns_none(
         self, aggregation: str
     ) -> None:
-        """All 3 modes return None when every turn has empty level_states."""
+        """All modes return None when every turn has empty level_states."""
         session = PhotonSessionState(
             "s1",
             "repo",
             "abc",
-            working_memory_cfg=WorkingMemoryConfig(
-                enabled=True, aggregation=aggregation
-            ),
+            working_memory_cfg=_mk_mode_cfg(aggregation),
         )
         # Inject a turn whose hierarchical_state has empty level_states
         # (simulating the skip invariant).
@@ -1582,16 +1804,14 @@ class TestGetSessionCoarseStateModes:
         session.update(HierarchicalState(level_states=[]))
         assert session.get_session_coarse_state() is None
 
-    @pytest.mark.parametrize("aggregation", ["weighted", "attention", "last"])
+    @pytest.mark.parametrize("aggregation", list(_MODE_IDS_ALL))
     def test_all_modes_single_turn_equivalent(self, aggregation: str) -> None:
-        """Single-turn history: 3 modes must produce the same coarse vec."""
+        """Single-turn history: all modes must produce the same coarse vec."""
         session = PhotonSessionState(
             "s1",
             "repo",
             "abc",
-            working_memory_cfg=WorkingMemoryConfig(
-                enabled=True, aggregation=aggregation
-            ),
+            working_memory_cfg=_mk_mode_cfg(aggregation),
         )
         session.update(_mk_state(2.5))
         coarse = session.get_session_coarse_state()
@@ -1834,7 +2054,20 @@ class TestPruneParityAcrossAggregationModes:
     scores (ε=1e-5).
     """
 
-    @pytest.mark.parametrize("aggregation", ["weighted", "attention", "last"])
+    @pytest.mark.parametrize(
+        "aggregation",
+        [
+            "weighted",
+            "attention",
+            "last",
+            # Issue #92 T-6 (c): dynamic 3 strategies with storage_mode="full"
+            # — scope-bounded per plan (no 3x3 matrix, that lives in
+            # TestDynamicAggregationStorageModeMatrix).
+            "dynamic-turn_position",
+            "dynamic-drift_based",
+            "dynamic-hybrid",
+        ],
+    )
     def test_single_turn_prune_scores_match_across_modes(
         self, stub_tokenizer_for_cfg, aggregation: str
     ) -> None:
@@ -1846,9 +2079,7 @@ class TestPruneParityAcrossAggregationModes:
             model,
             cfg,
             tokenizer,
-            working_memory_cfg=WorkingMemoryConfig(
-                enabled=True, aggregation=aggregation
-            ),
+            working_memory_cfg=_mk_mode_cfg(aggregation, storage_mode="full"),
         )
         ids = mx.random.randint(0, 256, (1, 16))
         engine.session_forward(ids, "s1", "repo", "abc")
@@ -1906,6 +2137,430 @@ class TestPruneParityAcrossAggregationModes:
                     f"prune score mismatch at idx {i}: "
                     f"weighted={a} {mode}={b} delta={abs(a - b)}"
                 )
+
+
+class TestDynamicAggregation:
+    """Issue #92 T-4/T-5/T-7: dynamic aggregation strategies + dispatcher.
+
+    Exercises the three strategy helpers, the hybrid aggregator, and the
+    dispatcher in :meth:`PhotonSessionState.get_session_coarse_state`,
+    plus the per-turn mode recording on :class:`DriftMetrics`.
+    """
+
+    # ---------- (T-4) _dynamic_turn_position ----------
+    def test_turn_position_weighted_at_threshold(self) -> None:
+        """turn_count == weighted_until_turn → 'weighted' (inclusive)."""
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True,
+                max_turns=8,
+                aggregation="dynamic",
+                dynamic_strategy="turn_position",
+                weighted_until_turn=3,
+            ),
+        )
+        for i in range(3):
+            session.update(_mk_state(float(i + 1)))
+        mode, alpha = session._dynamic_turn_position()
+        assert mode == "weighted"
+        assert alpha is None
+
+    def test_turn_position_attention_above_threshold(self) -> None:
+        """turn_count > weighted_until_turn → 'attention'."""
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True,
+                max_turns=8,
+                aggregation="dynamic",
+                dynamic_strategy="turn_position",
+                weighted_until_turn=2,
+            ),
+        )
+        for i in range(4):
+            session.update(_mk_state(float(i + 1)))
+        mode, alpha = session._dynamic_turn_position()
+        assert mode == "attention"
+        assert alpha is None
+
+    def test_turn_position_weighted_zero_turns(self) -> None:
+        """turn_count == 0 → 'weighted' (no turns yet)."""
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True,
+                aggregation="dynamic",
+                dynamic_strategy="turn_position",
+                weighted_until_turn=3,
+            ),
+        )
+        mode, alpha = session._dynamic_turn_position()
+        assert mode == "weighted"
+        assert alpha is None
+
+    # ---------- (T-4) _dynamic_drift_based ----------
+    def test_drift_based_empty_drift_history_returns_weighted(self) -> None:
+        """drift_history empty (Turn 0 / reset) → ('weighted', None)."""
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True,
+                aggregation="dynamic",
+                dynamic_strategy="drift_based",
+                attention_drift_threshold=0.5,
+            ),
+        )
+        assert session.drift_history == []
+        mode, alpha = session._dynamic_drift_based()
+        assert mode == "weighted"
+        assert alpha is None
+
+    def test_drift_based_below_threshold_weighted(self) -> None:
+        """drift <= threshold → 'weighted'."""
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True,
+                aggregation="dynamic",
+                dynamic_strategy="drift_based",
+                attention_drift_threshold=0.5,
+            ),
+        )
+        session.update(_mk_state(1.0))
+        session.update(_mk_state(1.0))  # identical → drift ~ 0
+        mode, alpha = session._dynamic_drift_based()
+        assert mode == "weighted"
+        assert alpha is None
+
+    def test_drift_based_above_threshold_attention(self) -> None:
+        """drift > threshold → 'attention'."""
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True,
+                aggregation="dynamic",
+                dynamic_strategy="drift_based",
+                attention_drift_threshold=0.5,
+            ),
+        )
+        # Force a drift above threshold by mutating the latest DriftMetrics.
+        session.update(_mk_state(1.0))
+        session.update(_mk_state(1.0))
+        session.drift_history[-1].latent_cosine_drift_top = 0.9
+        mode, alpha = session._dynamic_drift_based()
+        assert mode == "attention"
+        assert alpha is None
+
+    def test_drift_based_at_threshold_boundary(self) -> None:
+        """drift == threshold → 'weighted' (strict '>' per design)."""
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True,
+                aggregation="dynamic",
+                dynamic_strategy="drift_based",
+                attention_drift_threshold=0.5,
+            ),
+        )
+        session.update(_mk_state(1.0))
+        session.update(_mk_state(1.0))
+        session.drift_history[-1].latent_cosine_drift_top = 0.5  # == threshold
+        mode, _alpha = session._dynamic_drift_based()
+        assert mode == "weighted"
+
+    # ---------- (T-4) _dynamic_hybrid_select ----------
+    def test_hybrid_select_alpha_before_ramp(self) -> None:
+        """turn_count <= weighted_until_turn → alpha = base (clamped)."""
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True,
+                max_turns=8,
+                aggregation="dynamic",
+                dynamic_strategy="hybrid",
+                weighted_until_turn=3,
+                hybrid_alpha_base=0.5,
+                hybrid_alpha_per_turn=0.1,
+            ),
+        )
+        for i in range(3):
+            session.update(_mk_state(float(i + 1)))
+        mode, alpha = session._dynamic_hybrid_select()
+        assert mode == "hybrid"
+        assert alpha == pytest.approx(0.5)
+
+    def test_hybrid_select_alpha_after_ramp(self) -> None:
+        """alpha = clamp(base + per_turn * (turn_count - until), 0, 1)."""
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True,
+                max_turns=8,
+                aggregation="dynamic",
+                dynamic_strategy="hybrid",
+                weighted_until_turn=3,
+                hybrid_alpha_base=0.5,
+                hybrid_alpha_per_turn=0.1,
+            ),
+        )
+        for i in range(5):  # turn_count = 5 → alpha = 0.5 + 0.1*2 = 0.7
+            session.update(_mk_state(float(i + 1)))
+        mode, alpha = session._dynamic_hybrid_select()
+        assert mode == "hybrid"
+        assert alpha == pytest.approx(0.7)
+
+    def test_hybrid_select_alpha_clamped_above_one(self) -> None:
+        """Huge ramp → alpha clamped to 1.0."""
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True,
+                max_turns=8,
+                aggregation="dynamic",
+                dynamic_strategy="hybrid",
+                weighted_until_turn=0,
+                hybrid_alpha_base=10.0,
+                hybrid_alpha_per_turn=5.0,
+            ),
+        )
+        session.update(_mk_state(1.0))
+        _mode, alpha = session._dynamic_hybrid_select()
+        assert alpha == pytest.approx(1.0)
+
+    def test_hybrid_select_alpha_clamped_below_zero(self) -> None:
+        """Negative base → alpha clamped to 0.0."""
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True,
+                max_turns=8,
+                aggregation="dynamic",
+                dynamic_strategy="hybrid",
+                weighted_until_turn=3,
+                hybrid_alpha_base=-5.0,
+                hybrid_alpha_per_turn=0.1,
+            ),
+        )
+        session.update(_mk_state(1.0))
+        _mode, alpha = session._dynamic_hybrid_select()
+        assert alpha == pytest.approx(0.0)
+
+    # ---------- (T-5) get_session_coarse_state dispatcher ----------
+    @pytest.mark.parametrize("strategy", ["turn_position", "drift_based", "hybrid"])
+    def test_dispatcher_returns_shape_d_dtype_float32(self, strategy: str) -> None:
+        """dynamic dispatcher: all 3 strategies produce (D,) float32 vec."""
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True,
+                max_turns=4,
+                aggregation="dynamic",
+                dynamic_strategy=strategy,
+            ),
+        )
+        session.update(_mk_state(1.0))
+        session.update(_mk_state(2.0))
+        coarse = session.get_session_coarse_state()
+        assert coarse is not None
+        assert coarse.shape == (4,)
+        assert coarse.dtype == mx.float32
+
+    @pytest.mark.parametrize("strategy", ["turn_position", "drift_based", "hybrid"])
+    def test_dispatcher_empty_turn_history_returns_none(self, strategy: str) -> None:
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True,
+                aggregation="dynamic",
+                dynamic_strategy=strategy,
+            ),
+        )
+        assert session.get_session_coarse_state() is None
+
+    def test_selected_mode_recorded_per_turn_weighted(self) -> None:
+        """static ``weighted`` mode is recorded on the latest DriftMetrics."""
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True, max_turns=4, aggregation="weighted"
+            ),
+        )
+        session.update(_mk_state(1.0))
+        session.update(_mk_state(2.0))
+        session.get_session_coarse_state()
+        assert session.drift_history[-1].selected_aggregation_mode == "weighted"
+        assert session.drift_history[-1].selected_aggregation_alpha is None
+
+    def test_selected_mode_recorded_per_turn_dynamic_hybrid(self) -> None:
+        """hybrid: mode='hybrid' AND alpha is a float on DriftMetrics."""
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True,
+                max_turns=4,
+                aggregation="dynamic",
+                dynamic_strategy="hybrid",
+                weighted_until_turn=0,
+                hybrid_alpha_base=0.5,
+                hybrid_alpha_per_turn=0.1,
+            ),
+        )
+        session.update(_mk_state(1.0))
+        session.update(_mk_state(2.0))
+        session.get_session_coarse_state()
+        last = session.drift_history[-1]
+        assert last.selected_aggregation_mode == "hybrid"
+        assert isinstance(last.selected_aggregation_alpha, float)
+
+    def test_selected_mode_recorded_per_turn_dynamic_turn_position(self) -> None:
+        """turn_position records 'weighted' or 'attention' with alpha=None."""
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True,
+                max_turns=8,
+                aggregation="dynamic",
+                dynamic_strategy="turn_position",
+                weighted_until_turn=1,
+            ),
+        )
+        # Turn 1 → mode=weighted (turn_count=1 <= until=1).
+        session.update(_mk_state(1.0))
+        session.get_session_coarse_state()
+        assert session.drift_history[-1].selected_aggregation_mode == "weighted"
+        assert session.drift_history[-1].selected_aggregation_alpha is None
+
+        # Turn 3 → mode=attention (turn_count=3 > until=1).
+        session.update(_mk_state(2.0))
+        session.update(_mk_state(3.0))
+        session.get_session_coarse_state()
+        assert session.drift_history[-1].selected_aggregation_mode == "attention"
+        assert session.drift_history[-1].selected_aggregation_alpha is None
+
+    def test_record_selected_mode_noop_when_drift_history_empty(self) -> None:
+        """Empty drift_history → _record_selected_mode is a no-op (no raise)."""
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True,
+                aggregation="dynamic",
+                dynamic_strategy="turn_position",
+            ),
+        )
+        # With no turn_history, get_session_coarse_state short-circuits to
+        # None. _record_selected_mode is not reached — but a direct call
+        # must also be a no-op.
+        session._record_selected_mode("weighted", alpha=None)
+        assert session.drift_history == []
+
+    def test_hybrid_aggregate_combines_weighted_and_attention(self) -> None:
+        """_aggregate_hybrid mixes weighted and attention results."""
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True,
+                max_turns=4,
+                aggregation="dynamic",
+                dynamic_strategy="hybrid",
+                weighted_until_turn=0,
+                hybrid_alpha_base=0.5,
+                hybrid_alpha_per_turn=0.0,  # keep alpha at 0.5
+            ),
+        )
+        session.update(_mk_state(1.0))
+        session.update(_mk_state(-1.0))
+        session.update(_mk_state(1.0))  # current similar to turn 1
+        coarse = session.get_session_coarse_state()
+        assert coarse is not None
+        mx.eval(coarse)
+        import math as _math
+
+        for v in coarse.tolist():
+            assert _math.isfinite(v)
+
+
+class TestDynamicAggregationStorageModeMatrix:
+    """Issue #92 T-7 (f): storage_mode × dynamic_strategy 3×3 = 9 combos."""
+
+    @pytest.mark.parametrize("storage_mode", ["full", "top_level_only", "summary_only"])
+    @pytest.mark.parametrize("strategy", ["turn_position", "drift_based", "hybrid"])
+    def test_shape_dtype_across_storage_modes(
+        self, storage_mode: str, strategy: str
+    ) -> None:
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True,
+                max_turns=3,
+                storage_mode=storage_mode,
+                aggregation="dynamic",
+                dynamic_strategy=strategy,
+            ),
+        )
+        for v in (1.0, 2.0):
+            session.update(_mk_state(v))
+        coarse = session.get_session_coarse_state()
+        assert coarse is not None
+        assert coarse.shape == (4,)
+        assert coarse.dtype == mx.float32
+
+    @pytest.mark.parametrize("storage_mode", ["full", "top_level_only", "summary_only"])
+    @pytest.mark.parametrize("strategy", ["turn_position", "drift_based", "hybrid"])
+    def test_empty_returns_none_across_storage_modes(
+        self, storage_mode: str, strategy: str
+    ) -> None:
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True,
+                max_turns=3,
+                storage_mode=storage_mode,
+                aggregation="dynamic",
+                dynamic_strategy=strategy,
+            ),
+        )
+        assert session.get_session_coarse_state() is None
 
 
 class TestCodexCB004WorkingMemoryMaxTurnsHardCap:
@@ -2628,3 +3283,77 @@ class TestCompressedHistoryRejectsZeroLengthSummaries:
             )
         )
         assert session.get_session_coarse_state() is None
+
+
+# ---------------------------------------------------------------------------
+# Issue #103: WorkingMemoryConfig past-turn pinning fields validation.
+# ---------------------------------------------------------------------------
+
+
+class TestWorkingMemoryConfigPastTurnPinning:
+    """Issue #103: ``past_turn_pinning_enabled`` / ``max_pinned_chunks`` fields.
+
+    Validation contract (design §4-1, DR1-001 / DR2-005):
+
+    * ``past_turn_pinning_enabled`` defaults to ``False`` (opt-in only).
+    * ``max_pinned_chunks`` defaults to ``3``.
+    * ``past_turn_pinning_enabled`` non-bool → ``TypeError``.
+    * ``max_pinned_chunks`` ``bool`` or non-int → ``TypeError``.
+    * ``max_pinned_chunks`` ``< 1`` → ``ValueError`` (range error,
+      consistent with existing ``max_turns < 1`` pattern).
+    * ``max_pinned_chunks`` ``> 16`` → ``warnings.warn`` only (soft cap).
+    """
+
+    def test_past_turn_pinning_enabled_default_false(self) -> None:
+        """Default must be ``False`` so the feature is opt-in."""
+        cfg = WorkingMemoryConfig()
+        assert cfg.past_turn_pinning_enabled is False
+
+    def test_max_pinned_chunks_default_3(self) -> None:
+        """Default must be ``3`` per design §4-1."""
+        cfg = WorkingMemoryConfig()
+        assert cfg.max_pinned_chunks == 3
+
+    def test_max_pinned_chunks_rejects_bool(self) -> None:
+        """``bool`` payloads must be rejected (Python's ``bool`` ⊂ ``int``)."""
+        with pytest.raises(TypeError):
+            WorkingMemoryConfig(max_pinned_chunks=True)  # type: ignore[arg-type]
+        with pytest.raises(TypeError):
+            WorkingMemoryConfig(max_pinned_chunks=False)  # type: ignore[arg-type]
+
+    def test_max_pinned_chunks_rejects_zero(self) -> None:
+        """``< 1`` is a *range* error → ``ValueError`` (DR1-001)."""
+        with pytest.raises(ValueError):
+            WorkingMemoryConfig(max_pinned_chunks=0)
+        with pytest.raises(ValueError):
+            WorkingMemoryConfig(max_pinned_chunks=-1)
+
+    def test_max_pinned_chunks_warns_above_cap(self) -> None:
+        """``> 16`` emits ``warnings.warn`` but still constructs."""
+        import warnings as _warnings
+
+        with _warnings.catch_warnings(record=True) as records:
+            _warnings.simplefilter("always")
+            cfg = WorkingMemoryConfig(max_pinned_chunks=17)
+        assert cfg.max_pinned_chunks == 17
+        # Ensure at least one warning surfaced about the soft cap.
+        assert any("max_pinned_chunks" in str(r.message) for r in records), (
+            f"expected soft-cap warning, got: {[str(r.message) for r in records]}"
+        )
+
+    def test_summary_only_with_pinning_warns(self) -> None:
+        """Issue #103 / CB-002 regression: combining
+        ``storage_mode='summary_only'`` with ``past_turn_pinning_enabled=True``
+        must emit a ``warnings.warn`` (not raise).
+
+        ``summary_only`` never populates ``turn_history``, so
+        :meth:`PhotonSessionState.find_relevant_past_turn` always returns
+        ``None`` — the pinning feature would silently no-op. The fix
+        emits an actionable ``UserWarning`` so operators see that the
+        pinning is disabled and that ``storage_mode='full'`` is required.
+        """
+        with pytest.warns(UserWarning, match="past_turn_pinning_enabled"):
+            WorkingMemoryConfig(
+                storage_mode="summary_only",
+                past_turn_pinning_enabled=True,
+            )

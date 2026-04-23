@@ -11,6 +11,7 @@ import math
 import time
 import warnings
 from dataclasses import dataclass, field
+from typing import Callable, ClassVar
 
 import mlx.core as mx
 
@@ -131,6 +132,18 @@ class DriftMetrics:
     latent_cosine_drift_mid: float = 0.0  # drift of level_states[0] (≥2 levels)
     latent_cosine_drift_token: float = 0.0  # drift of token_proj
 
+    # Issue #92: per-turn dynamic aggregation telemetry (DR1-001 / DR2-002).
+    # Both fields default to ``None`` so pre-existing consumers see no
+    # behaviour change when aggregation is static. Populated by
+    # :meth:`PhotonSessionState._record_selected_mode` after
+    # :meth:`get_session_coarse_state` resolves the mode.
+    # * ``selected_aggregation_mode``: closed-enum ``{"weighted","attention",
+    #   "last","hybrid"}`` when set, ``None`` otherwise.
+    # * ``selected_aggregation_alpha``: finite float only when mode is
+    #   ``"hybrid"``, ``None`` for the three static modes.
+    selected_aggregation_mode: str | None = None
+    selected_aggregation_alpha: float | None = None
+
     @property
     def latent_cosine_drift(self) -> float:
         """Backward-compat alias: equals ``latent_cosine_drift_top`` (DR1-009).
@@ -141,17 +154,22 @@ class DriftMetrics:
         """
         return self.latent_cosine_drift_top
 
-    def as_dict(self) -> dict:
-        """Return a JSON-safe superset schema (Issue #63 + Issue #64).
+    def as_dict(self) -> dict[str, float | int | str | None]:
+        """Return a JSON-safe superset schema (Issue #63 + #64 + #92).
 
-        Includes the legacy ``latent_cosine_drift`` alias plus the three
-        per-level drift keys from Issue #63 (DR3-002). Non-finite values
-        (``NaN`` / ``+Inf`` / ``-Inf``) are replaced with ``0.0`` and a
-        ``warnings.warn`` is emitted — only the field name is included in
-        the warning text so raw latent vectors or question text are never
-        surfaced through this path (design §7).
+        Numeric drift fields (the Issue #63 per-level plus legacy alias)
+        are finite-checked and coerced to ``0.0`` on NaN/Inf with a
+        warning — only the field name is included so raw latent vectors
+        or question text are never surfaced (design §7).
+
+        Issue #92 adds ``selected_aggregation_mode`` (``str | None``) and
+        ``selected_aggregation_alpha`` (``float | None``) to the schema.
+        These two fields are passed through as-is without the finite
+        coercion since ``None`` is a legitimate value (DR1-001 structured
+        telemetry). The return type widens from ``dict[str, float | int]``
+        to ``dict[str, float | int | str | None]`` accordingly.
         """
-        safe: dict[str, float | int] = {"turn_id": self.turn_id}
+        safe: dict[str, float | int | str | None] = {"turn_id": self.turn_id}
         for name in (
             "latent_cosine_drift",
             "latent_cosine_drift_top",
@@ -170,6 +188,11 @@ class DriftMetrics:
                 )
                 raw = 0.0
             safe[name] = round(float(raw), 6)
+
+        # Issue #92: mode/alpha fields are passed through verbatim. ``None``
+        # is the expected default for static aggregation modes.
+        safe["selected_aggregation_mode"] = self.selected_aggregation_mode
+        safe["selected_aggregation_alpha"] = self.selected_aggregation_alpha
         return safe
 
 
@@ -233,6 +256,41 @@ class _WMFieldSentinel:
 _WM_FIELD_UNSET = _WMFieldSentinel()
 
 
+def _validate_finite_float(
+    name: str,
+    val: object,
+    *,
+    low: float | None = None,
+    high: float | None = None,
+) -> float:
+    """Validate ``val`` is a finite float in ``[low, high]`` (Issue #92 T-2).
+
+    Shared helper extracted from :meth:`WorkingMemoryConfig.__post_init__`
+    (DR1-005) so the existing ``decay_factor`` / ``relevant_turn_threshold``
+    checks and the new dynamic fields follow the same type / range /
+    finite-ness contract. Range check is skipped for the bounds that are
+    left as ``None``.
+
+    Error messages intentionally surface only the field name / type name
+    (DR4-001 no-leak) so attacker-controlled YAML cannot inject payload
+    into logs. Returns the ``float()`` coerced value for caller assignment.
+    """
+    if isinstance(val, bool) or not isinstance(val, (int, float)):
+        raise TypeError(f"{name} must be float, got {type(val).__name__}")
+    v = float(val)
+    # DR4-001 no-leak (Codex CB-004): numeric validator error messages
+    # must NOT embed the raw attacker-controlled value. Only the field
+    # name and the constraint (static constants from the caller) are
+    # surfaced so malformed YAML cannot inject payload into logs.
+    if not math.isfinite(v):
+        raise ValueError(f"{name} must be finite")
+    if low is not None and v < low:
+        raise ValueError(f"{name} must be >= {low}")
+    if high is not None and v > high:
+        raise ValueError(f"{name} must be <= {high}")
+    return v
+
+
 @dataclass
 class WorkingMemoryConfig:
     """Configuration for cross-turn hierarchical working memory (Issue #64).
@@ -265,10 +323,62 @@ class WorkingMemoryConfig:
         default_factory=lambda: _WM_FIELD_UNSET
     )
     # Issue #80: aggregation mode selector for ``get_session_coarse_state()``.
-    # ``Literal["weighted", "attention", "last"]`` — default ``weighted`` keeps
-    # the pre-#80 behaviour so YAML configs without this key are backward
-    # compatible.
+    # ``Literal["weighted", "attention", "last", "dynamic"]`` — default
+    # ``weighted`` keeps the pre-#80 behaviour so YAML configs without this
+    # key are backward compatible. Issue #92 adds ``"dynamic"`` so that
+    # ``dynamic_strategy`` selects the aggregation at call time.
     aggregation: str = "weighted"
+
+    # --- Issue #92: dynamic aggregation fields (parse-only unless
+    # ``aggregation == "dynamic"``, so existing YAMLs are unaffected). ---
+    dynamic_strategy: str = "turn_position"
+    """Closed-enum {'turn_position','drift_based','hybrid'}. Selects which
+    dynamic strategy ``get_session_coarse_state()`` uses when
+    ``aggregation == 'dynamic'``. Ignored otherwise (Issue #92 §4)."""
+
+    weighted_until_turn: int = 3
+    """Turn-count threshold for the turn_position / hybrid strategies.
+
+    * turn_position: use ``weighted`` while ``len(turn_history) <= value``,
+      otherwise ``attention``.
+    * hybrid: ``alpha`` begins to ramp up once ``turn_count`` exceeds this
+      value (``alpha = base + per_turn * max(0, turn_count - value)``).
+
+    Must be ``>= 0``. Values ``> max_turns`` only emit a warning rather
+    than raising, to let operators experiment without touching other
+    fields (Issue #92 §4)."""
+
+    attention_drift_threshold: float = 0.5
+    """Finite float in ``[0.0, 1.0]``. drift_based strategy flips to
+    ``attention`` when ``latest_drift().latent_cosine_drift_top`` exceeds
+    this threshold, otherwise stays on ``weighted`` (Issue #92 §4)."""
+
+    hybrid_alpha_base: float = 0.5
+    """Finite float. Starting value of hybrid's ``alpha`` before the
+    per-turn ramp kicks in. The dispatcher clamps the final alpha to
+    ``[0.0, 1.0]``, so out-of-range bases are tolerated here (Issue #92
+    §4)."""
+
+    hybrid_alpha_per_turn: float = 0.1
+    """Finite float. Hybrid alpha's linear slope once ``turn_count``
+    exceeds ``weighted_until_turn``. The dispatcher clamps to ``[0.0,
+    1.0]`` (Issue #92 §4)."""
+
+    # --- Issue #103: past-turn pinning (opt-in until eval gate passes). ---
+    past_turn_pinning_enabled: bool = False
+    """When ``True``, ``PhotonRAGPipeline`` calls
+    :meth:`PhotonSessionState.find_relevant_past_turn` after each turn and
+    pins the matched turn's ``cited_chunk_ids`` into the next turn's
+    evidence pack via ``additional_pinned_ids`` (design §4-3, §8 Step 5).
+    Default ``False`` keeps existing pipelines unchanged until the 2-run
+    MT eval gate flips defaults (design §8 Step 9)."""
+
+    max_pinned_chunks: int = 3
+    """Upper bound on the number of cited chunks promoted from the matched
+    past turn into the next turn's pin set. ``< 1`` raises ``ValueError``
+    (range error, DR1-001 / DR2-005, mirrors ``max_turns < 1``). Values
+    ``> 16`` only ``warnings.warn`` because ``evidence_pack.max_chunks`` /
+    ``max_tokens`` provide the hard cap (design §4-1)."""
 
     def __post_init__(self) -> None:
         if not isinstance(self.enabled, bool):
@@ -325,22 +435,19 @@ class WorkingMemoryConfig:
                 f"{WORKING_MEMORY_MAX_TURNS_HARD_CAP} (hard cap), got "
                 f"{self.max_turns}"
             )
-        for name in ("decay_factor", "relevant_turn_threshold"):
-            val = getattr(self, name)
-            if isinstance(val, bool) or not isinstance(val, (int, float)):
-                raise TypeError(f"{name} must be float, got {type(val).__name__}")
-            if not math.isfinite(float(val)):
-                raise ValueError(f"{name} must be finite, got {val}")
-        if not (0.0 <= float(self.decay_factor) <= 1.0):
-            raise ValueError(
-                f"decay_factor must be 0.0 <= float <= 1.0, got {self.decay_factor}"
-            )
-        if not (-1.0 <= float(self.relevant_turn_threshold) <= 1.0):
-            raise ValueError(
-                "relevant_turn_threshold must be -1.0 <= float <= 1.0, got "
-                f"{self.relevant_turn_threshold}"
-            )
-        # Issue #80: aggregation mode — fail-closed on malformed YAML.
+        # Existing Issue #64 fields — route through the shared helper
+        # (Issue #92 DR1-005) so all finite-float validation shares one
+        # code path.
+        self.decay_factor = _validate_finite_float(
+            "decay_factor", self.decay_factor, low=0.0, high=1.0
+        )
+        self.relevant_turn_threshold = _validate_finite_float(
+            "relevant_turn_threshold",
+            self.relevant_turn_threshold,
+            low=-1.0,
+            high=1.0,
+        )
+        # Issue #80 / #92: aggregation mode — fail-closed on malformed YAML.
         # Error messages intentionally exclude the raw value (log-poisoning /
         # PII mitigation, design §6 and DR4-001): only the literal set and the
         # type name are surfaced.
@@ -348,9 +455,103 @@ class WorkingMemoryConfig:
             raise TypeError(
                 f"aggregation must be str, got {type(self.aggregation).__name__}"
             )
-        if self.aggregation not in {"weighted", "attention", "last"}:
+        if self.aggregation not in {"weighted", "attention", "last", "dynamic"}:
             raise ValueError(
-                "aggregation must be one of {'weighted', 'attention', 'last'}"
+                "aggregation must be one of "
+                "{'weighted', 'attention', 'last', 'dynamic'}"
+            )
+
+        # --- Issue #92: dynamic_strategy closed-enum validation. ---
+        if not isinstance(self.dynamic_strategy, str):
+            raise TypeError(
+                "dynamic_strategy must be str, got "
+                f"{type(self.dynamic_strategy).__name__}"
+            )
+        if self.dynamic_strategy not in {"turn_position", "drift_based", "hybrid"}:
+            # No-leak: raw value omitted (DR4-001).
+            raise ValueError(
+                "dynamic_strategy must be one of "
+                "{'turn_position', 'drift_based', 'hybrid'}"
+            )
+
+        # --- Issue #92: weighted_until_turn: non-negative int, warn if
+        # above max_turns. ---
+        if isinstance(self.weighted_until_turn, bool) or not isinstance(
+            self.weighted_until_turn, int
+        ):
+            raise TypeError(
+                "weighted_until_turn must be int, got "
+                f"{type(self.weighted_until_turn).__name__}"
+            )
+        if self.weighted_until_turn < 0:
+            raise ValueError(
+                f"weighted_until_turn must be >= 0, got {self.weighted_until_turn}"
+            )
+        if self.weighted_until_turn > self.max_turns:
+            warnings.warn(
+                "weighted_until_turn exceeds max_turns — the turn_position "
+                "strategy will stay on 'weighted' for every retained turn",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+
+        # --- Issue #92: finite-float fields. ---
+        self.attention_drift_threshold = _validate_finite_float(
+            "attention_drift_threshold",
+            self.attention_drift_threshold,
+            low=0.0,
+            high=1.0,
+        )
+        self.hybrid_alpha_base = _validate_finite_float(
+            "hybrid_alpha_base", self.hybrid_alpha_base
+        )
+        self.hybrid_alpha_per_turn = _validate_finite_float(
+            "hybrid_alpha_per_turn", self.hybrid_alpha_per_turn
+        )
+
+        # --- Issue #103: past-turn pinning fields (design §4-1). ---
+        if not isinstance(self.past_turn_pinning_enabled, bool):
+            raise TypeError(
+                "past_turn_pinning_enabled must be bool, got "
+                f"{type(self.past_turn_pinning_enabled).__name__}"
+            )
+        if isinstance(self.max_pinned_chunks, bool) or not isinstance(
+            self.max_pinned_chunks, int
+        ):
+            raise TypeError(
+                "max_pinned_chunks must be int, got "
+                f"{type(self.max_pinned_chunks).__name__}"
+            )
+        if self.max_pinned_chunks < 1:
+            # DR1-001 / DR2-005: range errors map to ``ValueError`` (mirrors
+            # ``max_turns < 1`` and ``weighted_until_turn < 0``); type errors
+            # already mapped to ``TypeError`` above. ``_resolve_working_memory_cfg``
+            # downgrades both classes to a warning + fail-closed disable.
+            raise ValueError(
+                f"max_pinned_chunks must be >= 1, got {self.max_pinned_chunks}"
+            )
+        if self.max_pinned_chunks > 16:
+            warnings.warn(
+                f"max_pinned_chunks={self.max_pinned_chunks} exceeds soft cap "
+                "16; evidence pack max_chunks / max_tokens may be exceeded",
+                stacklevel=2,
+            )
+
+        # Codex CB-002 fix: ``summary_only`` storage mode never populates
+        # ``turn_history`` (see :meth:`PhotonSessionState._append_summary_only`),
+        # so :meth:`PhotonSessionState.find_relevant_past_turn` always returns
+        # ``None``. Combining it with ``past_turn_pinning_enabled=True`` would
+        # silently no-op the entire pinning feature. Emit an actionable
+        # ``UserWarning`` (not ``raise``) since this is a soft configuration
+        # mismatch, matching the existing ``warnings.warn`` pattern used by
+        # ``max_pinned_chunks > 16`` and ``weighted_until_turn > max_turns``.
+        if self.past_turn_pinning_enabled and self.storage_mode == "summary_only":
+            warnings.warn(
+                "past_turn_pinning_enabled=True is a no-op when "
+                "storage_mode='summary_only' because turn_history is never "
+                "populated; set storage_mode='full' to enable past-turn "
+                "pinning",
+                stacklevel=2,
             )
 
         # DR1-004: emit DeprecationWarning only when the caller mixed the
@@ -887,6 +1088,208 @@ class PhotonSessionState:
         result = mx.sum(attn_weights[:, None] * stacked, axis=0)  # (D,)
         return result
 
+    def _aggregate(
+        self,
+        mode: str,
+        *,
+        vecs: list[mx.array],
+        turn_ids: list[int],
+        weights: list[float],
+        fallback_vec: mx.array,
+    ) -> mx.array:
+        """Run a single aggregation mode on pre-collected inputs (Issue #92 T-1).
+
+        Extracted from :meth:`get_session_coarse_state` so that the new
+        dynamic dispatcher (Issue #92) can reuse the weighted / attention /
+        last branches without duplicating the branch bodies. Behaviour is
+        bit-for-bit identical to the pre-refactor inline logic — existing
+        Issue #80 tests (``test_all_modes_*``) guard the invariants.
+
+        ``mode`` MUST be one of ``"weighted"``, ``"attention"``, ``"last"``;
+        unknown values raise :class:`ValueError` with the raw value
+        intentionally omitted (DR4-001 no-leak).
+        """
+        if mode == "last":
+            return fallback_vec
+        if mode == "weighted":
+            weight_sum = sum(weights)
+            if weight_sum <= 0.0:
+                # All weights were zero (e.g. decay=0 with history > 1).
+                return fallback_vec
+            stacked = mx.stack(vecs, axis=0)  # (N, D)
+            w_arr = mx.array(weights, dtype=mx.float32)[:, None]  # (N, 1)
+            return mx.sum(stacked * w_arr, axis=0) / float(weight_sum)
+        if mode == "attention":
+            # Need a valid current vec to score past turns against.
+            if self.current_state is None or not self.current_state.level_states:
+                return fallback_vec
+            curr_vec = mean_pool(self.current_state.level_states[-1])
+            attn = self._aggregate_attention(
+                vecs,
+                turn_ids,
+                curr_vec,
+                exclude_turn_id=self.current_state.turn_id,
+            )
+            return attn if attn is not None else fallback_vec
+        # Defensive fail-fast for post-__post_init__ corruption
+        # (Issue #80 §8 decision #1 safety net). The raw value is
+        # deliberately omitted from the message.
+        raise ValueError("Unknown aggregation mode")
+
+    # ------------------------------------------------------------------
+    # Issue #92: dynamic aggregation strategies + dispatcher helpers.
+    # ------------------------------------------------------------------
+
+    def _effective_turn_count(self) -> int:
+        """Return storage-mode-invariant effective turn count (Codex CB-001).
+
+        ``len(self.turn_history)`` alone under-counts when
+        ``storage_mode == "summary_only"``, because
+        :meth:`_append_summary_only` never appends to ``turn_history`` and
+        writes to ``compressed_history`` instead. In that mode the
+        turn-position / hybrid strategies would otherwise be stuck at
+        ``weighted`` forever (alpha never ramps).
+
+        Summing both lists gives the number of turns the session has
+        actually observed and that currently contribute to
+        :meth:`get_session_coarse_state`. The two lists are disjoint by
+        construction: ``_append_full`` only writes to ``turn_history`` (and
+        ``_compress_oldest_turn`` moves entries between them atomically),
+        while ``_append_summary_only`` only writes to
+        ``compressed_history`` — so no double-count is possible.
+        """
+        return len(self.turn_history) + len(self.compressed_history)
+
+    def _dynamic_turn_position(self) -> tuple[str, float | None]:
+        """Turn-position strategy: ``weighted`` early, ``attention`` later.
+
+        * ``effective_turn_count <= weighted_until_turn`` → ``("weighted", None)``
+        * otherwise                                      → ``("attention", None)``
+
+        Returns ``("weighted", None)`` when no turns exist yet (Turn 0) so
+        that dispatcher fallbacks always receive a valid mode. Uses
+        :meth:`_effective_turn_count` so the threshold fires correctly
+        under ``storage_mode="summary_only"`` where
+        ``turn_history`` stays empty (Codex CB-001).
+        """
+        cfg = self.working_memory_cfg
+        if self._effective_turn_count() <= cfg.weighted_until_turn:
+            return ("weighted", None)
+        return ("attention", None)
+
+    def _dynamic_drift_based(self) -> tuple[str, float | None]:
+        """Drift-based strategy: ``attention`` when drift spikes.
+
+        * ``drift_history == []``                        → ``("weighted", None)``
+        * ``drift.latent_cosine_drift_top > threshold``  → ``("attention", None)``
+        * otherwise                                      → ``("weighted", None)``
+
+        Off-by-one note (issue body §3.8): because prune_evidence runs
+        before session_forward, ``latest_drift()`` returns Turn N-1's drift
+        at the start of Turn N. Turn 1 has ``drift_history == []`` and
+        fails closed to ``weighted``.
+        """
+        cfg = self.working_memory_cfg
+        drift = self.latest_drift()
+        if drift is None:
+            return ("weighted", None)
+        if drift.latent_cosine_drift_top > cfg.attention_drift_threshold:
+            return ("attention", None)
+        return ("weighted", None)
+
+    def _dynamic_hybrid_select(self) -> tuple[str, float]:
+        """Hybrid strategy: compute alpha and defer mixing to dispatcher.
+
+        ``alpha = clamp(base + per_turn * max(0, turn_count - until), 0, 1)``
+
+        ``turn_count`` here is the :meth:`_effective_turn_count` so alpha
+        ramps up correctly under ``storage_mode="summary_only"`` where
+        ``turn_history`` stays empty (Codex CB-001).
+
+        The actual ``w*weighted + alpha*attention`` mixing happens in
+        :meth:`_aggregate_hybrid` — this helper only picks the mode tag
+        (``"hybrid"``) and the clamped alpha so the dispatcher can thread
+        the two through a uniform signature (DR1-002 tuple return).
+        """
+        cfg = self.working_memory_cfg
+        turn_count = self._effective_turn_count()
+        ramp_steps = max(0, turn_count - cfg.weighted_until_turn)
+        raw_alpha = cfg.hybrid_alpha_base + cfg.hybrid_alpha_per_turn * ramp_steps
+        alpha = max(0.0, min(1.0, float(raw_alpha)))
+        return ("hybrid", alpha)
+
+    def _aggregate_hybrid(
+        self,
+        *,
+        alpha: float,
+        vecs: list[mx.array],
+        turn_ids: list[int],
+        weights: list[float],
+        fallback_vec: mx.array,
+    ) -> mx.array:
+        """Mix weighted + attention aggregations by ``alpha`` (Issue #92 T-4).
+
+        The two branches reuse :meth:`_aggregate` so numerical behaviour
+        matches the static modes exactly. Both branches always return a
+        concrete vector (``fallback_vec`` when their own fallback path
+        fires), but we still guard with ``None`` checks to satisfy the
+        Issue #92 §3 contract should ``_aggregate`` evolve to return
+        ``None`` for new corner cases.
+
+        Output: ``(1 - alpha) * w_vec + alpha * a_vec``, clamped by the
+        caller-supplied ``alpha`` which the dispatcher has already held to
+        ``[0, 1]``.
+        """
+        w_vec = self._aggregate(
+            "weighted",
+            vecs=vecs,
+            turn_ids=turn_ids,
+            weights=weights,
+            fallback_vec=fallback_vec,
+        )
+        a_vec = self._aggregate(
+            "attention",
+            vecs=vecs,
+            turn_ids=turn_ids,
+            weights=weights,
+            fallback_vec=fallback_vec,
+        )
+        # Defensive ``None`` handling per Issue body L79-82. In practice
+        # ``_aggregate`` returns a concrete vec for weighted/attention
+        # because ``fallback_vec`` is always populated at this call site.
+        if a_vec is None:
+            return w_vec
+        if w_vec is None:
+            return a_vec
+        alpha_f = float(alpha)
+        return (1.0 - alpha_f) * w_vec + alpha_f * a_vec
+
+    # Class-level dict-based dispatch (design §3 judgement #3b). OCP:
+    # adding a new strategy only needs a single dict entry and a helper
+    # method — the dispatcher body stays untouched.
+    _DYNAMIC_STRATEGY_DISPATCH: ClassVar[
+        dict[str, Callable[["PhotonSessionState"], tuple[str, float | None]]]
+    ] = {
+        "turn_position": lambda self: self._dynamic_turn_position(),
+        "drift_based": lambda self: self._dynamic_drift_based(),
+        "hybrid": lambda self: self._dynamic_hybrid_select(),
+    }
+
+    def _record_selected_mode(self, mode: str, *, alpha: float | None) -> None:
+        """Write the selected mode/alpha onto the latest DriftMetrics.
+
+        No-op when ``drift_history`` is empty (Turn 0 / post-reset, per
+        DR2-005). When non-empty, both fields are written unconditionally
+        so the schema-level ``None`` default is replaced in a single
+        step. Downstream bench/report consumers read these through
+        :meth:`DriftMetrics.as_dict`.
+        """
+        if not self.drift_history:
+            return
+        latest = self.drift_history[-1]
+        latest.selected_aggregation_mode = mode
+        latest.selected_aggregation_alpha = alpha
+
     def get_session_coarse_state(self) -> mx.array | None:
         """Return a ``(D,)`` coarse session vector aggregated across turns.
 
@@ -951,40 +1354,58 @@ class PhotonSessionState:
             return None
 
         # DRY: the shared fallback is always the most-recent valid vec
-        # (DR1-004). Bound once and reused by last / weighted / attention.
+        # (DR1-004). Bound once and reused by last / weighted / attention
+        # / hybrid.
         fallback_vec = vecs[-1]
 
-        mode = self.working_memory_cfg.aggregation
-        if mode == "last":
-            result = fallback_vec
-        elif mode == "weighted":
-            weight_sum = sum(weights)
-            if weight_sum <= 0.0:
-                # All weights were zero (e.g. decay=0 with history > 1).
-                result = fallback_vec
-            else:
-                stacked = mx.stack(vecs, axis=0)  # (N, D)
-                w_arr = mx.array(weights, dtype=mx.float32)[:, None]  # (N, 1)
-                result = mx.sum(stacked * w_arr, axis=0) / float(weight_sum)
-        elif mode == "attention":
-            # Need a valid current vec to score past turns against.
-            if self.current_state is None or not self.current_state.level_states:
-                result = fallback_vec
-            else:
-                curr_vec = mean_pool(self.current_state.level_states[-1])
-                attn = self._aggregate_attention(
-                    vecs,
-                    turn_ids,
-                    curr_vec,
-                    exclude_turn_id=self.current_state.turn_id,
-                )
-                result = attn if attn is not None else fallback_vec
-        else:
-            # Defensive fail-fast for post-__post_init__ corruption
-            # (Issue #80 §8 decision #1 / judgement #1 safety net). The raw
-            # value is deliberately omitted from the message.
-            raise ValueError("Unknown aggregation mode")
+        agg = self.working_memory_cfg.aggregation
+        if agg != "dynamic":
+            # Static modes (Issue #80 behaviour). Record the chosen mode
+            # on the latest DriftMetrics so per-turn telemetry is
+            # consistent whether or not dynamic is in use.
+            result = self._aggregate(
+                agg,
+                vecs=vecs,
+                turn_ids=turn_ids,
+                weights=weights,
+                fallback_vec=fallback_vec,
+            )
+            self._record_selected_mode(agg, alpha=None)
+            mx.eval(result)
+            return result
 
+        # Issue #92 dynamic dispatch (DR1-003 dict-based, DR1-002 uniform
+        # tuple return signature). Codex CB-002: guard the dict lookup so
+        # post-__post_init__ corruption of ``dynamic_strategy`` raises a
+        # sanitized ``ValueError`` (matching the static path's
+        # "Unknown aggregation mode" style) rather than a raw
+        # ``KeyError('<payload>')`` that would leak the attacker-controlled
+        # value into logs / tracebacks (DR4-001 no-leak).
+        strategy = self.working_memory_cfg.dynamic_strategy
+        handler = self._DYNAMIC_STRATEGY_DISPATCH.get(strategy)
+        if handler is None:
+            raise ValueError("Unknown dynamic_strategy")
+        mode, alpha = handler(self)
+
+        if mode == "hybrid":
+            assert alpha is not None  # hybrid helper always returns a float
+            result = self._aggregate_hybrid(
+                alpha=alpha,
+                vecs=vecs,
+                turn_ids=turn_ids,
+                weights=weights,
+                fallback_vec=fallback_vec,
+            )
+        else:
+            result = self._aggregate(
+                mode,
+                vecs=vecs,
+                turn_ids=turn_ids,
+                weights=weights,
+                fallback_vec=fallback_vec,
+            )
+
+        self._record_selected_mode(mode, alpha=alpha)
         mx.eval(result)
         return result
 

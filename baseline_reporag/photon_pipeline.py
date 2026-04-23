@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 import uuid
 from math import prod
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import mlx.core as mx
 
@@ -24,11 +24,19 @@ from .generation.prompt import (
     build_messages,
     flatten_messages_for_plain_lm,
 )
+from .memory.session import SessionState
 from .pipeline import QueryResult, RepoRAGPipeline, apply_citation_postprocess
 from .profiler import TurnProfiler
 from .retrieval.graph_expansion import expand_with_graph
 from .retrieval.hybrid import apply_file_type_boost, hybrid_search
 from .retrieval.query_expansion import expand_query
+
+if TYPE_CHECKING:
+    # Issue #103 / DR2-008: ``TurnState`` is a PHOTON type; importing it at
+    # runtime would force MLX/PHOTON load on baseline-only paths. The file
+    # uses ``from __future__ import annotations`` so the cache type
+    # ``dict[str, TurnState]`` resolves lazily.
+    from photon_mlx.session import TurnState
 
 _logger = logging.getLogger(__name__)
 
@@ -489,6 +497,78 @@ class PhotonRAGPipeline:
         self.safe_recgen = photon_deps["safe_recgen"]
         self.photon_cfg = photon_deps["photon_cfg"]
         self.tokenizer = photon_deps["tokenizer"]
+        # Issue #103: 1-session-1-entry sidecar cache for past-turn pinning.
+        # write/read/pop must always go through ``query()`` or
+        # :meth:`_clear_photon_session_artifacts` so the lifecycle invariant
+        # documented in design §3 (write at end of Turn N, pop at start of
+        # Turn N+1) is preserved.
+        self._relevant_past_turn_cache: dict[str, TurnState] = {}
+
+    def _clear_photon_session_artifacts(self, session_id: str) -> None:
+        """Centralised reset for PHOTON state + Issue #103 sidecar cache.
+
+        Replaces direct ``_clear_photon_session_state`` call sites
+        (``tokenize_evidence_pack`` fail-closed, Safe RecGen
+        ``reprefill_hierarchy`` / ``fallback_to_baseline_path``) so cache
+        cleanup is *always* paired with PHOTON state reset.
+
+        DR1-003 / DR1-007: ``artifacts ⊃ state + cache``. Any future
+        session-delete / session-reset API (SessionManager, FastAPI,
+        CLI) MUST funnel through this single entry point before mutating
+        ``PhotonInference._sessions``. The pop-then-clear order matters
+        only insofar as both happen — the cache pop is idempotent
+        (``dict.pop(..., None)``) so missing entries are not an error.
+        """
+        self._relevant_past_turn_cache.pop(session_id, None)
+        _clear_photon_session_state(self.photon_inference, session_id)
+
+    @staticmethod
+    def _extract_pinned_chunk_ids(
+        session: SessionState | None,
+        matched: TurnState,
+        max_pinned: int,
+    ) -> list[str] | None:
+        """Look up cited chunks for the matched PHOTON ``turn_id``.
+
+        DR2-004: PHOTON ``turn_count`` and Baseline ``len(turns)`` can drift
+        across fail-closed paths (tokenize failure / Safe RecGen reset
+        clears ``turn_history`` while preserving ``turn_count``; baseline
+        always appends). We therefore guard with
+        ``session.turns[idx].turn_id == matched.turn_id`` before trusting
+        the index. On drift we fall back to a linear scan; if that still
+        fails to locate the matched turn we fail closed (return ``None``)
+        rather than risk pinning the wrong chunks.
+
+        DR2-009: dedup is delegated to
+        :func:`baseline_reporag.generation.evidence_pack._merge_pinned_sets`
+        (set union). This helper performs only the slice; double-counting
+        is impossible by construction.
+
+        DR3-001 / DR4-001: the linear-search fallback is O(N) over
+        ``session.turns`` but only fires after fail-closed drift; the
+        whole helper is wrapped in ``prof.phase("past_turn_pinning")`` by
+        the caller. Production telemetry intentionally does not surface
+        ``matched_turn_id`` / ``scanned_turns`` — long-session diagnosis
+        is restricted to self-hosted benchmarks and unit tests.
+        """
+        if session is None or not session.turns:
+            return None
+        idx = matched.turn_id - 1
+        if 0 <= idx < len(session.turns):
+            candidate = session.turns[idx]
+        else:
+            candidate = None
+        if candidate is None or candidate.turn_id != matched.turn_id:
+            # turn_id alignment is broken (PHOTON / Baseline drift after
+            # fail-closed). Linear search; failing that, fail closed.
+            for t in session.turns:
+                if t.turn_id == matched.turn_id:
+                    candidate = t
+                    break
+            else:
+                return None
+        cited = candidate.cited_chunk_ids
+        return list(cited[:max_pinned]) if cited else None
 
     # ---------------------------------------------------------------
     # Issue #62 Phase 1: opt-in PHOTON single-path generation
@@ -734,6 +814,26 @@ class PhotonRAGPipeline:
             expanded_ids = [chunk_ids_for_scoring[i] for i in selected_indices]
             effective_max_chunks = scoring_max_chunks
 
+        # --- Issue #103: read cached past-turn pin (before evidence pack) ---
+        # DR2-001: use the module-level helper (PhotonRAGPipeline has no
+        # ``_resolve_working_memory_cfg`` method). DR2-002: the helper
+        # returns ``None`` when the YAML lacks ``working_memory:`` or the
+        # block is malformed — guard before accessing fields.
+        working_memory_cfg = _extract_working_memory_cfg(cfg)
+        pinning_enabled = (
+            working_memory_cfg is not None
+            and working_memory_cfg.past_turn_pinning_enabled
+        )
+        additional_pinned_ids: list[str] | None = None
+        if pinning_enabled and is_follow_up:
+            cached_turn = self._relevant_past_turn_cache.pop(photon_session_id, None)
+            if cached_turn is not None:
+                additional_pinned_ids = self._extract_pinned_chunk_ids(
+                    session,
+                    cached_turn,
+                    working_memory_cfg.max_pinned_chunks,
+                )
+
         # --- Evidence pack ---
         with prof.phase("evidence_pack"):
             pack = build_evidence_pack(
@@ -742,6 +842,7 @@ class PhotonRAGPipeline:
                 session=session,
                 max_chunks=effective_max_chunks,
                 max_tokens=cfg.evidence_pack.max_tokens,
+                additional_pinned_ids=additional_pinned_ids,
             )
 
         # --- PHOTON prefill on question + evidence (new coarse state) ---
@@ -783,8 +884,10 @@ class PhotonRAGPipeline:
             evidence_tokens = mx.array([], dtype=mx.int32)
             # Explicit fail-closed: drop any prior coarse/prev state so the
             # next turn cannot reuse a stale hierarchy.  No raw input text,
-            # token ids, or latents are retained (design §8).
-            _clear_photon_session_state(self.photon_inference, photon_session_id)
+            # token ids, or latents are retained (design §8). Issue #103
+            # routes through ``_clear_photon_session_artifacts`` so the
+            # past-turn pin sidecar cache is also dropped.
+            self._clear_photon_session_artifacts(photon_session_id)
 
         if evidence_tokens.size > 0:
             input_ids = evidence_tokens.reshape(1, -1)
@@ -812,9 +915,58 @@ class PhotonRAGPipeline:
         # A fallback that invalidates the PHOTON hierarchy must clear the
         # session state (including prev_logits) so subsequent turns do not
         # reuse a coarse state or drift reference from a stale topic
-        # (design §8 fail-closed; Codex CB-004).
+        # (design §8 fail-closed; Codex CB-004). Issue #103 routes through
+        # ``_clear_photon_session_artifacts`` so the past-turn pin sidecar
+        # cache is dropped in lockstep with PHOTON state.
         if fallback_actions & {"reprefill_hierarchy", "fallback_to_baseline_path"}:
-            _clear_photon_session_state(self.photon_inference, photon_session_id)
+            self._clear_photon_session_artifacts(photon_session_id)
+
+        # --- Issue #103: write past-turn pin cache for next turn ---
+        # 3 branches (design §4-3):
+        #   OFF                       → skip entirely (no profiler phase).
+        #   drift is None             → pop only (DR2-011 stale-cache safety).
+        #   drift is not None         → try find_relevant_past_turn.
+        # DR4-001: production observability is limited to the
+        # ``past_turn_pinning`` phase duration and the failure exception
+        # class name — turn_id, similarity, and scanned_turns are NOT
+        # logged so attacker-controlled YAML or pathological session state
+        # cannot leak into log sinks.
+        if pinning_enabled:
+            if drift is None:
+                # tokenize fail-closed / Safe RecGen reset / session_forward
+                # not run: drop any stale cache entry from the prior turn so
+                # the next turn cannot consume a misaligned pin.
+                self._relevant_past_turn_cache.pop(photon_session_id, None)
+            else:
+                with prof.phase("past_turn_pinning"):
+                    photon_session = self.photon_inference._sessions.get(
+                        photon_session_id
+                    )
+                    match: TurnState | None
+                    if photon_session is not None:
+                        try:
+                            match = photon_session.find_relevant_past_turn(
+                                photon_session.current_state
+                            )
+                        except (AttributeError, RuntimeError, ValueError) as exc:
+                            # DR1-002 + Codex CB-001/CB-002: closed exception
+                            # set (no Pokémon catch). Only the type name is
+                            # surfaced, never raw message content.
+                            _logger.warning(
+                                "find_relevant_past_turn failed; skipping "
+                                "pin cache (fail-closed, reason=%s)",
+                                type(exc).__name__,
+                            )
+                            match = None
+                    else:
+                        # PHOTON session was never initialised for this
+                        # session_id — keep the cache empty.
+                        match = None
+
+                    if match is not None:
+                        self._relevant_past_turn_cache[photon_session_id] = match
+                    else:
+                        self._relevant_past_turn_cache.pop(photon_session_id, None)
 
         # --- Generation (Issue #62 Phase 1: opt-in PHOTON single-path) ---
         # DR-62-001 / DR4-003: strict bool validation for the opt-in flag.
