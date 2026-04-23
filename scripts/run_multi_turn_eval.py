@@ -29,10 +29,17 @@ def main() -> None:
     parser.add_argument("--eval-set", default="data/eval_sets/multi_turn_eval.jsonl")
     parser.add_argument("--max-sessions", type=int, default=0)
     parser.add_argument("--output", default="")
+    # Issue #82 Wave 4: ``--repo-id`` lets the Streamlit eval runner
+    # override the repo_id (the default path only has cfg.repo.repo_id).
+    parser.add_argument("--repo-id", default="")
+    # Issue #82 Wave 4: when the Streamlit app invokes this script it
+    # passes a ``--marker-file`` path; we ``touch()`` it on successful
+    # completion so the async sync loop can detect success reliably.
+    parser.add_argument("--marker-file", default="")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
-    repo_id = cfg.repo.repo_id
+    repo_id = args.repo_id or cfg.repo.repo_id
     run_id = f"mt_eval_{repo_id}_{time.strftime('%Y%m%d_%H%M%S')}"
 
     # Stage 3 DR3-001: route via build_pipeline so PHOTON / baseline
@@ -51,9 +58,19 @@ def main() -> None:
     print(f"sessions: {len(sessions)}")
     print()
 
-    output_path = (
-        Path(args.output) if args.output else Path(f"logs/{run_id}_predictions.jsonl")
-    )
+    # Issue #82 Wave 4: when ``--output`` is a .json path (used by the
+    # Streamlit eval runner) predictions land in a sibling .jsonl file so
+    # the .json path can carry the UI summary instead.  Classic CLI usage
+    # (no --output or .jsonl) keeps the pre-Wave-4 behaviour.
+    if args.output:
+        output_arg = Path(args.output)
+        if output_arg.suffix == ".json":
+            predictions_path = output_arg.with_suffix(".predictions.jsonl")
+        else:
+            predictions_path = output_arg
+    else:
+        predictions_path = Path(f"logs/{run_id}_predictions.jsonl")
+    output_path = predictions_path
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     session_stats: list[dict] = []
@@ -129,6 +146,49 @@ def main() -> None:
     )
     print(f"\nPredictions -> {output_path}")
     print(f"Summary -> {summary_path}")
+
+    # Issue #82 Wave 4: when invoked with ``--output`` pointing at a JSON
+    # path, also emit the async-eval summary (done_q / total_q / p50 /
+    # nc_rate) to that path so the UI sync loop can read it on success.
+    if args.output and args.output.endswith(".json"):
+        total_latencies: list[float] = []
+        total_no_cite = 0
+        total_q = 0
+        for line in output_path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            total_q += 1
+            lat = rec.get("latency_ms", 0.0)
+            if isinstance(lat, (int, float)):
+                total_latencies.append(float(lat))
+            if rec.get("no_citation"):
+                total_no_cite += 1
+        total_latencies.sort()
+        p50 = total_latencies[len(total_latencies) // 2] if total_latencies else 0.0
+        nc_rate = (total_no_cite / total_q) if total_q > 0 else 0.0
+        ui_summary = {
+            "done_q": total_q,
+            "total_q": total_q,
+            "p50_latency_ms": p50,
+            "nc_rate": nc_rate,
+        }
+        Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.output).write_text(
+            json.dumps(ui_summary, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        print(f"UI summary -> {args.output}")
+
+    # Issue #82 Wave 4: touch marker_file on successful completion.
+    if args.marker_file:
+        marker = Path(args.marker_file)
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.touch()
+        print(f"Marker -> {marker}")
 
 
 if __name__ == "__main__":

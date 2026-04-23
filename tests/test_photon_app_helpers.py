@@ -10,6 +10,8 @@ import importlib.util
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -99,33 +101,59 @@ class TestSafeId:
 
 
 class TestPageIndexNoShellTrue:
-    """Guardrail: no `shell=True` should remain in photon_app.py.
+    """Guardrail: no `shell=True` should remain in photon_app.py or eval_panel.py.
 
     This is a smoke-style regression test rather than a full UI test, since
     the goal is to prevent future regressions that reintroduce shell=True in
-    ANY subprocess spawn inside the app module.
+    ANY subprocess spawn inside the app module or its eval-runner helpers.
+    Wave 4 (W4-T1, T-E6) extended the scan to ``app/components/eval_panel.py``
+    so the new subprocess orchestration helpers are also covered.
     """
 
-    def test_source_has_no_shell_true(self) -> None:
-        src = PHOTON_APP_PATH.read_text(encoding="utf-8")
-        # Strip single-line Python comments so a comment-level mention of
-        # shell=True wouldn't fail the guardrail. Adequate for this file's
-        # coding style (no multi-line strings contain the literal).
+    @staticmethod
+    def _strip_comments_and_module_docstring(src: str) -> str:
         code_lines = [
             line for line in src.splitlines() if not line.lstrip().startswith("#")
         ]
-        # Strip the module docstring too (a triple-quoted block at the top)
-        # to keep the check focused on actual executable code.
         joined = "\n".join(code_lines)
-        # Quick and simple: remove the first triple-double-quoted block if
-        # it starts at the very beginning of the file.
         if joined.startswith('"""'):
             end = joined.find('"""', 3)
             if end >= 0:
                 joined = joined[end + 3 :]
+        return joined
+
+    def test_source_has_no_shell_true(self) -> None:
+        src = PHOTON_APP_PATH.read_text(encoding="utf-8")
+        joined = self._strip_comments_and_module_docstring(src)
         assert "shell=True" not in joined, (
             "shell=True must not appear in app/photon_app.py — use argv list + shell=False"
         )
+
+    def test_eval_panel_has_no_shell_true(self) -> None:
+        eval_panel_path = PROJECT_ROOT / "app" / "components" / "eval_panel.py"
+        assert eval_panel_path.exists(), f"missing {eval_panel_path}"
+        src = eval_panel_path.read_text(encoding="utf-8")
+        # AST-based check: reject any keyword literal ``shell=True`` passed
+        # to any call expression.  This is stricter than a plain-text scan
+        # because it ignores docstrings / comments that legitimately
+        # mention the token (e.g. warnings in the function docstring) and
+        # catches whitespace variations like ``shell = True``.
+        import ast
+
+        tree = ast.parse(src)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            for kw in node.keywords:
+                if (
+                    kw.arg == "shell"
+                    and isinstance(kw.value, ast.Constant)
+                    and kw.value.value is True
+                ):
+                    raise AssertionError(
+                        "shell=True literal found in app/components/eval_panel.py "
+                        f"at line {node.lineno}"
+                    )
 
 
 class TestSubprocessImportAvailable:
@@ -135,3 +163,112 @@ class TestSubprocessImportAvailable:
         assert subprocess.Popen  # sanity
         src = PHOTON_APP_PATH.read_text(encoding="utf-8")
         assert "import subprocess" in src
+
+
+# ---------------------------------------------------------------
+# Issue #82 Wave 1 (W1-T1): _run_query routes through build_pipeline(cfg)
+# ---------------------------------------------------------------
+
+
+def _make_proj(tmp_path: Path, name: str = "demo") -> "photon_app.Project":
+    cfg_path = tmp_path / "cfg.yaml"
+    cfg_path.write_text("model:\n  provider: baseline\n")
+    return photon_app.Project(
+        name=name,
+        repo_id="demo_repo",
+        index_dir=str(tmp_path / "idx"),
+        config_path=str(cfg_path),
+        photon_config_path="",
+        checkpoint_dir="",
+        use_photon=False,
+        created_at="2026-04-20T00:00:00",
+    )
+
+
+class _FakeSessionState(dict):
+    """Minimal stand-in for ``streamlit.session_state``.
+
+    Supports both ``obj["k"]`` and ``obj.k`` access so code that mixes the
+    two (as photon_app does) keeps working under test.
+    """
+
+    def __getattr__(self, key: str):
+        try:
+            return self[key]
+        except KeyError as exc:
+            raise AttributeError(key) from exc
+
+    def __setattr__(self, key: str, value) -> None:
+        self[key] = value
+
+
+class TestRunQueryUsesBuildPipeline:
+    """W1-T1: _run_query must go through baseline_reporag.pipeline_factory."""
+
+    def test_run_query_uses_build_pipeline(self, tmp_path: Path) -> None:
+        proj = _make_proj(tmp_path)
+
+        # Fake QueryResult returned by the mocked pipeline.
+        result = SimpleNamespace(
+            answer="hello",
+            session_id="s1",
+            turn_id=1,
+            cited_chunk_ids=["c1"],
+            wrong_citation_indices=[],
+            no_citation=False,
+            latency=SimpleNamespace(total_ms=123.0),
+            memory=SimpleNamespace(),
+            drift_metrics=None,
+        )
+        fake_pipeline = MagicMock()
+        fake_pipeline.query.return_value = result
+
+        fake_cfg = SimpleNamespace(model=SimpleNamespace(provider="baseline"))
+
+        fake_session_state = _FakeSessionState()
+
+        with (
+            patch.object(photon_app, "load_config", create=True, return_value=fake_cfg),
+            patch.object(
+                photon_app,
+                "build_pipeline",
+                create=True,
+                return_value=fake_pipeline,
+            ) as mock_build,
+            patch.object(photon_app.st, "session_state", fake_session_state),
+        ):
+            answer, metadata = photon_app._run_query(proj, "q?", "sess")
+
+        mock_build.assert_called_once_with(fake_cfg)
+        fake_pipeline.query.assert_called_once()
+        assert answer == "hello"
+        assert metadata["latency_ms"] == 123.0
+        assert metadata["cited_count"] == 1
+
+    def test_run_query_handles_mlx_import_error(self, tmp_path: Path) -> None:
+        proj = _make_proj(tmp_path, name="demo_photon")
+        fake_cfg = SimpleNamespace(model=SimpleNamespace(provider="photon"))
+
+        fake_session_state = _FakeSessionState()
+
+        def _raise_mlx(*_args, **_kwargs):
+            raise ModuleNotFoundError("No module named 'mlx'")
+
+        with (
+            patch.object(photon_app, "load_config", create=True, return_value=fake_cfg),
+            patch.object(
+                photon_app, "build_pipeline", create=True, side_effect=_raise_mlx
+            ),
+            patch.object(photon_app.st, "session_state", fake_session_state),
+        ):
+            answer, metadata = photon_app._run_query(proj, "q?", "sess")
+
+        assert "photon_unavailable_demo_photon" in fake_session_state
+        assert answer.startswith("エラー")
+        # Metadata contract preserved even on error.
+        assert "latency_ms" in metadata
+        assert "cited_count" in metadata
+        assert "pack_size" in metadata
+        assert "no_citation" in metadata
+        assert "drift_metrics" in metadata
+        assert "turn_id" in metadata
