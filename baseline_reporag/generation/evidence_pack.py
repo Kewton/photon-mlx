@@ -25,6 +25,29 @@ class EvidencePack:
         return "\n\n---\n\n".join(parts)
 
 
+def _merge_pinned_sets(
+    session: SessionState,
+    additional_pinned_ids: list[str] | None,
+) -> set[str]:
+    """Merge ``session.pinned_chunk_ids`` with optional caller-supplied pins.
+
+    Issue #103 / DR1-010: extracted so :func:`build_evidence_pack` keeps a
+    single, shallow concern (pin-set composition) and to give the test
+    suite a focused unit for the merge contract.
+
+    DR2-003: ``session`` is non-``None`` per the existing
+    :func:`build_evidence_pack` contract — both
+    :class:`baseline_reporag.pipeline.RepoRAGPipeline` and
+    :class:`baseline_reporag.photon_pipeline.PhotonRAGPipeline` obtain the
+    session via ``SessionManager.get_or_create`` which never returns
+    ``None``.
+    """
+    base = set(session.pinned_chunk_ids)
+    if additional_pinned_ids:
+        base = base | set(additional_pinned_ids)
+    return base
+
+
 def build_evidence_pack(
     chunk_ids: list[str],
     store: ChunkStore,
@@ -32,6 +55,8 @@ def build_evidence_pack(
     max_chunks: int = 16,
     max_tokens: int = 16000,
     recent_citation_turns: int = 2,
+    *,
+    additional_pinned_ids: list[str] | None = None,
 ) -> EvidencePack:
     # Use only recently cited chunks for citation bias to avoid crowding out
     # fresh retrieval in later turns.  Cumulative cited_chunk_ids grows every
@@ -41,7 +66,13 @@ def build_evidence_pack(
     for t in recent_turns:
         recent_cited.update(t.cited_chunk_ids)
 
-    pinned_set = set(session.pinned_chunk_ids)
+    # Issue #103: ``additional_pinned_ids`` (kw-only) lets PHOTON pipeline
+    # promote past-turn cited chunks into the next pack at priority=0
+    # without mutating ``session.pinned_chunk_ids`` (DR2-003 keeps the
+    # existing signature ordering — ``recent_citation_turns`` default 2 is
+    # preserved). ``None`` keeps existing baseline pipeline calls byte
+    # identical (priority ordering, dedup via ``set(chunk_ids)``).
+    pinned_set = _merge_pinned_sets(session, additional_pinned_ids)
 
     def priority(cid: str) -> int:
         if cid in pinned_set:
@@ -50,7 +81,18 @@ def build_evidence_pack(
             return 1
         return 2
 
-    ordered_ids = sorted(set(chunk_ids), key=priority)[:max_chunks]
+    # Codex CB-001 fix: union ``additional_pinned_ids`` into the candidate
+    # set BEFORE ``sorted(...)`` so pinned chunks that are NOT already in
+    # the current retrieval result are still surfaced. This is the entire
+    # purpose of the Issue #103 pinning channel (rescuing past-turn
+    # chunks that retrieval missed). NOTE: ``session.pinned_chunk_ids``
+    # is intentionally NOT unioned here — its semantics (existing
+    # ``priority()`` re-order only) stay untouched, only the new
+    # transient ``additional_pinned_ids`` may inject new IDs.
+    candidate_ids: set[str] = set(chunk_ids)
+    if additional_pinned_ids:
+        candidate_ids = candidate_ids | set(additional_pinned_ids)
+    ordered_ids = sorted(candidate_ids, key=priority)[:max_chunks]
     chunks = store.get_many(ordered_ids)
 
     # Approximate token budget: 1 token ≈ 4 chars
