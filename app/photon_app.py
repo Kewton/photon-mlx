@@ -22,6 +22,43 @@ from typing import Any
 import streamlit as st
 
 PROJECT_ROOT = Path(__file__).parent.parent
+# Ensure baseline_reporag is importable when this module is launched via
+# ``streamlit run app/photon_app.py`` (cwd may be the project root, but the
+# app directory itself is not on sys.path by default).
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from baseline_reporag.config import load_config  # noqa: E402
+from baseline_reporag.pipeline_factory import build_pipeline  # noqa: E402
+
+
+# Issue #82 Wave 3: drift + turn-history panels (streamlit-free helpers).
+# The ``app`` directory has no ``__init__.py`` (see design note on the
+# MySwiftAgent ``app/`` namespace collision in
+# ``tests/test_photon_app_components.py``) so we load each component by
+# absolute file path. Mirrors the loader pattern used by the unit tests.
+def _load_component(mod_name: str):
+    import importlib.util
+
+    full_name = f"_photon_app_component_{mod_name}"
+    if full_name in sys.modules:
+        return sys.modules[full_name]
+    path = PROJECT_ROOT / "app" / "components" / f"{mod_name}.py"
+    spec = importlib.util.spec_from_file_location(full_name, path)
+    assert spec and spec.loader, f"cannot spec component {mod_name} at {path}"
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[full_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+_drift_panel = _load_component("drift_panel")
+_turn_history_panel = _load_component("turn_history_panel")
+# Issue #82 Wave 4: eval_panel orchestration helpers (streamlit-free).
+_eval_panel = _load_component("eval_panel")
+# Issue #82 Wave 5: project wizard helpers (YAML safe_load + best-practice merge).
+_wizard = _load_component("wizard")
+
 STATE_FILE = PROJECT_ROOT / ".cache" / "photon_app_state.json"
 
 SYNC_INTERVAL_SECONDS = 30
@@ -180,6 +217,32 @@ class IndexJob:
 
 
 @dataclass
+class EvalJob:
+    """Evaluation job record persisted in AppState (Issue #82 Wave 1)."""
+
+    job_id: str = ""
+    project_name: str = ""
+    eval_type: str = ""  # "static" | "multi_turn" | "baseline_compare"
+    status: str = "pending"  # "pending" | "running" | "succeeded" | "failed"
+    started_at: str = ""
+    started_at_epoch: float = 0.0
+    finished_at: str = ""
+    pid: int | None = None
+    log_file: str = ""
+    result_json: str = ""
+    marker_file: str = ""
+    done_q: int = 0
+    total_q: int = 0
+    p50_latency_ms: float = 0.0
+    nc_rate: float = 0.0
+    error_message: str = ""
+
+    @property
+    def is_terminal(self) -> bool:
+        return self.status in ("succeeded", "failed")
+
+
+@dataclass
 class Project:
     name: str
     repo_id: str
@@ -197,6 +260,7 @@ class AppState:
     index_jobs: dict[str, IndexJob] = field(default_factory=dict)
     projects: dict[str, Project] = field(default_factory=dict)
     chat_histories: dict[str, list[dict]] = field(default_factory=dict)
+    eval_jobs: dict[str, EvalJob] = field(default_factory=dict)
 
 
 # ================================================================
@@ -218,6 +282,54 @@ def _load_state() -> AppState:
             for k, v in data.get("projects", {}).items():
                 state.projects[k] = Project(**_filter_known_fields(Project, v))
             state.chat_histories = data.get("chat_histories", {})
+            for k, v in data.get("eval_jobs", {}).items():
+                state.eval_jobs[k] = EvalJob(**_filter_known_fields(EvalJob, v))
+            # Issue #82 Wave 2 (W2-T4, D4-004): validate integrity of every
+            # eval_job entry loaded from disk. A tampered state file could
+            # otherwise feed arbitrary pid types, paths outside PROJECT_ROOT
+            # or unknown status values into the sync/UI layer.
+            _allowed_eval_status = {"pending", "running", "succeeded", "failed"}
+            _project_root_abs = PROJECT_ROOT.resolve()
+            for _k, _job in list(state.eval_jobs.items()):
+                # Normalize pid: must be ``int`` or ``None``. Anything else
+                # (e.g. a string via JSON tampering) is coerced to ``None``
+                # so ``os.kill(pid, 0)`` can never see garbage.
+                if not (_job.pid is None or isinstance(_job.pid, int)):
+                    _logger.warning(
+                        "eval_job %s has non-int pid %r; resetting to None",
+                        _k,
+                        _job.pid,
+                    )
+                    _job.pid = None
+                # Validate path-like fields: they must resolve inside
+                # PROJECT_ROOT when non-empty. Empty strings are allowed
+                # (they indicate "not yet assigned").
+                for _attr in ("log_file", "result_json", "marker_file"):
+                    _value = getattr(_job, _attr, "")
+                    if not _value:
+                        continue
+                    try:
+                        _p = Path(_value).resolve()
+                        _p.relative_to(_project_root_abs)
+                    except (ValueError, OSError):
+                        _job.status = "failed"
+                        _job.error_message = "state tampering detected"
+                        _logger.warning(
+                            "eval_job %s has tampered %s: %r",
+                            _k,
+                            _attr,
+                            _value,
+                        )
+                        break
+                # Constrain status to the documented set; anything unknown
+                # is funnelled into ``failed`` so the UI stops polling it.
+                if _job.status not in _allowed_eval_status:
+                    _logger.warning(
+                        "eval_job %s has unknown status %r; forcing to failed",
+                        _k,
+                        _job.status,
+                    )
+                    _job.status = "failed"
             return state
         except Exception as exc:
             _logger.warning("Failed to load app state: %s", exc)
@@ -230,6 +342,7 @@ def _save_state(state: AppState) -> None:
         "index_jobs": {k: asdict(v) for k, v in state.index_jobs.items()},
         "projects": {k: asdict(v) for k, v in state.projects.items()},
         "chat_histories": state.chat_histories,
+        "eval_jobs": {k: asdict(v) for k, v in state.eval_jobs.items()},
     }
     _atomic_write_text(STATE_FILE, json.dumps(data, ensure_ascii=False, indent=2))
 
@@ -397,8 +510,92 @@ def _sync_index_job(job: IndexJob) -> bool:
     return changed
 
 
+def _sync_eval_job(job: EvalJob, now_epoch: float | None = None) -> bool:
+    """Reconcile an eval job against live process state / marker / logs.
+
+    Issue #82 Wave 4 (W4-T2, D3-004 / D4-003):
+
+    * ``marker_file`` exists → ``status="succeeded"``; progress fields are
+      pulled from ``result_json`` (falling back to the current values if
+      the JSON is missing or malformed).
+    * ``started_at_epoch`` is older than ``EVAL_WALL_CLOCK_TIMEOUT_SEC`` →
+      ``status="failed"``, ``error_message="wall-clock timeout"``.
+    * PID not alive AND no marker → ``status="failed"``, ``error_message``
+      is the trailing 2KB of the log so the UI can surface crash context.
+    * PID alive AND running: refresh progress from the log's latest
+      ``PROGRESS`` line; only mutate if ``done_q`` advanced.
+
+    Terminal jobs (``succeeded``/``failed``) are skipped — this keeps
+    ``_sync_all_jobs`` cheap when the state file already reflects the
+    final outcome.
+
+    Returns ``True`` iff any field on ``job`` was mutated.
+    """
+
+    if job.is_terminal:
+        return False
+
+    now = now_epoch if now_epoch is not None else time.time()
+
+    marker_path = Path(job.marker_file) if job.marker_file else None
+    if marker_path is not None and marker_path.exists():
+        # D3-004: marker_file is the authoritative success signal.
+        result: dict[str, Any] = {}
+        if job.result_json:
+            try:
+                result = json.loads(Path(job.result_json).read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                result = {}
+        job.done_q = int(result.get("done_q", job.done_q))
+        job.total_q = int(result.get("total_q", job.total_q))
+        job.p50_latency_ms = float(result.get("p50_latency_ms", job.p50_latency_ms))
+        job.nc_rate = float(result.get("nc_rate", job.nc_rate))
+        job.status = "succeeded"
+        job.finished_at = datetime.now().isoformat(timespec="seconds")
+        return True
+
+    started = job.started_at_epoch or now
+    elapsed = now - started
+    if elapsed > _eval_panel.EVAL_WALL_CLOCK_TIMEOUT_SEC:
+        job.status = "failed"
+        job.error_message = "wall-clock timeout"
+        job.finished_at = datetime.now().isoformat(timespec="seconds")
+        return True
+
+    pid_alive = _is_process_running(job.pid)
+    if pid_alive:
+        changed = False
+        if job.log_file:
+            progress = _eval_panel.parse_eval_progress(Path(job.log_file))
+            if progress:
+                new_done = int(progress.get("done_q", job.done_q))
+                new_total = int(progress.get("total_q", job.total_q))
+                new_p50 = float(progress.get("p50_latency_ms", job.p50_latency_ms))
+                new_nc = float(progress.get("nc_rate", job.nc_rate))
+                if (
+                    new_done != job.done_q
+                    or new_total != job.total_q
+                    or new_p50 != job.p50_latency_ms
+                    or new_nc != job.nc_rate
+                ):
+                    job.done_q = new_done
+                    job.total_q = new_total
+                    job.p50_latency_ms = new_p50
+                    job.nc_rate = new_nc
+                    changed = True
+        return changed
+
+    # PID not alive AND no marker file → the child exited without
+    # signalling success. Mark as failed and surface the log tail.
+    job.status = "failed"
+    tail = _eval_panel.tail_log_bytes(Path(job.log_file), 2048) if job.log_file else ""
+    job.error_message = tail or "process died without marker"
+    job.finished_at = datetime.now().isoformat(timespec="seconds")
+    return True
+
+
 def _sync_all_jobs(state: AppState) -> bool:
-    """Reconcile every training/index job in `state`. Returns True if mutated."""
+    """Reconcile every training/index/eval job in `state`. Returns True if mutated."""
     changed = False
     progress = _read_training_progress(str(PROJECT_ROOT / "logs" / "train_log.jsonl"))
     for job in state.training_jobs.values():
@@ -406,6 +603,10 @@ def _sync_all_jobs(state: AppState) -> bool:
             changed = True
     for job in state.index_jobs.values():
         if _sync_index_job(job):
+            changed = True
+    # Issue #82 Wave 4 (W4-T2): daemon thread also reconciles eval jobs.
+    for eval_job in state.eval_jobs.values():
+        if _sync_eval_job(eval_job):
             changed = True
     return changed
 
@@ -653,6 +854,149 @@ def page_training():
             st.text(f"Config: {job.config_path}")
             st.text(f"リポジトリ: {job.repo_dir}")
 
+            # Issue #82 Wave 4 (W4-T3): eval runner section per training job.
+            _render_eval_runner_section(state, job_id, job)
+
+
+def _render_eval_runner_section(state: AppState, job_id: str, job: TrainingJob) -> None:
+    """Render the [Run Static Eval] / [Run Multi-Turn Eval] controls + status.
+
+    Issue #82 Wave 4 (W4-T3): async eval runner in the training page.
+    ``MAX_CONCURRENT_EVAL=1`` is enforced by disabling both buttons when
+    any eval job is currently in the ``running`` state (D4-003).
+    """
+
+    st.markdown("---")
+    st.caption("評価ジョブ (Issue #82 Wave 4)")
+
+    # Build a project selector: eval needs ``repo_id`` + ``config_path`` and
+    # both live on ``Project``, not ``TrainingJob``.
+    if not state.projects:
+        st.info("先にプロジェクトを登録すると評価を実行できます。")
+        return
+
+    project_name = st.selectbox(
+        "評価対象プロジェクト",
+        options=list(state.projects.keys()),
+        key=f"eval_proj_{job_id}",
+    )
+    proj = state.projects[project_name]
+
+    running_evals = [ej for ej in state.eval_jobs.values() if ej.status == "running"]
+    disable_buttons = len(running_evals) >= _eval_panel.MAX_CONCURRENT_EVAL
+    if disable_buttons:
+        st.caption("⏳ 他の評価ジョブが実行中のため新規実行は無効です。")
+
+    col_s, col_m = st.columns(2)
+    with col_s:
+        static_clicked = st.button(
+            "Run Static Eval",
+            key=f"run_static_{job_id}",
+            disabled=disable_buttons,
+        )
+    with col_m:
+        mt_clicked = st.button(
+            "Run Multi-Turn Eval",
+            key=f"run_mt_{job_id}",
+            disabled=disable_buttons,
+        )
+
+    if static_clicked:
+        _launch_eval_job(state, proj, eval_type="static")
+        st.rerun()
+    if mt_clicked:
+        _launch_eval_job(state, proj, eval_type="multi_turn")
+        st.rerun()
+
+    # Running / recent eval jobs for this project.
+    related = [ej for ej in state.eval_jobs.values() if ej.project_name == proj.name]
+    if not related:
+        return
+    for ej in sorted(related, key=lambda e: e.started_at, reverse=True)[:5]:
+        icon = {
+            "pending": "⏳",
+            "running": "🔄",
+            "succeeded": "✅",
+            "failed": "❌",
+        }.get(ej.status, "?")
+        st.markdown(
+            f"**{icon} {ej.eval_type}** · `{ej.job_id[:8]}…` · "
+            f"{ej.status} · started {ej.started_at[:19]}"
+        )
+        if ej.total_q > 0:
+            pct = min(ej.done_q / ej.total_q, 1.0)
+            st.progress(
+                pct,
+                text=(
+                    f"{ej.done_q}/{ej.total_q} Q · "
+                    f"p50 {ej.p50_latency_ms:.0f}ms · "
+                    f"NC {ej.nc_rate:.1%}"
+                ),
+            )
+        if ej.status == "succeeded":
+            st.caption(
+                f"result: {ej.result_json}" if ej.result_json else "(no result_json)"
+            )
+        if ej.status == "failed" and ej.error_message:
+            # Keep the error short in the UI; full tail lives on disk.
+            snippet = ej.error_message.strip().splitlines()[-1][:200]
+            st.warning(f"失敗: {snippet}")
+
+
+def _launch_eval_job(
+    state: AppState,
+    proj: Project,
+    eval_type: str,
+) -> None:
+    """Spawn an eval subprocess + persist a new EvalJob in ``state``.
+
+    Issue #82 Wave 4 (W4-T3).  Path composition goes through
+    ``eval_panel.make_eval_paths`` so result_json/log_file/marker_file are
+    all confined to ``reports/eval_runs/`` and ``logs/eval/``.  The
+    config is taken from ``proj.photon_config_path`` when the project is
+    PHOTON-enabled, else from ``proj.config_path``.
+    """
+
+    job_id = _eval_panel.sanitize_job_id()
+    result_json, log_file, marker_file = _eval_panel.make_eval_paths(
+        job_id, PROJECT_ROOT
+    )
+    config_path = proj.photon_config_path or proj.config_path
+    try:
+        cmd = _eval_panel.build_eval_job_cmd(
+            eval_type=eval_type,
+            project_name=proj.name,
+            repo_id=proj.repo_id,
+            config_path=config_path,
+            output_json=result_json,
+            marker_file=marker_file,
+        )
+    except ValueError as exc:
+        st.error(f"評価コマンドの構築に失敗: {exc}")
+        return
+    try:
+        proc = _eval_panel.start_eval_job(cmd, log_file)
+    except OSError as exc:
+        st.error(f"評価プロセスの起動に失敗: {exc}")
+        return
+
+    started_epoch = time.time()
+    job = EvalJob(
+        job_id=job_id,
+        project_name=proj.name,
+        eval_type=eval_type,
+        status="running",
+        started_at=datetime.now().isoformat(timespec="seconds"),
+        started_at_epoch=started_epoch,
+        pid=proc.pid,
+        log_file=str(log_file),
+        result_json=str(result_json),
+        marker_file=str(marker_file),
+    )
+    state.eval_jobs[job_id] = job
+    save()
+    st.success(f"評価開始 (PID: {proc.pid}, job_id: {job_id[:8]}…)")
+
 
 def _generate_photon_config(
     path: str,
@@ -870,24 +1214,189 @@ def page_projects():
     )
     config_path = st.selectbox("Config ファイル", options=available_configs)
 
+    # Issue #82 Wave 5 (W5-T2): opt-in PHOTON wizard. The expander keeps
+    # the default UX minimal — users who only care about config_path /
+    # checkpoint leave the panel collapsed and the wizard is a no-op.
+    # When the user opens the expander AND PHOTON is enabled, submit
+    # writes ``projects/<safe_id(name)>/photon.yaml`` via
+    # ``wizard.generate_yaml_from_wizard`` (+ optional best-practice
+    # merge) and overrides ``photon_config_path`` accordingly.
+    with st.expander("PHOTON settings (Wave 2-4 toggles)", expanded=False):
+        use_wizard = st.checkbox(
+            "この form で PHOTON YAML を生成して保存",
+            value=False,
+            key="wizard_enable",
+            help=(
+                "オンにすると下記トグルから projects/<name>/photon.yaml を "
+                "生成し、photon_config_path に自動設定します。"
+            ),
+        )
+        wiz_base_profile = st.selectbox(
+            "Config template",
+            options=["photon_small", "photon_tiny", "photon_long_context"],
+            key="wizard_base_profile",
+        )
+        wiz_recgen = st.checkbox(
+            "RecGen enabled (inference.photon_generation_enabled)",
+            value=False,
+            key="wizard_recgen",
+        )
+        wiz_fallback: str | None = None
+        if wiz_recgen:
+            wiz_fallback = st.radio(
+                "Fallback policy (inference.generation_fallback_policy)",
+                options=list(_wizard.ALLOWED_FALLBACK_POLICIES),
+                index=0,
+                key="wizard_fallback",
+                horizontal=True,
+            )
+        wiz_two_pass = st.checkbox(
+            "2-pass search enabled (retrieval.two_pass_search.enabled)",
+            value=False,
+            key="wizard_two_pass",
+        )
+        wiz_pass1 = st.number_input(
+            "pass1_top_k",
+            min_value=1,
+            value=64,
+            step=1,
+            key="wizard_pass1_top_k",
+            disabled=not wiz_two_pass,
+        )
+        wiz_pass2 = st.number_input(
+            "pass2_top_k",
+            min_value=1,
+            value=16,
+            step=1,
+            key="wizard_pass2_top_k",
+            disabled=not wiz_two_pass,
+        )
+        wiz_wm = st.checkbox(
+            "Working memory enabled (session_memory.working_memory.enabled)",
+            value=True,
+            key="wizard_wm",
+        )
+        wiz_wm_max_turns = st.number_input(
+            "max_turns",
+            min_value=1,
+            value=8,
+            step=1,
+            key="wizard_wm_max_turns",
+            disabled=not wiz_wm,
+        )
+        wiz_wm_agg = st.selectbox(
+            "aggregation",
+            options=["weighted", "attention", "last"],
+            index=0,
+            key="wizard_wm_agg",
+            disabled=not wiz_wm,
+        )
+        wiz_wm_storage = st.selectbox(
+            "storage_mode",
+            options=["full", "top_level_only"],
+            index=0,
+            key="wizard_wm_storage",
+            disabled=not wiz_wm,
+        )
+        wiz_pinning = st.checkbox(
+            "past_turn_pinning_enabled",
+            value=False,
+            key="wizard_pinning",
+            disabled=not wiz_wm,
+        )
+        wiz_apply_best = st.checkbox(
+            "Apply best-practice when saving",
+            value=False,
+            key="wizard_apply_best",
+            help=(
+                "5 キー（safe_recgen / evidence_pruning / working_memory / "
+                "photon_generation=false / two_pass_search=false）を選択 "
+                "template にマージします。intentional conflict の profile "
+                "では警告として表示されます。"
+            ),
+        )
+
     if st.button(
         "登録",
         type="primary",
         disabled=not (name and repo_id and repo_id != "(なし — 先にDB作成)"),
     ):
+        # Issue #82 Wave 2 (W2-T1): validate project_name before any path
+        # composition. Reject metacharacters / traversal via _safe_id.
+        try:
+            safe_name = _safe_id(name, label="project_name")
+        except ValueError as exc:
+            st.error(f"プロジェクト名が不正です: {exc}")
+            return
+        # Path-containment assertion for defense-in-depth: the project dir
+        # (when saved) MUST resolve inside PROJECT_ROOT / "projects".
+        projects_root = (PROJECT_ROOT / "projects").resolve()
+        save_dir = (PROJECT_ROOT / "projects" / safe_name).resolve()
+        assert save_dir.is_relative_to(projects_root), (
+            f"project save dir escaped projects root: {save_dir}"
+        )
+
+        # Issue #82 Wave 5 (W5-T2): if the wizard panel opted in AND the
+        # selected checkpoint enables PHOTON, generate a fresh YAML from
+        # the chosen template + wizard toggles and (optionally) merge
+        # best-practice keys. The resulting file lives inside the
+        # validated ``save_dir`` so photon_config_path is contained.
+        photon_config_for_project = config_path if use_photon else ""
+        if use_photon and use_wizard:
+            user_toggles: dict[str, Any] = {
+                "recgen_enabled": bool(wiz_recgen),
+                "two_pass_search_enabled": bool(wiz_two_pass),
+                "two_pass_pass1_top_k": int(wiz_pass1),
+                "two_pass_pass2_top_k": int(wiz_pass2),
+                "working_memory_enabled": bool(wiz_wm),
+                "working_memory_max_turns": int(wiz_wm_max_turns),
+                "working_memory_aggregation": str(wiz_wm_agg),
+                "working_memory_storage_mode": str(wiz_wm_storage),
+                "past_turn_pinning_enabled": bool(wiz_pinning),
+            }
+            if wiz_recgen and wiz_fallback is not None:
+                user_toggles["fallback_policy"] = wiz_fallback
+
+            try:
+                generated_yaml = _wizard.generate_yaml_from_wizard(
+                    wiz_base_profile,
+                    user_toggles,
+                )
+                if wiz_apply_best:
+                    generated_yaml, warnings = _wizard.apply_best_practice(
+                        generated_yaml,
+                        wiz_base_profile,
+                    )
+                    for w in warnings:
+                        st.warning(w)
+            except ValueError as exc:
+                st.error(f"wizard YAML 生成に失敗しました: {exc}")
+                return
+
+            save_dir.mkdir(parents=True, exist_ok=True)
+            photon_yaml_path = (save_dir / "photon.yaml").resolve()
+            # Defense-in-depth: ensure the final written path is still
+            # inside projects_root after resolve().
+            assert photon_yaml_path.is_relative_to(projects_root), (
+                f"photon.yaml escaped projects root: {photon_yaml_path}"
+            )
+            _atomic_write_text(photon_yaml_path, generated_yaml)
+            photon_config_for_project = str(photon_yaml_path)
+            st.success(f"wizard YAML を保存しました: {photon_yaml_path}")
+
         project = Project(
-            name=name,
+            name=safe_name,
             repo_id=repo_id,
             index_dir=str(idx_dir / repo_id),
             config_path=config_path,
-            photon_config_path=config_path if use_photon else "",
+            photon_config_path=photon_config_for_project,
             checkpoint_dir=checkpoint if use_photon else "",
             use_photon=use_photon,
             created_at=datetime.now().isoformat(),
         )
-        state.projects[name] = project
+        state.projects[safe_name] = project
         save()
-        st.success(f"プロジェクト '{name}' を登録しました")
+        st.success(f"プロジェクト '{safe_name}' を登録しました")
         st.rerun()
 
     # --- List ---
@@ -937,6 +1446,17 @@ def page_chat():
         f"config: {Path(proj.config_path).name}"
     )
 
+    # Issue #82 Wave 1 (W1-T1): block retries when MLX is unavailable for
+    # a photon-provider project. ``_run_query`` sets this flag on the first
+    # ImportError so we don't keep re-trying the heavy import every turn.
+    photon_unavailable_key = f"photon_unavailable_{project_name}"
+    photon_unavailable = st.session_state.get(photon_unavailable_key)
+    if photon_unavailable:
+        st.error(
+            "PHOTON パイプラインを初期化できません "
+            f"({photon_unavailable})。MLX がインストールされているか確認してください。"
+        )
+
     # Session management
     session_key = f"chat_{project_name}"
     if session_key not in state.chat_histories:
@@ -959,7 +1479,12 @@ def page_chat():
             placeholder="質問を入力して送信ボタンを押してください",
         )
     with col_btn:
-        send_clicked = st.button("送信", type="primary", key=f"send_{session_key}")
+        send_clicked = st.button(
+            "送信",
+            type="primary",
+            key=f"send_{session_key}",
+            disabled=bool(photon_unavailable),
+        )
 
     question = question_input if send_clicked and question_input else None
 
@@ -983,6 +1508,70 @@ def page_chat():
                     col2.metric("Citations", str(metadata.get("cited_count", 0)))
                     col3.metric("Chunks", str(metadata.get("pack_size", 0)))
 
+                # Issue #82 Wave 3: drift + turn_history panels.
+                # Isolated so rendering failures do not break chat flow.
+                try:
+                    cfg_for_panels = load_config(proj.config_path)
+                except Exception:
+                    cfg_for_panels = None
+
+                try:
+                    dm_raw = metadata.get("drift_metrics")
+                    dm_dict = None
+                    if dm_raw is not None:
+                        dm_dict = (
+                            dm_raw.as_dict() if hasattr(dm_raw, "as_dict") else dm_raw
+                        )
+                    thresholds = _build_drift_thresholds(cfg_for_panels)
+                    panel = _drift_panel.format_drift_panel(dm_dict, thresholds)
+                    with st.expander("Drift metrics"):
+                        if not panel["available"]:
+                            st.info(panel["reason"])
+                        else:
+                            for row in panel["rows"]:
+                                label = (
+                                    f"{row['badge']} {row['name']}".strip()
+                                    if row["badge"]
+                                    else row["name"]
+                                )
+                                st.metric(label, row["value_str"])
+                            fired = "Yes" if panel["safe_recgen_fired"] else "No"
+                            st.caption(f"Safe RecGen fired: {fired}")
+                except Exception as exc:
+                    st.warning(f"drift panel render failed: {exc}")
+
+                try:
+                    wm_enabled = _working_memory_enabled(cfg_for_panels)
+                    max_turns = 8
+                    if cfg_for_panels is not None:
+                        sm = getattr(cfg_for_panels, "session_memory", None)
+                        wm = getattr(sm, "working_memory", None) if sm else None
+                        max_turns = int(getattr(wm, "max_turns", 8) or 8) if wm else 8
+                    hist_panel = _turn_history_panel.format_turn_history_panel(
+                        metadata.get("photon_turn_history"),
+                        metadata.get("session_turns"),
+                        working_memory_enabled=wm_enabled,
+                        max_turns=max_turns,
+                    )
+                    with st.expander("Turn history"):
+                        if not hist_panel["available"]:
+                            st.info(hist_panel["reason"])
+                        elif not hist_panel["rows"]:
+                            st.caption("(no turns recorded yet)")
+                        else:
+                            for row in hist_panel["rows"]:
+                                st.markdown(
+                                    f"- **turn {row.turn_id}** · "
+                                    f"`{row.timestamp}` — "
+                                    f"{row.question_text}"
+                                )
+                                if row.cited_chunk_ids:
+                                    st.caption(
+                                        "cited: " + ", ".join(row.cited_chunk_ids)
+                                    )
+                except Exception as exc:
+                    st.warning(f"turn history render failed: {exc}")
+
         history.append({"role": "assistant", "content": answer})
         save()
 
@@ -994,76 +1583,160 @@ def page_chat():
 
 
 def _run_query(proj: Project, question: str, session_key: str) -> tuple[str, dict]:
-    """Run a query through the pipeline."""
+    """Run a query through the pipeline via ``build_pipeline(cfg)``.
+
+    Issue #82 Wave 1 (W1-T1): route through the provider-routing factory so
+    ``cfg.model.provider == "photon"`` reaches ``PhotonRAGPipeline`` and the
+    resulting ``QueryResult.drift_metrics`` / ``turn_id`` become available
+    to the UI. MLX import errors are caught and surfaced via the
+    ``photon_unavailable_{proj.name}`` session-state flag so the chat page
+    can block retries and display a clear error.
+    """
+    # Default metadata keeps the UI contract stable even on error paths.
+    metadata_default: dict[str, Any] = {
+        "latency_ms": 0,
+        "cited_count": 0,
+        "pack_size": 0,
+        "no_citation": False,
+        "drift_metrics": None,
+        "turn_id": 0,
+    }
+
+    pipeline_key = f"pipeline_{proj.name}"
+
     try:
-        import sys
+        cfg = load_config(proj.config_path)
+    except Exception as exc:
+        _logger.exception("Failed to load config for %s", proj.name)
+        return f"エラー: config load failed ({type(exc).__name__}: {exc})", dict(
+            metadata_default
+        )
 
-        sys.path.insert(0, str(PROJECT_ROOT))
-
-        from baseline_reporag.config import load_config
-        from baseline_reporag.generation.generator import Generator
-        from baseline_reporag.indexing.embedding import EmbeddingIndex
-        from baseline_reporag.indexing.lexical import LexicalIndex
-        from baseline_reporag.indexing.symbol_graph import SymbolGraph
-        from baseline_reporag.ingestion.store import ChunkStore
-        from baseline_reporag.logger import RunLogger
-        from baseline_reporag.memory.session import SessionManager
-        from baseline_reporag.pipeline import RepoRAGPipeline
-        from baseline_reporag.retrieval.reranker import CrossEncoderReranker
-
-        # Cache pipeline in session state
-        pipeline_key = f"pipeline_{proj.name}"
-        if pipeline_key not in st.session_state:
-            cfg = load_config(proj.config_path)
-            idx_dir = Path(cfg.paths.data_root) / "indexes" / proj.repo_id
-            run_id = f"app_{proj.repo_id}_{int(time.time())}"
-
-            reranker_cfg = cfg.retrieval.reranker
-            reranker = (
-                CrossEncoderReranker(
-                    model_id=reranker_cfg.get(
-                        "model_id", "cross-encoder/ms-marco-MiniLM-L-6-v2"
-                    )
-                )
-                if reranker_cfg.get("enabled", False)
-                else None
+    if pipeline_key not in st.session_state:
+        try:
+            pipeline = build_pipeline(cfg)
+        except (ImportError, ModuleNotFoundError) as exc:
+            st.session_state[f"photon_unavailable_{proj.name}"] = str(exc)
+            _logger.warning("PHOTON pipeline unavailable for %s: %s", proj.name, exc)
+            return (
+                f"エラー: PHOTON pipeline unavailable ({exc})",
+                dict(metadata_default),
             )
-
-            st.session_state[pipeline_key] = RepoRAGPipeline(
-                config=cfg,
-                store=ChunkStore(idx_dir / "chunks.db"),
-                lexical=LexicalIndex.load(idx_dir / "lexical.pkl"),
-                embedding=EmbeddingIndex.load(idx_dir / "embedding"),
-                graph=SymbolGraph.load(idx_dir / "symbol_graph.json"),
-                sessions=SessionManager(log_dir=Path(cfg.paths.log_root) / "sessions"),
-                generator=Generator(
-                    model_id=cfg.model.model_id,
-                    max_new_tokens=cfg.generation.max_new_tokens,
-                    temperature=cfg.generation.temperature,
-                    top_p=cfg.generation.top_p,
-                ),
-                logger=RunLogger(cfg.paths.log_root, run_id),
-                reranker=reranker,
+        except Exception as exc:
+            _logger.exception("Failed to build pipeline for %s", proj.name)
+            return (
+                f"エラー: pipeline build failed ({type(exc).__name__}: {exc})",
+                dict(metadata_default),
             )
+        st.session_state[pipeline_key] = pipeline
 
-        pipeline = st.session_state[pipeline_key]
+    pipeline = st.session_state[pipeline_key]
+
+    try:
         result = pipeline.query(
             question=question,
             session_id=session_key,
             repo_id=proj.repo_id,
         )
+    except Exception as exc:
+        # Keep traceback in logs; keep UI message short.
+        _logger.exception("pipeline.query failed for %s", proj.name)
+        return (
+            f"エラー: {type(exc).__name__}: {exc}",
+            dict(metadata_default),
+        )
 
-        metadata = {
-            "latency_ms": result.latency.total_ms,
-            "cited_count": len(result.cited_chunk_ids),
-            "pack_size": len(result.cited_chunk_ids),
-            "no_citation": result.no_citation,
+    metadata = {
+        "latency_ms": result.latency.total_ms,
+        "cited_count": len(result.cited_chunk_ids),
+        "pack_size": len(result.cited_chunk_ids),
+        "no_citation": result.no_citation,
+        "drift_metrics": getattr(result, "drift_metrics", None),
+        "turn_id": getattr(result, "turn_id", 0),
+    }
+
+    # Issue #82 Wave 3 (W3-T3): surface turn-history for the chat panel.
+    # PhotonRAGPipeline keeps PHOTON sessions in ``photon_inference._sessions``
+    # and the baseline SessionManager in ``baseline.sessions``. When the
+    # pipeline is a plain baseline_rag RepoRAGPipeline, ``photon_inference``
+    # is absent and ``photon_turn_history`` stays ``None`` — the UI then
+    # renders an "N/A (baseline_rag)" panel.
+    photon_turn_history: list[Any] | None = None
+    session_turns: list[Any] | None = None
+    try:
+        photon_inference = getattr(pipeline, "photon_inference", None)
+        if photon_inference is not None:
+            photon_session = getattr(photon_inference, "_sessions", {}).get(session_key)
+            if photon_session is not None:
+                photon_turn_history = list(
+                    getattr(photon_session, "turn_history", []) or []
+                )
+            else:
+                # Photon pipeline exists but this session has not reached a
+                # state that records turn_history yet (e.g. first-turn
+                # fail-closed) — render an empty panel rather than N/A.
+                photon_turn_history = []
+        sessions_mgr = getattr(getattr(pipeline, "baseline", None), "sessions", None)
+        if sessions_mgr is None:
+            sessions_mgr = getattr(pipeline, "sessions", None)
+        if sessions_mgr is not None:
+            internal = getattr(sessions_mgr, "_sessions", {}) or {}
+            sess = internal.get(session_key)
+            if sess is not None:
+                session_turns = list(getattr(sess, "turns", []) or [])
+    except Exception:
+        _logger.exception("Failed to extract turn_history for project %s", proj.name)
+
+    metadata["photon_turn_history"] = photon_turn_history
+    metadata["session_turns"] = session_turns
+
+    return result.answer, metadata
+
+
+def _build_drift_thresholds(cfg: Any) -> dict[str, float | None]:
+    """Map ``cfg.safe_recgen.thresholds`` to the 4 UI indicator slots.
+
+    Issue #82 Wave 3 (W3-T3): ``configs/photon_small.yaml:262-266`` exposes
+    only the ``latent_cosine_drift`` and ``topic_shift_score`` thresholds;
+    the token/mid levels have no configured threshold so those slots are
+    ``None`` (classify_drift returns "ok" when the threshold is None).
+    """
+    sr = getattr(cfg, "safe_recgen", None)
+    if sr is None:
+        return {
+            "token_level": None,
+            "mid_level": None,
+            "top_level": None,
+            "topic_shift": None,
         }
+    thr = getattr(sr, "thresholds", None)
+    if thr is None:
+        return {
+            "token_level": None,
+            "mid_level": None,
+            "top_level": None,
+            "topic_shift": None,
+        }
+    # ``thr`` is a ``Config`` (dot-access wrapper) when loaded from YAML,
+    # but a plain dict in tests. Both support ``.get(...)``.
+    getter = thr.get if hasattr(thr, "get") else (lambda k, d=None: d)
+    return {
+        "token_level": None,
+        "mid_level": None,
+        "top_level": getter("latent_cosine_drift", None),
+        "topic_shift": getter("topic_shift_score", None),
+    }
 
-        return result.answer, metadata
 
-    except Exception as e:
-        return f"エラーが発生しました: {e}", {}
+def _working_memory_enabled(cfg: Any) -> bool:
+    """Return ``True`` iff ``cfg.session_memory.working_memory.enabled``."""
+    sm = getattr(cfg, "session_memory", None)
+    if sm is None:
+        return False
+    wm = getattr(sm, "working_memory", None)
+    if wm is None:
+        return False
+    return bool(getattr(wm, "enabled", False))
 
 
 # ================================================================

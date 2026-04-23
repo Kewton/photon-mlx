@@ -227,3 +227,58 @@ python scripts/build_symbol_graph.py --config configs/baseline.yaml
 ```
 
 Restart the server after re-indexing to pick up the new data.
+
+---
+
+## Streamlit App: PHOTON Wave 2-4 UI (Issue #82)
+
+The management app (`app/photon_app.py`) exposes the Wave 2-4 PHOTON features through a GUI instead of requiring YAML edits.
+
+### PHOTON プロジェクト作成ウィザード
+
+`page_projects()` の「Create new project」フォーム内に **PHOTON settings** expander を配置。`use_photon=True` で作成するプロジェクトは以下をフォームで設定可能:
+
+- **Config template**: `photon_small` / `photon_tiny` / `photon_long_context`
+- **RecGen (PHOTON generation)**: 有効/無効トグル + Fallback policy (`qwen` / `abort`)
+- **2-pass search**: 有効/無効トグル + pass1/pass2 top_k
+- **Working memory**: enable, max_turns, aggregation (`weighted`/`attention`/`last`), storage_mode (`full`/`top_level_only`), past_turn_pinning
+
+「**Apply best-practice**」チェックボックスを有効にして保存すると、以下 5 キーがテンプレートに merge される:
+
+- `safe_recgen.enabled: true`
+- `generation.evidence_pruning_enabled: true`
+- `session_memory.working_memory.enabled: true`
+- `inference.photon_generation_enabled: false`（RecGen 非推奨・MT eval で +6.1pp NC）
+- `retrieval.two_pass_search.enabled: false`（Static 悪化）
+
+プロファイル `photon_tiny_recgen` / `photon_tiny` / `photon_600m_paper` に対しては意図的な設定の上書きについて警告が表示される（生成された YAML は `projects/<project_name>/photon.yaml` に保存）。
+
+### Drift metrics panel（チャット画面）
+
+PHOTON プロジェクトでのチャット応答ごとに以下 4 指標が表示される:
+
+- `token_level`（`latent_cosine_drift_token`）
+- `mid_level`（`latent_cosine_drift_mid`）
+- `top_level`（`latent_cosine_drift_top`）— 閾値は `cfg.safe_recgen.thresholds.latent_cosine_drift`
+- `topic_shift`（`topic_shift_score`）— 閾値は `cfg.safe_recgen.thresholds.topic_shift_score`
+
+閾値超過時は `⚠` バッジ付きで視覚的に区別。baseline プロジェクトや初回ターンは `N/A (baseline_rag or first turn)` 表示。
+
+### Working memory panel（turn_history）
+
+PHOTON + `session_memory.working_memory.enabled=true` のプロジェクトでは最新 `max_turns` 件の履歴を表示:
+
+- Turn ID, question_text, timestamp
+- cited_chunk_ids（`SessionManager` の `Turn.cited_chunk_ids` と `turn_id` で join）
+
+baseline プロジェクトは `N/A (baseline_rag)`、working_memory OFF は `N/A (working_memory disabled)` 表示。
+
+### Eval runner（training 詳細）
+
+学習ジョブの展開パネル内から eval を起動可能:
+
+- `[Run Static Eval]`: `scripts.run_baseline_eval` を `-m` で起動
+- `[Run Multi-Turn Eval]`: `scripts.run_multi_turn_eval` を `-m` で起動
+- 同時実行数は 1（`MAX_CONCURRENT_EVAL=1`）、wall-clock timeout 3600s
+
+Eval ジョブの状態は `.cache/photon_app_state.json` の `eval_jobs` dict に永続化される。起動時の subprocess は `shell=False`、結果 JSON は `reports/eval_runs/<job_id>.json`、ログは `logs/eval/<job_id>.log`（両方 gitignore 済み）。進捗は `PROGRESS done=N total=M p50_ms=X nc=Y` 形式のログ行から自動抽出。正常終了時に `reports/eval_runs/<job_id>.done` マーカーファイルが作成される。

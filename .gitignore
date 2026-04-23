@@ -22,6 +22,10 @@ logs/
 # Reports (generated artifacts — committed manually after review)
 reports/benchmark_runs/
 
+# Issue #82: eval job outputs (streamlit app)
+reports/eval_runs/
+logs/eval/
+
 # macOS
 .DS_Store
 
