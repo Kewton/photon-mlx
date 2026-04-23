@@ -22,6 +22,15 @@ from typing import Any
 import streamlit as st
 
 PROJECT_ROOT = Path(__file__).parent.parent
+# Ensure baseline_reporag is importable when this module is launched via
+# ``streamlit run app/photon_app.py`` (cwd may be the project root, but the
+# app directory itself is not on sys.path by default).
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from baseline_reporag.config import load_config  # noqa: E402
+from baseline_reporag.pipeline_factory import build_pipeline  # noqa: E402
+
 STATE_FILE = PROJECT_ROOT / ".cache" / "photon_app_state.json"
 
 SYNC_INTERVAL_SECONDS = 30
@@ -180,6 +189,32 @@ class IndexJob:
 
 
 @dataclass
+class EvalJob:
+    """Evaluation job record persisted in AppState (Issue #82 Wave 1)."""
+
+    job_id: str = ""
+    project_name: str = ""
+    eval_type: str = ""  # "static" | "multi_turn" | "baseline_compare"
+    status: str = "pending"  # "pending" | "running" | "succeeded" | "failed"
+    started_at: str = ""
+    started_at_epoch: float = 0.0
+    finished_at: str = ""
+    pid: int | None = None
+    log_file: str = ""
+    result_json: str = ""
+    marker_file: str = ""
+    done_q: int = 0
+    total_q: int = 0
+    p50_latency_ms: float = 0.0
+    nc_rate: float = 0.0
+    error_message: str = ""
+
+    @property
+    def is_terminal(self) -> bool:
+        return self.status in ("succeeded", "failed")
+
+
+@dataclass
 class Project:
     name: str
     repo_id: str
@@ -197,6 +232,7 @@ class AppState:
     index_jobs: dict[str, IndexJob] = field(default_factory=dict)
     projects: dict[str, Project] = field(default_factory=dict)
     chat_histories: dict[str, list[dict]] = field(default_factory=dict)
+    eval_jobs: dict[str, EvalJob] = field(default_factory=dict)
 
 
 # ================================================================
@@ -218,6 +254,8 @@ def _load_state() -> AppState:
             for k, v in data.get("projects", {}).items():
                 state.projects[k] = Project(**_filter_known_fields(Project, v))
             state.chat_histories = data.get("chat_histories", {})
+            for k, v in data.get("eval_jobs", {}).items():
+                state.eval_jobs[k] = EvalJob(**_filter_known_fields(EvalJob, v))
             return state
         except Exception as exc:
             _logger.warning("Failed to load app state: %s", exc)
@@ -230,6 +268,7 @@ def _save_state(state: AppState) -> None:
         "index_jobs": {k: asdict(v) for k, v in state.index_jobs.items()},
         "projects": {k: asdict(v) for k, v in state.projects.items()},
         "chat_histories": state.chat_histories,
+        "eval_jobs": {k: asdict(v) for k, v in state.eval_jobs.items()},
     }
     _atomic_write_text(STATE_FILE, json.dumps(data, ensure_ascii=False, indent=2))
 
@@ -937,6 +976,17 @@ def page_chat():
         f"config: {Path(proj.config_path).name}"
     )
 
+    # Issue #82 Wave 1 (W1-T1): block retries when MLX is unavailable for
+    # a photon-provider project. ``_run_query`` sets this flag on the first
+    # ImportError so we don't keep re-trying the heavy import every turn.
+    photon_unavailable_key = f"photon_unavailable_{project_name}"
+    photon_unavailable = st.session_state.get(photon_unavailable_key)
+    if photon_unavailable:
+        st.error(
+            "PHOTON パイプラインを初期化できません "
+            f"({photon_unavailable})。MLX がインストールされているか確認してください。"
+        )
+
     # Session management
     session_key = f"chat_{project_name}"
     if session_key not in state.chat_histories:
@@ -959,7 +1009,12 @@ def page_chat():
             placeholder="質問を入力して送信ボタンを押してください",
         )
     with col_btn:
-        send_clicked = st.button("送信", type="primary", key=f"send_{session_key}")
+        send_clicked = st.button(
+            "送信",
+            type="primary",
+            key=f"send_{session_key}",
+            disabled=bool(photon_unavailable),
+        )
 
     question = question_input if send_clicked and question_input else None
 
@@ -994,76 +1049,79 @@ def page_chat():
 
 
 def _run_query(proj: Project, question: str, session_key: str) -> tuple[str, dict]:
-    """Run a query through the pipeline."""
+    """Run a query through the pipeline via ``build_pipeline(cfg)``.
+
+    Issue #82 Wave 1 (W1-T1): route through the provider-routing factory so
+    ``cfg.model.provider == "photon"`` reaches ``PhotonRAGPipeline`` and the
+    resulting ``QueryResult.drift_metrics`` / ``turn_id`` become available
+    to the UI. MLX import errors are caught and surfaced via the
+    ``photon_unavailable_{proj.name}`` session-state flag so the chat page
+    can block retries and display a clear error.
+    """
+    # Default metadata keeps the UI contract stable even on error paths.
+    metadata_default: dict[str, Any] = {
+        "latency_ms": 0,
+        "cited_count": 0,
+        "pack_size": 0,
+        "no_citation": False,
+        "drift_metrics": None,
+        "turn_id": 0,
+    }
+
+    pipeline_key = f"pipeline_{proj.name}"
+
     try:
-        import sys
+        cfg = load_config(proj.config_path)
+    except Exception as exc:
+        _logger.exception("Failed to load config for %s", proj.name)
+        return f"エラー: config load failed ({type(exc).__name__}: {exc})", dict(
+            metadata_default
+        )
 
-        sys.path.insert(0, str(PROJECT_ROOT))
-
-        from baseline_reporag.config import load_config
-        from baseline_reporag.generation.generator import Generator
-        from baseline_reporag.indexing.embedding import EmbeddingIndex
-        from baseline_reporag.indexing.lexical import LexicalIndex
-        from baseline_reporag.indexing.symbol_graph import SymbolGraph
-        from baseline_reporag.ingestion.store import ChunkStore
-        from baseline_reporag.logger import RunLogger
-        from baseline_reporag.memory.session import SessionManager
-        from baseline_reporag.pipeline import RepoRAGPipeline
-        from baseline_reporag.retrieval.reranker import CrossEncoderReranker
-
-        # Cache pipeline in session state
-        pipeline_key = f"pipeline_{proj.name}"
-        if pipeline_key not in st.session_state:
-            cfg = load_config(proj.config_path)
-            idx_dir = Path(cfg.paths.data_root) / "indexes" / proj.repo_id
-            run_id = f"app_{proj.repo_id}_{int(time.time())}"
-
-            reranker_cfg = cfg.retrieval.reranker
-            reranker = (
-                CrossEncoderReranker(
-                    model_id=reranker_cfg.get(
-                        "model_id", "cross-encoder/ms-marco-MiniLM-L-6-v2"
-                    )
-                )
-                if reranker_cfg.get("enabled", False)
-                else None
+    if pipeline_key not in st.session_state:
+        try:
+            pipeline = build_pipeline(cfg)
+        except (ImportError, ModuleNotFoundError) as exc:
+            st.session_state[f"photon_unavailable_{proj.name}"] = str(exc)
+            _logger.warning("PHOTON pipeline unavailable for %s: %s", proj.name, exc)
+            return (
+                f"エラー: PHOTON pipeline unavailable ({exc})",
+                dict(metadata_default),
             )
-
-            st.session_state[pipeline_key] = RepoRAGPipeline(
-                config=cfg,
-                store=ChunkStore(idx_dir / "chunks.db"),
-                lexical=LexicalIndex.load(idx_dir / "lexical.pkl"),
-                embedding=EmbeddingIndex.load(idx_dir / "embedding"),
-                graph=SymbolGraph.load(idx_dir / "symbol_graph.json"),
-                sessions=SessionManager(log_dir=Path(cfg.paths.log_root) / "sessions"),
-                generator=Generator(
-                    model_id=cfg.model.model_id,
-                    max_new_tokens=cfg.generation.max_new_tokens,
-                    temperature=cfg.generation.temperature,
-                    top_p=cfg.generation.top_p,
-                ),
-                logger=RunLogger(cfg.paths.log_root, run_id),
-                reranker=reranker,
+        except Exception as exc:
+            _logger.exception("Failed to build pipeline for %s", proj.name)
+            return (
+                f"エラー: pipeline build failed ({type(exc).__name__}: {exc})",
+                dict(metadata_default),
             )
+        st.session_state[pipeline_key] = pipeline
 
-        pipeline = st.session_state[pipeline_key]
+    pipeline = st.session_state[pipeline_key]
+
+    try:
         result = pipeline.query(
             question=question,
             session_id=session_key,
             repo_id=proj.repo_id,
         )
+    except Exception as exc:
+        # Keep traceback in logs; keep UI message short.
+        _logger.exception("pipeline.query failed for %s", proj.name)
+        return (
+            f"エラー: {type(exc).__name__}: {exc}",
+            dict(metadata_default),
+        )
 
-        metadata = {
-            "latency_ms": result.latency.total_ms,
-            "cited_count": len(result.cited_chunk_ids),
-            "pack_size": len(result.cited_chunk_ids),
-            "no_citation": result.no_citation,
-        }
+    metadata = {
+        "latency_ms": result.latency.total_ms,
+        "cited_count": len(result.cited_chunk_ids),
+        "pack_size": len(result.cited_chunk_ids),
+        "no_citation": result.no_citation,
+        "drift_metrics": getattr(result, "drift_metrics", None),
+        "turn_id": getattr(result, "turn_id", 0),
+    }
 
-        return result.answer, metadata
-
-    except Exception as e:
-        return f"エラーが発生しました: {e}", {}
+    return result.answer, metadata
 
 
 # ================================================================
