@@ -256,6 +256,52 @@ def _load_state() -> AppState:
             state.chat_histories = data.get("chat_histories", {})
             for k, v in data.get("eval_jobs", {}).items():
                 state.eval_jobs[k] = EvalJob(**_filter_known_fields(EvalJob, v))
+            # Issue #82 Wave 2 (W2-T4, D4-004): validate integrity of every
+            # eval_job entry loaded from disk. A tampered state file could
+            # otherwise feed arbitrary pid types, paths outside PROJECT_ROOT
+            # or unknown status values into the sync/UI layer.
+            _allowed_eval_status = {"pending", "running", "succeeded", "failed"}
+            _project_root_abs = PROJECT_ROOT.resolve()
+            for _k, _job in list(state.eval_jobs.items()):
+                # Normalize pid: must be ``int`` or ``None``. Anything else
+                # (e.g. a string via JSON tampering) is coerced to ``None``
+                # so ``os.kill(pid, 0)`` can never see garbage.
+                if not (_job.pid is None or isinstance(_job.pid, int)):
+                    _logger.warning(
+                        "eval_job %s has non-int pid %r; resetting to None",
+                        _k,
+                        _job.pid,
+                    )
+                    _job.pid = None
+                # Validate path-like fields: they must resolve inside
+                # PROJECT_ROOT when non-empty. Empty strings are allowed
+                # (they indicate "not yet assigned").
+                for _attr in ("log_file", "result_json", "marker_file"):
+                    _value = getattr(_job, _attr, "")
+                    if not _value:
+                        continue
+                    try:
+                        _p = Path(_value).resolve()
+                        _p.relative_to(_project_root_abs)
+                    except (ValueError, OSError):
+                        _job.status = "failed"
+                        _job.error_message = "state tampering detected"
+                        _logger.warning(
+                            "eval_job %s has tampered %s: %r",
+                            _k,
+                            _attr,
+                            _value,
+                        )
+                        break
+                # Constrain status to the documented set; anything unknown
+                # is funnelled into ``failed`` so the UI stops polling it.
+                if _job.status not in _allowed_eval_status:
+                    _logger.warning(
+                        "eval_job %s has unknown status %r; forcing to failed",
+                        _k,
+                        _job.status,
+                    )
+                    _job.status = "failed"
             return state
         except Exception as exc:
             _logger.warning("Failed to load app state: %s", exc)
@@ -914,6 +960,20 @@ def page_projects():
         type="primary",
         disabled=not (name and repo_id and repo_id != "(なし — 先にDB作成)"),
     ):
+        # Issue #82 Wave 2 (W2-T1): validate project_name before any path
+        # composition. Reject metacharacters / traversal via _safe_id.
+        try:
+            _safe_id(name, label="project_name")
+        except ValueError as exc:
+            st.error(f"プロジェクト名が不正です: {exc}")
+            return
+        # Path-containment assertion for defense-in-depth: the project dir
+        # (when saved) MUST resolve inside PROJECT_ROOT / "projects".
+        projects_root = (PROJECT_ROOT / "projects").resolve()
+        save_dir = (PROJECT_ROOT / "projects" / name).resolve()
+        assert save_dir.is_relative_to(projects_root), (
+            f"project save dir escaped projects root: {save_dir}"
+        )
         project = Project(
             name=name,
             repo_id=repo_id,

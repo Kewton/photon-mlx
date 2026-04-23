@@ -112,6 +112,17 @@ class TestSaveLoadRoundtripEvalJobs(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             state_file = Path(td) / "state.json"
 
+            # Wave 2 (W2-T4): _load_state now enforces that eval_job paths
+            # live under PROJECT_ROOT, so the round-trip fixture must use
+            # paths inside the repo. Files do not need to actually exist.
+            log_file = str(photon_app.PROJECT_ROOT / "logs" / "eval" / "j1.log")
+            result_json = str(
+                photon_app.PROJECT_ROOT / "reports" / "eval_runs" / "j1.json"
+            )
+            marker_file = str(
+                photon_app.PROJECT_ROOT / "reports" / "eval_runs" / "j1.done"
+            )
+
             original = photon_app.AppState()
             original.eval_jobs["j1"] = photon_app.EvalJob(
                 job_id="j1",
@@ -122,9 +133,9 @@ class TestSaveLoadRoundtripEvalJobs(unittest.TestCase):
                 started_at_epoch=1_700_000_000.0,
                 finished_at="2026-04-20T10:05:00",
                 pid=4321,
-                log_file="/tmp/eval/j1.log",
-                result_json="/tmp/eval/j1.json",
-                marker_file="/tmp/eval/j1.done",
+                log_file=log_file,
+                result_json=result_json,
+                marker_file=marker_file,
                 done_q=30,
                 total_q=30,
                 p50_latency_ms=1234.5,
@@ -147,9 +158,143 @@ class TestSaveLoadRoundtripEvalJobs(unittest.TestCase):
         self.assertEqual(reloaded.eval_jobs["j1"].done_q, 30)
         self.assertAlmostEqual(reloaded.eval_jobs["j1"].p50_latency_ms, 1234.5)
         self.assertAlmostEqual(reloaded.eval_jobs["j1"].nc_rate, 0.1)
-        self.assertEqual(reloaded.eval_jobs["j1"].marker_file, "/tmp/eval/j1.done")
+        self.assertEqual(reloaded.eval_jobs["j1"].marker_file, marker_file)
         self.assertEqual(reloaded.eval_jobs["j2"].status, "failed")
         self.assertEqual(reloaded.eval_jobs["j2"].error_message, "timeout")
+
+
+class TestStateTamperingDetection(unittest.TestCase):
+    """T-E7 (Issue #82 Wave 2): ``_load_state`` rejects tampered eval_jobs.
+
+    The integrity checks added by W2-T4 / D4-004 cover three classes of
+    tamper:
+        1. ``log_file`` / ``result_json`` / ``marker_file`` pointing
+           outside ``PROJECT_ROOT``
+        2. ``status`` set to an unknown value
+        3. ``pid`` stored as a non-int (e.g. a string)
+
+    Each case should produce either ``status='failed'`` with an
+    ``error_message`` mentioning ``tampering`` (for path escapes) or a
+    silent normalization (for pid / status).
+    """
+
+    def _write_state(self, state_dir: Path, job_dict: dict) -> Path:
+        state_file = state_dir / "state.json"
+        state_file.write_text(
+            json.dumps(
+                {
+                    "training_jobs": {},
+                    "index_jobs": {},
+                    "projects": {},
+                    "chat_histories": {},
+                    "eval_jobs": {"j1": job_dict},
+                }
+            )
+        )
+        return state_file
+
+    def test_tampered_log_file_escapes_project_root(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            state_file = self._write_state(
+                Path(td),
+                {
+                    "job_id": "j1",
+                    "project_name": "demo",
+                    "eval_type": "static",
+                    "status": "running",
+                    "log_file": "/etc/passwd",
+                },
+            )
+            with patch.object(photon_app, "STATE_FILE", state_file):
+                state = photon_app._load_state()
+
+        job = state.eval_jobs["j1"]
+        self.assertEqual(job.status, "failed")
+        self.assertIn("tampering", job.error_message)
+
+    def test_tampered_result_json_escapes_project_root(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            state_file = self._write_state(
+                Path(td),
+                {
+                    "job_id": "j1",
+                    "project_name": "demo",
+                    "eval_type": "static",
+                    "status": "running",
+                    "result_json": "/tmp/../etc/passwd",
+                },
+            )
+            with patch.object(photon_app, "STATE_FILE", state_file):
+                state = photon_app._load_state()
+
+        job = state.eval_jobs["j1"]
+        self.assertEqual(job.status, "failed")
+        self.assertIn("tampering", job.error_message)
+
+    def test_unknown_status_normalized_to_failed(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            state_file = self._write_state(
+                Path(td),
+                {
+                    "job_id": "j1",
+                    "project_name": "demo",
+                    "eval_type": "static",
+                    "status": "hacked",
+                },
+            )
+            with patch.object(photon_app, "STATE_FILE", state_file):
+                state = photon_app._load_state()
+
+        self.assertEqual(state.eval_jobs["j1"].status, "failed")
+
+    def test_non_int_pid_reset_to_none(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            state_file = self._write_state(
+                Path(td),
+                {
+                    "job_id": "j1",
+                    "project_name": "demo",
+                    "eval_type": "static",
+                    "status": "running",
+                    "pid": "not-an-int",
+                },
+            )
+            with patch.object(photon_app, "STATE_FILE", state_file):
+                state = photon_app._load_state()
+
+        self.assertIsNone(state.eval_jobs["j1"].pid)
+        # Status must remain valid (still ``running`` because path
+        # validation passed and the pid was merely normalized, not the
+        # trigger for a failed state).
+        self.assertEqual(state.eval_jobs["j1"].status, "running")
+
+    def test_paths_inside_project_root_accepted(self) -> None:
+        """Valid paths under PROJECT_ROOT must survive untouched."""
+
+        with tempfile.TemporaryDirectory() as td:
+            valid_log = photon_app.PROJECT_ROOT / "logs" / "eval" / "ok.log"
+            valid_marker = photon_app.PROJECT_ROOT / "reports" / "eval_runs" / "ok.done"
+            state_file = self._write_state(
+                Path(td),
+                {
+                    "job_id": "j1",
+                    "project_name": "demo",
+                    "eval_type": "static",
+                    "status": "running",
+                    "pid": 4321,
+                    "log_file": str(valid_log),
+                    "marker_file": str(valid_marker),
+                },
+            )
+            with patch.object(photon_app, "STATE_FILE", state_file):
+                state = photon_app._load_state()
+
+        job = state.eval_jobs["j1"]
+        self.assertEqual(job.status, "running")
+        self.assertEqual(job.pid, 4321)
+        self.assertEqual(job.log_file, str(valid_log))
+        self.assertEqual(job.marker_file, str(valid_marker))
+        self.assertEqual(job.error_message, "")
 
 
 if __name__ == "__main__":
