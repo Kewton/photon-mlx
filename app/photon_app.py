@@ -31,6 +31,30 @@ if str(PROJECT_ROOT) not in sys.path:
 from baseline_reporag.config import load_config  # noqa: E402
 from baseline_reporag.pipeline_factory import build_pipeline  # noqa: E402
 
+
+# Issue #82 Wave 3: drift + turn-history panels (streamlit-free helpers).
+# The ``app`` directory has no ``__init__.py`` (see design note on the
+# MySwiftAgent ``app/`` namespace collision in
+# ``tests/test_photon_app_components.py``) so we load each component by
+# absolute file path. Mirrors the loader pattern used by the unit tests.
+def _load_component(mod_name: str):
+    import importlib.util
+
+    full_name = f"_photon_app_component_{mod_name}"
+    if full_name in sys.modules:
+        return sys.modules[full_name]
+    path = PROJECT_ROOT / "app" / "components" / f"{mod_name}.py"
+    spec = importlib.util.spec_from_file_location(full_name, path)
+    assert spec and spec.loader, f"cannot spec component {mod_name} at {path}"
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[full_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+_drift_panel = _load_component("drift_panel")
+_turn_history_panel = _load_component("turn_history_panel")
+
 STATE_FILE = PROJECT_ROOT / ".cache" / "photon_app_state.json"
 
 SYNC_INTERVAL_SECONDS = 30
@@ -1098,6 +1122,70 @@ def page_chat():
                     col2.metric("Citations", str(metadata.get("cited_count", 0)))
                     col3.metric("Chunks", str(metadata.get("pack_size", 0)))
 
+                # Issue #82 Wave 3: drift + turn_history panels.
+                # Isolated so rendering failures do not break chat flow.
+                try:
+                    cfg_for_panels = load_config(proj.config_path)
+                except Exception:
+                    cfg_for_panels = None
+
+                try:
+                    dm_raw = metadata.get("drift_metrics")
+                    dm_dict = None
+                    if dm_raw is not None:
+                        dm_dict = (
+                            dm_raw.as_dict() if hasattr(dm_raw, "as_dict") else dm_raw
+                        )
+                    thresholds = _build_drift_thresholds(cfg_for_panels)
+                    panel = _drift_panel.format_drift_panel(dm_dict, thresholds)
+                    with st.expander("Drift metrics"):
+                        if not panel["available"]:
+                            st.info(panel["reason"])
+                        else:
+                            for row in panel["rows"]:
+                                label = (
+                                    f"{row['badge']} {row['name']}".strip()
+                                    if row["badge"]
+                                    else row["name"]
+                                )
+                                st.metric(label, row["value_str"])
+                            fired = "Yes" if panel["safe_recgen_fired"] else "No"
+                            st.caption(f"Safe RecGen fired: {fired}")
+                except Exception as exc:
+                    st.warning(f"drift panel render failed: {exc}")
+
+                try:
+                    wm_enabled = _working_memory_enabled(cfg_for_panels)
+                    max_turns = 8
+                    if cfg_for_panels is not None:
+                        sm = getattr(cfg_for_panels, "session_memory", None)
+                        wm = getattr(sm, "working_memory", None) if sm else None
+                        max_turns = int(getattr(wm, "max_turns", 8) or 8) if wm else 8
+                    hist_panel = _turn_history_panel.format_turn_history_panel(
+                        metadata.get("photon_turn_history"),
+                        metadata.get("session_turns"),
+                        working_memory_enabled=wm_enabled,
+                        max_turns=max_turns,
+                    )
+                    with st.expander("Turn history"):
+                        if not hist_panel["available"]:
+                            st.info(hist_panel["reason"])
+                        elif not hist_panel["rows"]:
+                            st.caption("(no turns recorded yet)")
+                        else:
+                            for row in hist_panel["rows"]:
+                                st.markdown(
+                                    f"- **turn {row.turn_id}** · "
+                                    f"`{row.timestamp}` — "
+                                    f"{row.question_text}"
+                                )
+                                if row.cited_chunk_ids:
+                                    st.caption(
+                                        "cited: " + ", ".join(row.cited_chunk_ids)
+                                    )
+                except Exception as exc:
+                    st.warning(f"turn history render failed: {exc}")
+
         history.append({"role": "assistant", "content": answer})
         save()
 
@@ -1181,7 +1269,88 @@ def _run_query(proj: Project, question: str, session_key: str) -> tuple[str, dic
         "turn_id": getattr(result, "turn_id", 0),
     }
 
+    # Issue #82 Wave 3 (W3-T3): surface turn-history for the chat panel.
+    # PhotonRAGPipeline keeps PHOTON sessions in ``photon_inference._sessions``
+    # and the baseline SessionManager in ``baseline.sessions``. When the
+    # pipeline is a plain baseline_rag RepoRAGPipeline, ``photon_inference``
+    # is absent and ``photon_turn_history`` stays ``None`` — the UI then
+    # renders an "N/A (baseline_rag)" panel.
+    photon_turn_history: list[Any] | None = None
+    session_turns: list[Any] | None = None
+    try:
+        photon_inference = getattr(pipeline, "photon_inference", None)
+        if photon_inference is not None:
+            photon_session = getattr(photon_inference, "_sessions", {}).get(session_key)
+            if photon_session is not None:
+                photon_turn_history = list(
+                    getattr(photon_session, "turn_history", []) or []
+                )
+            else:
+                # Photon pipeline exists but this session has not reached a
+                # state that records turn_history yet (e.g. first-turn
+                # fail-closed) — render an empty panel rather than N/A.
+                photon_turn_history = []
+        sessions_mgr = getattr(getattr(pipeline, "baseline", None), "sessions", None)
+        if sessions_mgr is None:
+            sessions_mgr = getattr(pipeline, "sessions", None)
+        if sessions_mgr is not None:
+            internal = getattr(sessions_mgr, "_sessions", {}) or {}
+            sess = internal.get(session_key)
+            if sess is not None:
+                session_turns = list(getattr(sess, "turns", []) or [])
+    except Exception:
+        _logger.exception("Failed to extract turn_history for project %s", proj.name)
+
+    metadata["photon_turn_history"] = photon_turn_history
+    metadata["session_turns"] = session_turns
+
     return result.answer, metadata
+
+
+def _build_drift_thresholds(cfg: Any) -> dict[str, float | None]:
+    """Map ``cfg.safe_recgen.thresholds`` to the 4 UI indicator slots.
+
+    Issue #82 Wave 3 (W3-T3): ``configs/photon_small.yaml:262-266`` exposes
+    only the ``latent_cosine_drift`` and ``topic_shift_score`` thresholds;
+    the token/mid levels have no configured threshold so those slots are
+    ``None`` (classify_drift returns "ok" when the threshold is None).
+    """
+    sr = getattr(cfg, "safe_recgen", None)
+    if sr is None:
+        return {
+            "token_level": None,
+            "mid_level": None,
+            "top_level": None,
+            "topic_shift": None,
+        }
+    thr = getattr(sr, "thresholds", None)
+    if thr is None:
+        return {
+            "token_level": None,
+            "mid_level": None,
+            "top_level": None,
+            "topic_shift": None,
+        }
+    # ``thr`` is a ``Config`` (dot-access wrapper) when loaded from YAML,
+    # but a plain dict in tests. Both support ``.get(...)``.
+    getter = thr.get if hasattr(thr, "get") else (lambda k, d=None: d)
+    return {
+        "token_level": None,
+        "mid_level": None,
+        "top_level": getter("latent_cosine_drift", None),
+        "topic_shift": getter("topic_shift_score", None),
+    }
+
+
+def _working_memory_enabled(cfg: Any) -> bool:
+    """Return ``True`` iff ``cfg.session_memory.working_memory.enabled``."""
+    sm = getattr(cfg, "session_memory", None)
+    if sm is None:
+        return False
+    wm = getattr(sm, "working_memory", None)
+    if wm is None:
+        return False
+    return bool(getattr(wm, "enabled", False))
 
 
 # ================================================================

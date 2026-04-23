@@ -49,6 +49,10 @@ def _load_component(mod_name: str, path: Path):
 
 eval_panel = _load_component("eval_panel", COMPONENTS_DIR / "eval_panel.py")
 wizard = _load_component("wizard", COMPONENTS_DIR / "wizard.py")
+drift_panel = _load_component("drift_panel", COMPONENTS_DIR / "drift_panel.py")
+turn_history_panel = _load_component(
+    "turn_history_panel", COMPONENTS_DIR / "turn_history_panel.py"
+)
 
 
 # ---------------------------------------------------------------
@@ -72,7 +76,13 @@ class TestComponentsStreamlitAbsent:
             import sys
             from pathlib import Path
             root = Path({components_dir!r})
-            for name in ("__init__", "eval_panel", "wizard"):
+            for name in (
+                "__init__",
+                "eval_panel",
+                "wizard",
+                "drift_panel",
+                "turn_history_panel",
+            ):
                 spec = importlib.util.spec_from_file_location(
                     f"_c_{{name}}", root / f"{{name}}.py"
                 )
@@ -262,6 +272,222 @@ class TestMakeEvalPaths:
         root = tmp_path.resolve()
         for p in (result_json, log_file, marker_file):
             assert p.is_relative_to(root)
+
+
+# ---------------------------------------------------------------
+# T-C1: classify_drift boundary conditions
+# T-C2 / T-C3: format_drift_panel behaviour
+# (Wave 3 — drift_panel.py)
+# ---------------------------------------------------------------
+
+
+class TestClassifyDrift:
+    """T-C1: classify_drift maps (value, threshold) -> 'ok'|'warn'|'alert'."""
+
+    def test_none_value_returns_ok(self) -> None:
+        assert drift_panel.classify_drift(None, 0.5) == "ok"
+
+    def test_none_threshold_returns_ok(self) -> None:
+        assert drift_panel.classify_drift(0.3, None) == "ok"
+
+    def test_below_warn_band_returns_ok(self) -> None:
+        # 0.3 / 0.5 = 0.6 → below 80% band
+        assert drift_panel.classify_drift(0.3, 0.5) == "ok"
+
+    def test_in_warn_band_returns_warn(self) -> None:
+        # 0.41 / 0.5 = 0.82 → above 80% band, below threshold
+        assert drift_panel.classify_drift(0.41, 0.5) == "warn"
+
+    def test_above_threshold_returns_alert(self) -> None:
+        assert drift_panel.classify_drift(0.6, 0.5) == "alert"
+
+
+class TestFormatDriftPanel:
+    """T-C2 / T-C3: format_drift_panel derives rows from DriftMetrics dict."""
+
+    def test_none_metrics_marks_unavailable(self) -> None:
+        result = drift_panel.format_drift_panel(
+            None,
+            {
+                "token_level": None,
+                "mid_level": None,
+                "top_level": 0.5,
+                "topic_shift": 0.65,
+            },
+        )
+        assert result["available"] is False
+        assert "N/A" in result["reason"]
+        assert result["rows"] == []
+        assert result["safe_recgen_fired"] is False
+
+    def test_empty_metrics_marks_unavailable(self) -> None:
+        result = drift_panel.format_drift_panel(
+            {},
+            {
+                "token_level": None,
+                "mid_level": None,
+                "top_level": 0.5,
+                "topic_shift": 0.65,
+            },
+        )
+        assert result["available"] is False
+
+    def test_full_metrics_produce_ordered_rows(self) -> None:
+        dm = {
+            "latent_cosine_drift_token": 0.1,
+            "latent_cosine_drift_mid": 0.3,
+            "latent_cosine_drift_top": 0.52,
+            "topic_shift_score": 0.66,
+        }
+        th = {
+            "token_level": None,
+            "mid_level": None,
+            "top_level": 0.50,
+            "topic_shift": 0.65,
+        }
+        result = drift_panel.format_drift_panel(dm, th)
+        assert result["available"] is True
+        assert len(result["rows"]) == 4
+        assert [r["name"] for r in result["rows"]] == [
+            "token_level",
+            "mid_level",
+            "top_level",
+            "topic_shift",
+        ]
+        # Top-level level: 0.52 > 0.50 → alert
+        assert result["rows"][2]["level"] == "alert"
+        # Topic shift: 0.66 > 0.65 → alert
+        assert result["rows"][3]["level"] == "alert"
+        assert result["rows"][2]["badge"] == "⚠"
+        # Token and mid have no threshold → ok regardless of value
+        assert result["rows"][0]["level"] == "ok"
+        assert result["rows"][1]["level"] == "ok"
+        assert result["rows"][0]["value_str"] == "0.10"
+        assert result["rows"][1]["value_str"] == "0.30"
+
+    def test_missing_key_yields_em_dash(self) -> None:
+        dm = {
+            "latent_cosine_drift_token": 0.1,
+            "latent_cosine_drift_mid": 0.3,
+            "latent_cosine_drift_top": 0.52,
+            # topic_shift_score deliberately omitted
+        }
+        th = {
+            "token_level": None,
+            "mid_level": None,
+            "top_level": 0.50,
+            "topic_shift": 0.65,
+        }
+        result = drift_panel.format_drift_panel(dm, th)
+        assert result["available"] is True
+        topic_row = result["rows"][3]
+        assert topic_row["name"] == "topic_shift"
+        assert topic_row["value"] is None
+        assert topic_row["value_str"] == "—"
+        assert topic_row["level"] == "ok"
+        assert topic_row["badge"] == ""
+
+    def test_safe_recgen_fired_propagates(self) -> None:
+        dm = {
+            "latent_cosine_drift_token": 0.0,
+            "latent_cosine_drift_mid": 0.0,
+            "latent_cosine_drift_top": 0.0,
+            "topic_shift_score": 0.0,
+            "safe_recgen_fired": True,
+        }
+        th = {
+            "token_level": None,
+            "mid_level": None,
+            "top_level": None,
+            "topic_shift": None,
+        }
+        result = drift_panel.format_drift_panel(dm, th)
+        assert result["safe_recgen_fired"] is True
+
+
+# ---------------------------------------------------------------
+# T-C4: format_turn_history_panel
+# (Wave 3 — turn_history_panel.py)
+# ---------------------------------------------------------------
+
+
+class TestFormatTurnHistoryPanel:
+    """T-C4: turn_history_panel joins PhotonSessionState + SessionManager."""
+
+    def test_working_memory_disabled_marks_unavailable(self) -> None:
+        result = turn_history_panel.format_turn_history_panel(
+            None,
+            None,
+            working_memory_enabled=False,
+            max_turns=8,
+        )
+        assert result["available"] is False
+        assert "working_memory disabled" in result["reason"]
+        assert result["rows"] == []
+
+    def test_baseline_rag_marks_unavailable(self) -> None:
+        result = turn_history_panel.format_turn_history_panel(
+            None,
+            [],
+            working_memory_enabled=True,
+            max_turns=8,
+        )
+        assert result["available"] is False
+        assert "baseline_rag" in result["reason"]
+
+    def test_max_turns_truncates_to_last_n(self) -> None:
+        from types import SimpleNamespace
+
+        ph_list = [
+            SimpleNamespace(turn_id=i, question_text=f"q{i}", timestamp=f"t{i}")
+            for i in range(10)
+        ]
+        result = turn_history_panel.format_turn_history_panel(
+            ph_list,
+            [],
+            working_memory_enabled=True,
+            max_turns=3,
+        )
+        assert result["available"] is True
+        assert len(result["rows"]) == 3
+        assert [r.turn_id for r in result["rows"]] == [7, 8, 9]
+        assert result["rows"][0].question_text == "q7"
+
+    def test_join_by_turn_id_fills_cited_chunks(self) -> None:
+        from types import SimpleNamespace
+
+        ph_list = [
+            SimpleNamespace(turn_id=1, question_text="q1", timestamp="t1"),
+            SimpleNamespace(turn_id=2, question_text="q2", timestamp="t2"),
+            SimpleNamespace(turn_id=3, question_text="q3", timestamp="t3"),
+        ]
+        sm_turns = [
+            SimpleNamespace(turn_id=1, cited_chunk_ids=["C:1"]),
+            # turn 2 deliberately missing
+            SimpleNamespace(turn_id=3, cited_chunk_ids=["C:5"]),
+        ]
+        result = turn_history_panel.format_turn_history_panel(
+            ph_list,
+            sm_turns,
+            working_memory_enabled=True,
+            max_turns=8,
+        )
+        assert result["available"] is True
+        assert len(result["rows"]) == 3
+        assert result["rows"][0].cited_chunk_ids == ["C:1"]
+        assert result["rows"][1].cited_chunk_ids == []
+        assert result["rows"][2].cited_chunk_ids == ["C:5"]
+
+    def test_empty_history_is_available_empty_rows(self) -> None:
+        result = turn_history_panel.format_turn_history_panel(
+            [],
+            [],
+            working_memory_enabled=True,
+            max_turns=8,
+        )
+        assert result["available"] is True
+        assert result["reason"] == ""
+        assert result["rows"] == []
 
 
 if __name__ == "__main__":  # pragma: no cover - manual run only
