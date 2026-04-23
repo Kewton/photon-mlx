@@ -101,33 +101,59 @@ class TestSafeId:
 
 
 class TestPageIndexNoShellTrue:
-    """Guardrail: no `shell=True` should remain in photon_app.py.
+    """Guardrail: no `shell=True` should remain in photon_app.py or eval_panel.py.
 
     This is a smoke-style regression test rather than a full UI test, since
     the goal is to prevent future regressions that reintroduce shell=True in
-    ANY subprocess spawn inside the app module.
+    ANY subprocess spawn inside the app module or its eval-runner helpers.
+    Wave 4 (W4-T1, T-E6) extended the scan to ``app/components/eval_panel.py``
+    so the new subprocess orchestration helpers are also covered.
     """
 
-    def test_source_has_no_shell_true(self) -> None:
-        src = PHOTON_APP_PATH.read_text(encoding="utf-8")
-        # Strip single-line Python comments so a comment-level mention of
-        # shell=True wouldn't fail the guardrail. Adequate for this file's
-        # coding style (no multi-line strings contain the literal).
+    @staticmethod
+    def _strip_comments_and_module_docstring(src: str) -> str:
         code_lines = [
             line for line in src.splitlines() if not line.lstrip().startswith("#")
         ]
-        # Strip the module docstring too (a triple-quoted block at the top)
-        # to keep the check focused on actual executable code.
         joined = "\n".join(code_lines)
-        # Quick and simple: remove the first triple-double-quoted block if
-        # it starts at the very beginning of the file.
         if joined.startswith('"""'):
             end = joined.find('"""', 3)
             if end >= 0:
                 joined = joined[end + 3 :]
+        return joined
+
+    def test_source_has_no_shell_true(self) -> None:
+        src = PHOTON_APP_PATH.read_text(encoding="utf-8")
+        joined = self._strip_comments_and_module_docstring(src)
         assert "shell=True" not in joined, (
             "shell=True must not appear in app/photon_app.py — use argv list + shell=False"
         )
+
+    def test_eval_panel_has_no_shell_true(self) -> None:
+        eval_panel_path = PROJECT_ROOT / "app" / "components" / "eval_panel.py"
+        assert eval_panel_path.exists(), f"missing {eval_panel_path}"
+        src = eval_panel_path.read_text(encoding="utf-8")
+        # AST-based check: reject any keyword literal ``shell=True`` passed
+        # to any call expression.  This is stricter than a plain-text scan
+        # because it ignores docstrings / comments that legitimately
+        # mention the token (e.g. warnings in the function docstring) and
+        # catches whitespace variations like ``shell = True``.
+        import ast
+
+        tree = ast.parse(src)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            for kw in node.keywords:
+                if (
+                    kw.arg == "shell"
+                    and isinstance(kw.value, ast.Constant)
+                    and kw.value.value is True
+                ):
+                    raise AssertionError(
+                        "shell=True literal found in app/components/eval_panel.py "
+                        f"at line {node.lineno}"
+                    )
 
 
 class TestSubprocessImportAvailable:

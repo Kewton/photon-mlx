@@ -297,5 +297,149 @@ class TestStateTamperingDetection(unittest.TestCase):
         self.assertEqual(job.error_message, "")
 
 
+class TestSyncEvalJob(unittest.TestCase):
+    """W4-T2: _sync_eval_job transitions status from marker_file / timeout / dead pid."""
+
+    def _make_job(self, **overrides) -> "photon_app.EvalJob":
+        defaults = dict(
+            job_id="j1",
+            project_name="demo",
+            eval_type="static",
+            status="running",
+            started_at="2026-04-20T10:00:00",
+            started_at_epoch=1_000_000.0,
+            pid=9999,
+            log_file="",
+            result_json="",
+            marker_file="",
+        )
+        defaults.update(overrides)
+        return photon_app.EvalJob(**defaults)
+
+    def test_marker_file_transitions_to_succeeded(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            marker = Path(td) / "j1.done"
+            marker.touch()
+            result_json = Path(td) / "j1.json"
+            result_json.write_text(
+                json.dumps(
+                    {
+                        "done_q": 120,
+                        "total_q": 120,
+                        "p50_latency_ms": 19400.5,
+                        "nc_rate": 0.183,
+                    }
+                )
+            )
+            job = self._make_job(
+                marker_file=str(marker),
+                result_json=str(result_json),
+            )
+            changed = photon_app._sync_eval_job(job, now_epoch=1_000_100.0)
+
+        self.assertTrue(changed)
+        self.assertEqual(job.status, "succeeded")
+        self.assertEqual(job.done_q, 120)
+        self.assertEqual(job.total_q, 120)
+        self.assertAlmostEqual(job.p50_latency_ms, 19400.5)
+        self.assertAlmostEqual(job.nc_rate, 0.183)
+        self.assertNotEqual(job.finished_at, "")
+
+    def test_timeout_marks_failed(self) -> None:
+        job = self._make_job(
+            started_at_epoch=1_000_000.0,
+        )
+        # now is far past the timeout (3600s).
+        with patch.object(photon_app, "_is_process_running", return_value=False):
+            changed = photon_app._sync_eval_job(job, now_epoch=1_000_000.0 + 7200.0)
+
+        self.assertTrue(changed)
+        self.assertEqual(job.status, "failed")
+        self.assertIn("timeout", job.error_message)
+
+    def test_dead_process_no_marker_marks_failed(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            log = Path(td) / "j1.log"
+            log.write_text("traceback: runtime error\n")
+            # No marker file.
+            job = self._make_job(
+                log_file=str(log),
+                started_at_epoch=1_000_000.0,
+            )
+            with patch.object(photon_app, "_is_process_running", return_value=False):
+                changed = photon_app._sync_eval_job(job, now_epoch=1_000_010.0)
+
+        self.assertTrue(changed)
+        self.assertEqual(job.status, "failed")
+        # error_message should contain tail of log.
+        self.assertIn("traceback", job.error_message)
+
+    def test_running_with_progress_updates(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            log = Path(td) / "j1.log"
+            log.write_text(
+                "starting\nPROGRESS done=30 total=120 p50_ms=19500 nc=0.15\n"
+            )
+            job = self._make_job(
+                log_file=str(log),
+                started_at_epoch=1_000_000.0,
+            )
+            with patch.object(photon_app, "_is_process_running", return_value=True):
+                changed = photon_app._sync_eval_job(job, now_epoch=1_000_050.0)
+
+        self.assertTrue(changed)
+        self.assertEqual(job.status, "running")
+        self.assertEqual(job.done_q, 30)
+        self.assertEqual(job.total_q, 120)
+        self.assertAlmostEqual(job.p50_latency_ms, 19500.0)
+        self.assertAlmostEqual(job.nc_rate, 0.15)
+
+    def test_running_no_progress_no_change(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            log = Path(td) / "j1.log"
+            log.write_text("starting\n")
+            job = self._make_job(
+                log_file=str(log),
+                started_at_epoch=1_000_000.0,
+            )
+            with patch.object(photon_app, "_is_process_running", return_value=True):
+                changed = photon_app._sync_eval_job(job, now_epoch=1_000_050.0)
+
+        self.assertFalse(changed)
+        self.assertEqual(job.status, "running")
+
+    def test_terminal_job_is_not_reprocessed(self) -> None:
+        job = self._make_job(status="succeeded", done_q=120, total_q=120)
+        changed = photon_app._sync_eval_job(job, now_epoch=1_000_050.0)
+        self.assertFalse(changed)
+        self.assertEqual(job.status, "succeeded")
+
+    def test_sync_all_jobs_iterates_eval_jobs(self) -> None:
+        """_sync_all_jobs must also reconcile eval_jobs."""
+        with tempfile.TemporaryDirectory() as td:
+            marker = Path(td) / "j1.done"
+            marker.touch()
+            result_json = Path(td) / "j1.json"
+            result_json.write_text(
+                json.dumps(
+                    {
+                        "done_q": 10,
+                        "total_q": 10,
+                        "p50_latency_ms": 100.0,
+                        "nc_rate": 0.0,
+                    }
+                )
+            )
+            state = photon_app.AppState()
+            state.eval_jobs["j1"] = self._make_job(
+                marker_file=str(marker),
+                result_json=str(result_json),
+            )
+            changed = photon_app._sync_all_jobs(state)
+
+        self.assertTrue(changed)
+        self.assertEqual(state.eval_jobs["j1"].status, "succeeded")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -54,6 +54,8 @@ def _load_component(mod_name: str):
 
 _drift_panel = _load_component("drift_panel")
 _turn_history_panel = _load_component("turn_history_panel")
+# Issue #82 Wave 4: eval_panel orchestration helpers (streamlit-free).
+_eval_panel = _load_component("eval_panel")
 
 STATE_FILE = PROJECT_ROOT / ".cache" / "photon_app_state.json"
 
@@ -506,8 +508,92 @@ def _sync_index_job(job: IndexJob) -> bool:
     return changed
 
 
+def _sync_eval_job(job: EvalJob, now_epoch: float | None = None) -> bool:
+    """Reconcile an eval job against live process state / marker / logs.
+
+    Issue #82 Wave 4 (W4-T2, D3-004 / D4-003):
+
+    * ``marker_file`` exists → ``status="succeeded"``; progress fields are
+      pulled from ``result_json`` (falling back to the current values if
+      the JSON is missing or malformed).
+    * ``started_at_epoch`` is older than ``EVAL_WALL_CLOCK_TIMEOUT_SEC`` →
+      ``status="failed"``, ``error_message="wall-clock timeout"``.
+    * PID not alive AND no marker → ``status="failed"``, ``error_message``
+      is the trailing 2KB of the log so the UI can surface crash context.
+    * PID alive AND running: refresh progress from the log's latest
+      ``PROGRESS`` line; only mutate if ``done_q`` advanced.
+
+    Terminal jobs (``succeeded``/``failed``) are skipped — this keeps
+    ``_sync_all_jobs`` cheap when the state file already reflects the
+    final outcome.
+
+    Returns ``True`` iff any field on ``job`` was mutated.
+    """
+
+    if job.is_terminal:
+        return False
+
+    now = now_epoch if now_epoch is not None else time.time()
+
+    marker_path = Path(job.marker_file) if job.marker_file else None
+    if marker_path is not None and marker_path.exists():
+        # D3-004: marker_file is the authoritative success signal.
+        result: dict[str, Any] = {}
+        if job.result_json:
+            try:
+                result = json.loads(Path(job.result_json).read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                result = {}
+        job.done_q = int(result.get("done_q", job.done_q))
+        job.total_q = int(result.get("total_q", job.total_q))
+        job.p50_latency_ms = float(result.get("p50_latency_ms", job.p50_latency_ms))
+        job.nc_rate = float(result.get("nc_rate", job.nc_rate))
+        job.status = "succeeded"
+        job.finished_at = datetime.now().isoformat(timespec="seconds")
+        return True
+
+    started = job.started_at_epoch or now
+    elapsed = now - started
+    if elapsed > _eval_panel.EVAL_WALL_CLOCK_TIMEOUT_SEC:
+        job.status = "failed"
+        job.error_message = "wall-clock timeout"
+        job.finished_at = datetime.now().isoformat(timespec="seconds")
+        return True
+
+    pid_alive = _is_process_running(job.pid)
+    if pid_alive:
+        changed = False
+        if job.log_file:
+            progress = _eval_panel.parse_eval_progress(Path(job.log_file))
+            if progress:
+                new_done = int(progress.get("done_q", job.done_q))
+                new_total = int(progress.get("total_q", job.total_q))
+                new_p50 = float(progress.get("p50_latency_ms", job.p50_latency_ms))
+                new_nc = float(progress.get("nc_rate", job.nc_rate))
+                if (
+                    new_done != job.done_q
+                    or new_total != job.total_q
+                    or new_p50 != job.p50_latency_ms
+                    or new_nc != job.nc_rate
+                ):
+                    job.done_q = new_done
+                    job.total_q = new_total
+                    job.p50_latency_ms = new_p50
+                    job.nc_rate = new_nc
+                    changed = True
+        return changed
+
+    # PID not alive AND no marker file → the child exited without
+    # signalling success. Mark as failed and surface the log tail.
+    job.status = "failed"
+    tail = _eval_panel.tail_log_bytes(Path(job.log_file), 2048) if job.log_file else ""
+    job.error_message = tail or "process died without marker"
+    job.finished_at = datetime.now().isoformat(timespec="seconds")
+    return True
+
+
 def _sync_all_jobs(state: AppState) -> bool:
-    """Reconcile every training/index job in `state`. Returns True if mutated."""
+    """Reconcile every training/index/eval job in `state`. Returns True if mutated."""
     changed = False
     progress = _read_training_progress(str(PROJECT_ROOT / "logs" / "train_log.jsonl"))
     for job in state.training_jobs.values():
@@ -515,6 +601,10 @@ def _sync_all_jobs(state: AppState) -> bool:
             changed = True
     for job in state.index_jobs.values():
         if _sync_index_job(job):
+            changed = True
+    # Issue #82 Wave 4 (W4-T2): daemon thread also reconciles eval jobs.
+    for eval_job in state.eval_jobs.values():
+        if _sync_eval_job(eval_job):
             changed = True
     return changed
 
@@ -761,6 +851,149 @@ def page_training():
 
             st.text(f"Config: {job.config_path}")
             st.text(f"リポジトリ: {job.repo_dir}")
+
+            # Issue #82 Wave 4 (W4-T3): eval runner section per training job.
+            _render_eval_runner_section(state, job_id, job)
+
+
+def _render_eval_runner_section(state: AppState, job_id: str, job: TrainingJob) -> None:
+    """Render the [Run Static Eval] / [Run Multi-Turn Eval] controls + status.
+
+    Issue #82 Wave 4 (W4-T3): async eval runner in the training page.
+    ``MAX_CONCURRENT_EVAL=1`` is enforced by disabling both buttons when
+    any eval job is currently in the ``running`` state (D4-003).
+    """
+
+    st.markdown("---")
+    st.caption("評価ジョブ (Issue #82 Wave 4)")
+
+    # Build a project selector: eval needs ``repo_id`` + ``config_path`` and
+    # both live on ``Project``, not ``TrainingJob``.
+    if not state.projects:
+        st.info("先にプロジェクトを登録すると評価を実行できます。")
+        return
+
+    project_name = st.selectbox(
+        "評価対象プロジェクト",
+        options=list(state.projects.keys()),
+        key=f"eval_proj_{job_id}",
+    )
+    proj = state.projects[project_name]
+
+    running_evals = [ej for ej in state.eval_jobs.values() if ej.status == "running"]
+    disable_buttons = len(running_evals) >= _eval_panel.MAX_CONCURRENT_EVAL
+    if disable_buttons:
+        st.caption("⏳ 他の評価ジョブが実行中のため新規実行は無効です。")
+
+    col_s, col_m = st.columns(2)
+    with col_s:
+        static_clicked = st.button(
+            "Run Static Eval",
+            key=f"run_static_{job_id}",
+            disabled=disable_buttons,
+        )
+    with col_m:
+        mt_clicked = st.button(
+            "Run Multi-Turn Eval",
+            key=f"run_mt_{job_id}",
+            disabled=disable_buttons,
+        )
+
+    if static_clicked:
+        _launch_eval_job(state, proj, eval_type="static")
+        st.rerun()
+    if mt_clicked:
+        _launch_eval_job(state, proj, eval_type="multi_turn")
+        st.rerun()
+
+    # Running / recent eval jobs for this project.
+    related = [ej for ej in state.eval_jobs.values() if ej.project_name == proj.name]
+    if not related:
+        return
+    for ej in sorted(related, key=lambda e: e.started_at, reverse=True)[:5]:
+        icon = {
+            "pending": "⏳",
+            "running": "🔄",
+            "succeeded": "✅",
+            "failed": "❌",
+        }.get(ej.status, "?")
+        st.markdown(
+            f"**{icon} {ej.eval_type}** · `{ej.job_id[:8]}…` · "
+            f"{ej.status} · started {ej.started_at[:19]}"
+        )
+        if ej.total_q > 0:
+            pct = min(ej.done_q / ej.total_q, 1.0)
+            st.progress(
+                pct,
+                text=(
+                    f"{ej.done_q}/{ej.total_q} Q · "
+                    f"p50 {ej.p50_latency_ms:.0f}ms · "
+                    f"NC {ej.nc_rate:.1%}"
+                ),
+            )
+        if ej.status == "succeeded":
+            st.caption(
+                f"result: {ej.result_json}" if ej.result_json else "(no result_json)"
+            )
+        if ej.status == "failed" and ej.error_message:
+            # Keep the error short in the UI; full tail lives on disk.
+            snippet = ej.error_message.strip().splitlines()[-1][:200]
+            st.warning(f"失敗: {snippet}")
+
+
+def _launch_eval_job(
+    state: AppState,
+    proj: Project,
+    eval_type: str,
+) -> None:
+    """Spawn an eval subprocess + persist a new EvalJob in ``state``.
+
+    Issue #82 Wave 4 (W4-T3).  Path composition goes through
+    ``eval_panel.make_eval_paths`` so result_json/log_file/marker_file are
+    all confined to ``reports/eval_runs/`` and ``logs/eval/``.  The
+    config is taken from ``proj.photon_config_path`` when the project is
+    PHOTON-enabled, else from ``proj.config_path``.
+    """
+
+    job_id = _eval_panel.sanitize_job_id()
+    result_json, log_file, marker_file = _eval_panel.make_eval_paths(
+        job_id, PROJECT_ROOT
+    )
+    config_path = proj.photon_config_path or proj.config_path
+    try:
+        cmd = _eval_panel.build_eval_job_cmd(
+            eval_type=eval_type,
+            project_name=proj.name,
+            repo_id=proj.repo_id,
+            config_path=config_path,
+            output_json=result_json,
+            marker_file=marker_file,
+        )
+    except ValueError as exc:
+        st.error(f"評価コマンドの構築に失敗: {exc}")
+        return
+    try:
+        proc = _eval_panel.start_eval_job(cmd, log_file)
+    except OSError as exc:
+        st.error(f"評価プロセスの起動に失敗: {exc}")
+        return
+
+    started_epoch = time.time()
+    job = EvalJob(
+        job_id=job_id,
+        project_name=proj.name,
+        eval_type=eval_type,
+        status="running",
+        started_at=datetime.now().isoformat(timespec="seconds"),
+        started_at_epoch=started_epoch,
+        pid=proc.pid,
+        log_file=str(log_file),
+        result_json=str(result_json),
+        marker_file=str(marker_file),
+    )
+    state.eval_jobs[job_id] = job
+    save()
+    st.success(f"評価開始 (PID: {proc.pid}, job_id: {job_id[:8]}…)")
 
 
 def _generate_photon_config(

@@ -243,6 +243,126 @@ class TestSanitizeJobId:
             eval_panel.sanitize_job_id("")
 
 
+class TestBuildEvalJobCmd:
+    """W4-T1: build_eval_job_cmd returns a shell=False argv list."""
+
+    def test_static_argv_shape(self, tmp_path: Path) -> None:
+        out_json = tmp_path / "reports" / "eval_runs" / "abc.json"
+        marker = tmp_path / "reports" / "eval_runs" / "abc.done"
+        argv = eval_panel.build_eval_job_cmd(
+            eval_type="static",
+            project_name="demo_proj",
+            repo_id="demo_repo",
+            config_path=str(tmp_path / "configs" / "photon_small.yaml"),
+            output_json=out_json,
+            marker_file=marker,
+            python_exec="/usr/bin/python3",
+        )
+        assert argv[0] == "/usr/bin/python3"
+        assert "-u" in argv
+        assert "-m" in argv
+        assert "scripts.run_baseline_eval" in argv
+        assert "--config" in argv
+        assert "--repo-id" in argv
+        assert "demo_repo" in argv
+        assert "--output" in argv
+        assert str(out_json) in argv
+        assert "--marker-file" in argv
+        assert str(marker) in argv
+
+    def test_multi_turn_uses_correct_module(self, tmp_path: Path) -> None:
+        out_json = tmp_path / "reports" / "eval_runs" / "abc.json"
+        marker = tmp_path / "reports" / "eval_runs" / "abc.done"
+        argv = eval_panel.build_eval_job_cmd(
+            eval_type="multi_turn",
+            project_name="demo",
+            repo_id="demo_repo",
+            config_path=str(tmp_path / "c.yaml"),
+            output_json=out_json,
+            marker_file=marker,
+        )
+        assert "scripts.run_multi_turn_eval" in argv
+
+    def test_unknown_eval_type_raises(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError):
+            eval_panel.build_eval_job_cmd(
+                eval_type="nope",
+                project_name="demo",
+                repo_id="demo_repo",
+                config_path=str(tmp_path / "c.yaml"),
+                output_json=tmp_path / "a.json",
+                marker_file=tmp_path / "a.done",
+            )
+
+    def test_rejects_bad_project_name(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError):
+            eval_panel.build_eval_job_cmd(
+                eval_type="static",
+                project_name="foo bar",
+                repo_id="demo_repo",
+                config_path=str(tmp_path / "c.yaml"),
+                output_json=tmp_path / "a.json",
+                marker_file=tmp_path / "a.done",
+            )
+
+    def test_rejects_bad_repo_id(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError):
+            eval_panel.build_eval_job_cmd(
+                eval_type="static",
+                project_name="demo",
+                repo_id="../repo",
+                config_path=str(tmp_path / "c.yaml"),
+                output_json=tmp_path / "a.json",
+                marker_file=tmp_path / "a.done",
+            )
+
+
+class TestParseEvalProgress:
+    """W4-T1: parse_eval_progress extracts the latest PROGRESS line."""
+
+    def test_extracts_latest(self, tmp_path: Path) -> None:
+        log = tmp_path / "eval.log"
+        log.write_text(
+            "starting run\n"
+            "PROGRESS done=10 total=120 p50_ms=18000 nc=0.15\n"
+            "more output\n"
+            "PROGRESS done=25 total=120 p50_ms=19300 nc=0.183\n"
+            "trailing log line\n"
+        )
+        result = eval_panel.parse_eval_progress(log)
+        assert result["done_q"] == 25
+        assert result["total_q"] == 120
+        assert result["p50_latency_ms"] == 19300.0
+        assert result["nc_rate"] == 0.183
+
+    def test_empty_log_returns_empty_dict(self, tmp_path: Path) -> None:
+        log = tmp_path / "eval.log"
+        log.write_text("no progress here\n")
+        assert eval_panel.parse_eval_progress(log) == {}
+
+    def test_missing_file_returns_empty_dict(self, tmp_path: Path) -> None:
+        assert eval_panel.parse_eval_progress(tmp_path / "nope.log") == {}
+
+
+class TestTailLogBytes:
+    """W4-T1: tail_log_bytes returns the trailing max_bytes of a log file."""
+
+    def test_truncates_to_max_bytes(self, tmp_path: Path) -> None:
+        log = tmp_path / "big.log"
+        log.write_bytes(b"A" * 4096)
+        tail = eval_panel.tail_log_bytes(log, 2048)
+        assert len(tail) == 2048
+        assert tail == "A" * 2048
+
+    def test_short_file_returned_verbatim(self, tmp_path: Path) -> None:
+        log = tmp_path / "small.log"
+        log.write_text("oops\nfailed\n")
+        assert eval_panel.tail_log_bytes(log, 2048) == "oops\nfailed\n"
+
+    def test_missing_file_returns_empty(self, tmp_path: Path) -> None:
+        assert eval_panel.tail_log_bytes(tmp_path / "nope.log", 2048) == ""
+
+
 class TestMakeEvalPaths:
     def test_paths_under_allowed_dirs(self, tmp_path: Path) -> None:
         result_json, log_file, marker_file = eval_panel.make_eval_paths(
