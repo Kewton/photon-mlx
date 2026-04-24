@@ -76,9 +76,11 @@ class QwenMLXAdapter:
     ) -> None:
         from mlx_lm import generate as mlx_generate  # lazy import
         from mlx_lm import load as mlx_load
+        from mlx_lm.sample_utils import make_sampler
 
         self.model = model
         self._generate_fn = mlx_generate
+        self._make_sampler = make_sampler
         self._model, self._tokenizer = mlx_load(model)
 
     def generate(
@@ -94,11 +96,25 @@ class QwenMLXAdapter:
             if response_format == "json_object"
             else ""
         )
+        user_prompt = prompt + suffix
+        chat_prompt = self._tokenizer.apply_chat_template(
+            [{"role": "user", "content": user_prompt}],
+            add_generation_prompt=True,
+            tokenize=False,
+        )
+        if seed is not None:
+            try:
+                import mlx.core as mx
+
+                mx.random.seed(seed)
+            except Exception:
+                pass
+        sampler = self._make_sampler(temp=temperature)
         return self._generate_fn(
             self._model,
             self._tokenizer,
-            prompt=prompt + suffix,
-            temp=temperature,
+            prompt=chat_prompt,
+            sampler=sampler,
             max_tokens=1024,
         )
 
