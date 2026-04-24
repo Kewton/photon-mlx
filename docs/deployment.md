@@ -53,6 +53,13 @@ python scripts/build_symbol_graph.py --config configs/baseline.yaml
 
 Constructs import/call/inheritance edges for graph-expanded retrieval.
 
+> **Note (Issue #109)**: Symbol graph is **Python-centric**. Non-Python
+> corpora (e.g. 制度文書 markdown) can set
+> `indexing.symbol_graph.enabled: false` in the YAML to skip both
+> `build_symbol_graph.py` and the runtime `SymbolGraph.load()`. In that
+> mode `expand_with_graph` still returns file-neighbors, only the
+> graph-neighbor branch is skipped.
+
 ### 6. Start the server
 
 ```bash
@@ -282,3 +289,42 @@ baseline プロジェクトは `N/A (baseline_rag)`、working_memory OFF は `N/
 - 同時実行数は 1（`MAX_CONCURRENT_EVAL=1`）、wall-clock timeout 3600s
 
 Eval ジョブの状態は `.cache/photon_app_state.json` の `eval_jobs` dict に永続化される。起動時の subprocess は `shell=False`、結果 JSON は `reports/eval_runs/<job_id>.json`、ログは `logs/eval/<job_id>.log`（両方 gitignore 済み）。進捗は `PROGRESS done=N total=M p50_ms=X nc=Y` 形式のログ行から自動抽出。正常終了時に `reports/eval_runs/<job_id>.done` マーカーファイルが作成される。
+
+---
+
+## Breaking changes / Migration (Issue #109)
+
+### Markdown chunker の導入
+
+Issue #109 で `.md` ファイルは見出し（H1-H3）・条文（`第N条`/`第N節`）・コードフェンス（バッククォートのみ）を尊重する専用 chunker (`_chunk_markdown`) で分割されるようになった。これにより:
+
+- `Chunk.section_header` が空文字列から `"H1 > H3"` 形式に変わる（評価値に影響する可能性あり、Gate 2 v4 Static NC ±1pp 以内を許容帯としてモニタ）
+- `chunk_id` は `{repo_id}::{rel_path}::{start_line}-{end_line}` のまま維持されるが、境界位置が変わるため旧 chunk_id との互換性はなし
+
+**移行手順（既存 index を使っている repo 向け）**:
+
+```bash
+rm -rf data/indexes/<repo_id>/
+python scripts/ingest_repo.py --repo <path> --repo-id <repo_id> --config configs/<profile>.yaml
+python scripts/build_indexes.py --repo-id <repo_id> --config configs/<profile>.yaml
+# Python repo のみ（非 Python は enabled=false で skip される）
+python scripts/build_symbol_graph.py --repo-id <repo_id> --config configs/<profile>.yaml
+```
+
+### `indexing.symbol_graph.enabled: false` の新運用パターン
+
+制度文書（法令・規程など）のように Python シンボルが存在しないリポジトリでは symbol graph が無価値なため、以下の設定で build/load を完全に skip できる:
+
+```yaml
+indexing:
+  symbol_graph:
+    enabled: false
+```
+
+Skip される箇所:
+
+- `scripts/build_symbol_graph.py` は `Skipped: indexing.symbol_graph.enabled=false` を stdout に出して早期 return（`symbol_graph.json` は生成されない）
+- `baseline_reporag/pipeline_factory.py` は `SymbolGraph.load` を呼ばず `graph=None` を pipeline に渡す
+- `expand_with_graph` は `graph=None` の場合 graph-neighbors の展開を skip し、file-neighbors（`store.get_neighbors`）のみを返す
+
+この経路で pipeline を組み立てても retrieval / generation のインターフェースに変化はなく、既存 CLI / server も設定を変えるだけで動く。

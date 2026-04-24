@@ -177,6 +177,8 @@ python scripts/build_indexes.py --repo-id target_repo
 python scripts/build_symbol_graph.py --repo-id target_repo
 ```
 
+> Symbol graph の構築は **optional** です（Issue #109）。Python ソース中心の repo ではデフォルト（`indexing.symbol_graph.enabled: true`）で build/load されますが、制度文書の markdown など Python シンボルが存在しない repo では YAML で `indexing.symbol_graph.enabled: false` を指定すると `build_symbol_graph.py` は早期 return し、runtime でも `SymbolGraph.load` は呼ばれず `graph=None` で pipeline が組み立てられます。`expand_with_graph` は file-neighbors のみで動作するため retrieval は壊れません。
+
 5. baseline RepoRAG を起動
 ```
 python -m baseline_reporag.server --config configs/local.baseline.yaml

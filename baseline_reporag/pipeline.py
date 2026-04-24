@@ -94,7 +94,7 @@ class RepoRAGPipeline:
         store: ChunkStore,
         lexical: LexicalIndex,
         embedding: EmbeddingIndex,
-        graph: SymbolGraph,
+        graph: SymbolGraph | None,
         sessions: SessionManager,
         generator: Generator,
         logger: RunLogger,

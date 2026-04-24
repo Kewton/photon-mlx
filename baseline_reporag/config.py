@@ -1,9 +1,53 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+# CB-004 / CB-005: single allowlist for safe ``repo_id`` path segments.
+# Matches ``scripts/build_symbol_graph.py``'s historical regex so the
+# script, the pipeline factory, and demo entry points all reject the
+# same traversal / shell-metacharacter / unicode shapes.
+_REPO_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+# CB-R2-001: cap ``repo_id`` length so downstream path concatenations
+# (``<data_root>/indexes/<repo_id>/...``) stay well under the 255-byte
+# POSIX ``NAME_MAX`` limit even after suffixes like ``/symbol_graph.json``.
+# 64 leaves ample headroom for these suffixes on every supported FS.
+_REPO_ID_MAX_LENGTH = 64
+
+
+def validate_repo_id(repo_id: str) -> str:
+    """Return ``repo_id`` unchanged iff it is a safe path segment.
+
+    Enforces ``[A-Za-z0-9_-]+`` so that values like ``../outside``,
+    ``/tmp/x``, ``a/b``, empty strings, or unicode/shell-metacharacters
+    cannot escape ``<data_root>/indexes/`` via ``Path`` concatenation.
+    Callers construct filesystem paths from this value, so fail-fast at
+    the entry point (factory / CLI / demo) is preferable to defensive
+    checks scattered across each index loader.
+
+    CB-R2-001: values longer than ``_REPO_ID_MAX_LENGTH`` are rejected so
+    overly long ids surface as a clear ``ValueError`` here rather than as
+    a late ``OSError`` from ``Path`` operations on the resulting index
+    directory.
+    """
+    if not isinstance(repo_id, str):
+        raise TypeError(f"repo_id must be str, got {type(repo_id).__name__}")
+    if not _REPO_ID_RE.match(repo_id):
+        raise ValueError(
+            f"repo_id must match [A-Za-z0-9_-]+ (got {repo_id!r}); "
+            "unsafe characters or path traversal segments are rejected."
+        )
+    if len(repo_id) > _REPO_ID_MAX_LENGTH:
+        raise ValueError(
+            f"repo_id length {len(repo_id)} exceeds {_REPO_ID_MAX_LENGTH} "
+            "characters; shorten it so derived filesystem paths stay "
+            "within OS limits."
+        )
+    return repo_id
 
 
 def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
@@ -74,3 +118,30 @@ def load_config(path: str | Path) -> Config:
     cfg = Config(data)
     object.__setattr__(cfg, "_config_path", str(path))
     return cfg
+
+
+def is_symbol_graph_enabled(cfg: Config | dict[str, Any]) -> bool:
+    """Return whether ``indexing.symbol_graph.enabled`` is on (default True).
+
+    Accepts a :class:`Config` instance (which exposes ``.get()`` and
+    recursively wraps nested dicts) or a plain ``dict``. The recursive
+    lookup relies only on the shared ``.get(key, default)`` protocol, so
+    both forms work without branching. Missing intermediate blocks resolve
+    to the default ``True`` so existing configurations that predate
+    Issue #109 keep their current behaviour.
+
+    CB-003: Non-bool YAML values (e.g. the quoted string ``"false"``, or
+    an integer) are rejected with :class:`TypeError`. ``bool("false")`` is
+    ``True`` in Python, so a silent truthy cast here would silently enable
+    the symbol graph on operator typos. Fail-fast keeps wiring bugs
+    visible in CI instead of surfacing as load-time errors later.
+    """
+    indexing = cfg.get("indexing", {}) or {}
+    symbol_graph = indexing.get("symbol_graph", {}) or {}
+    val = symbol_graph.get("enabled", True)
+    if not isinstance(val, bool):
+        raise TypeError(
+            "indexing.symbol_graph.enabled must be a bool (true/false), "
+            f"got {type(val).__name__}={val!r}"
+        )
+    return val

@@ -168,3 +168,43 @@ top -pid $(pgrep -f baseline_reporag)
 7. **Concurrent 起動**: `MAX_CONCURRENT_EVAL=1` のため、既に running の eval がある場合は Start ボタンが disabled になる（仕様）。
 
 参考: 設計方針書 `workspace/design/issue-82-app-photon-features-design-policy.md` §6.4 / §7.2
+
+---
+
+## Symbol Graph が生成されない / ロードされない (Issue #109)
+
+**Symptom**: `scripts/build_symbol_graph.py` を実行しても `data/indexes/<repo_id>/symbol_graph.json` が生成されない、あるいは `pipeline_factory` 経由で pipeline を組み立てても `graph` が `None` になる。
+
+**Cause**: Issue #109 で `indexing.symbol_graph.enabled` フラグが honor されるようになった。制度文書など非 Python リポジトリ向けに **`false` を明示した config** を使っている場合、`scripts/build_symbol_graph.py` は skip ログを出して早期 return し、`pipeline_factory` は `SymbolGraph.load` を呼ばず `graph=None` で pipeline を組み立てる。これは意図した挙動である。
+
+**Checklist**:
+
+1. **意図的な skip か?**: 使用中の YAML の `indexing.symbol_graph.enabled` を確認。`false` なら symbol graph は使われない（Python 以外の repo で推奨）。
+2. **Python repo でも disable になっていないか**: `true` に戻し、`python scripts/build_symbol_graph.py --repo-id <id>` を再実行。
+3. **`symbol_graph.json` 欠落 + enabled=true**: 現行設計では fail-fast（`FileNotFoundError`）。`python scripts/build_symbol_graph.py --repo-id <id>` で再生成すること。
+
+---
+
+## Breaking changes / Migration: Markdown chunker の index 再構築 (Issue #109)
+
+**Symptom**: Issue #109 の markdown chunker が有効になった後、既存 index から markdown chunk を query すると `section_header` が空のままだったり、BM25/embedding のスコアが以前と大きく異なる。
+
+**Cause**: Issue #109 以前は `.md` ファイルを単純な sliding-window で chunk していたため、`section_header=""` が DB に保存されている。新しい chunker は見出し（H1-H3）や条文（`第N条`）境界を尊重するため、chunk 境界・`section_header` の内容・chunk_id が **すべて変わる**。
+
+**Migration 手順**:
+
+```bash
+# 1. 既存の index を完全削除（SQLite + embedding + BM25 + symbol_graph）
+rm -rf data/indexes/<repo_id>/
+
+# 2. ingest からやり直し
+python scripts/ingest_repo.py --repo <path-to-repo> --repo-id <repo_id> --config configs/<your>.yaml
+
+# 3. BM25 + embedding index 再構築
+python scripts/build_indexes.py --repo-id <repo_id> --config configs/<your>.yaml
+
+# 4. symbol graph（Python repo のみ。非 Python repo は enabled=false で skip される）
+python scripts/build_symbol_graph.py --repo-id <repo_id> --config configs/<your>.yaml
+```
+
+**注意**: SQLite chunk ID は `{repo_id}::{rel_path}::{start_line}-{end_line}` で、markdown の境界が変わる以上、旧 chunk_id と新 chunk_id は一致しない。セッション履歴（`logs/sessions/`）に残る旧 chunk_id は次ターンの retrieval 対象にはならないが、index を削除する前に参照していた citation は意味を失う点に留意。

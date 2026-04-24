@@ -353,3 +353,71 @@ class TestCitationPostprocess:
         log_payload = pipeline.logger.log_turn.call_args[0][0]
         assert "citation_postprocessed" in log_payload
         assert log_payload["citation_postprocessed"] is True
+
+
+# ---------------------------------------------------------------------------
+# Issue #109: graph=None type compatibility at pipeline layer
+# ---------------------------------------------------------------------------
+
+
+@patch(
+    "baseline_reporag.pipeline.expand_with_graph",
+    side_effect=_mock_expand_with_graph,
+)
+@patch(
+    "baseline_reporag.pipeline.hybrid_search",
+    side_effect=_mock_hybrid_search,
+)
+class TestGraphNoneTypeCompatibility:
+    """Issue #109: ``graph=None`` must not cause assembly / type errors.
+
+    Actual ``graph is None`` branching is covered in
+    ``test_graph_expansion.py``. This test only verifies that the
+    pipeline can be built and a turn completes when ``graph=None`` is
+    plumbed through (``expand_with_graph`` is still patched).
+    """
+
+    def test_pipeline_accepts_graph_none(
+        self,
+        mock_search: MagicMock,
+        mock_expand: MagicMock,
+    ) -> None:
+        cfg_data = {
+            "repo": {"repo_id": "test_repo", "repo_commit": "abc123"},
+            "retrieval": {
+                "lexical_top_k": 10,
+                "embedding_top_k": 10,
+                "fused_top_k": 8,
+                "rerank_top_k": 8,
+                "weights": {"lexical": 0.5, "embedding": 0.5},
+                "graph_expansion": {"max_hops": 1, "max_nodes": 16},
+                "neighborhood_expansion": {"before": 1, "after": 1},
+                "query_expansion": {"enabled": False},
+                "reranker": {"enabled": False},
+                "file_type_boost": 0.0,
+            },
+            "evidence_pack": {"max_chunks": 16, "max_tokens": 16000},
+            "model": {"model_id": "test-model"},
+        }
+        config = Config(cfg_data)
+
+        mock_store = MagicMock()
+        mock_store.get_many.return_value = _make_test_chunks()
+
+        mock_gen = MagicMock()
+        mock_gen.generate.return_value = "Answer with [C:1]."
+
+        sessions = SessionManager()
+
+        pipeline = RepoRAGPipeline(
+            config=config,
+            store=mock_store,
+            lexical=MagicMock(),
+            embedding=MagicMock(),
+            graph=None,  # Issue #109: symbol-graph disabled path.
+            sessions=sessions,
+            generator=mock_gen,
+            logger=MagicMock(),
+        )
+        result = pipeline.query("test question", session_id="s1")
+        assert result.answer.endswith("[C:1].")
