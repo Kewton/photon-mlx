@@ -126,7 +126,8 @@ def _build_baseline_deps_no_mlx(cfg: Config) -> dict:
         CrossEncoderReranker(
             model_id=reranker_cfg.get(
                 "model_id", "cross-encoder/ms-marco-MiniLM-L-6-v2"
-            )
+            ),
+            noise_patterns=reranker_cfg.get("noise_patterns"),
         )
         if reranker_cfg.get("enabled", False)
         else None
