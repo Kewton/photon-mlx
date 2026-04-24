@@ -102,6 +102,8 @@ baseline_reporag/       # Baseline RepoRAG (プロダクト線)
 ├── retrieval/          # hybrid retrieval・graph expansion
 ├── memory/             # session memory
 ├── generation/         # evidence pack・prompt・mlx_lm generator
+├── eval/               # 評価データ基盤
+│   └── institutional/  # 制度文書 eval set 生成 (LLMClient / ChunkLookup / 2-layer citation grader)
 ├── contracts.py        # MLX-free 共有型 (QueryResult)
 ├── pipeline.py         # 共通クエリパイプライン (Qwen)
 ├── pipeline_factory.py # provider 分岐 factory (lazy MLX import)
