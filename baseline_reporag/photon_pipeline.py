@@ -711,7 +711,7 @@ class PhotonRAGPipeline:
         # --- Query expansion ---
         qe_cfg = cfg.retrieval.query_expansion
         if qe_cfg.get("enabled", False):
-            _queries = expand_query(question)
+            _queries = expand_query(question, mapping=qe_cfg.get("domain_map"))
             expansion_terms: str | None = _queries[1] if len(_queries) > 1 else None
         else:
             expansion_terms = None

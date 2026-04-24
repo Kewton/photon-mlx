@@ -10,9 +10,13 @@ No external model calls — zero latency overhead on top of retrieval.
 from __future__ import annotations
 
 import re
+from typing import TYPE_CHECKING
 
-# Mapping from Japanese technical terms to English/code equivalents commonly
-# found in Python/FastAPI codebases.  Keeps the list minimal and repo-relevant.
+if TYPE_CHECKING:
+    from baseline_reporag.config import Config
+
+# Mirror of configs/baseline.yaml retrieval.query_expansion.domain_map
+# (FastAPI default). Update both when modifying.
 _JP_TO_CODE: dict[str, list[str]] = {
     # --- Architecture / infrastructure terms ---
     "ミドルウェア": ["middleware", "Middleware", "BaseHTTPMiddleware"],
@@ -93,17 +97,50 @@ _IDENTIFIER_PATTERN = re.compile(
 )
 
 
-def expand_query(query: str) -> list[str]:
+def _normalize_mapping(
+    mapping: "Config | dict[str, list[str]] | None",
+) -> dict[str, list[str]]:
+    """Normalize mapping into a plain dict.
+
+    - None → built-in `_JP_TO_CODE` fallback (backward compat).
+    - Config wrapper → converted via `to_dict()`.
+    - dict → returned as-is (identity).
+    """
+    if mapping is None:
+        return _JP_TO_CODE
+    from baseline_reporag.config import Config
+
+    if isinstance(mapping, Config):
+        return mapping.to_dict()
+    return mapping
+
+
+def expand_query(
+    query: str,
+    mapping: "Config | dict[str, list[str]] | None" = None,
+) -> list[str]:
     """Return a list of expanded search queries derived from *query*.
 
-    The first element is always the original query unchanged.  Additional
-    elements are lightweight expansions — no LLM call is made.
+    Args:
+        query: Original user query.
+        mapping: Domain-specific Japanese→code-term mapping.
+            - None (default): use built-in `_JP_TO_CODE` (backward compat).
+            - dict: use as-is.
+            - Config wrapper: normalized to dict via `.to_dict()` internally.
+            - Empty dict/Config: explicit disable of Japanese expansion
+              (identifier extraction still runs).
+
+    Returns:
+        List where the first element is always the original query.
+        Additional element (if any) is a combined expansion query.
     """
+    effective_map = _normalize_mapping(mapping)
+
     queries: list[str] = [query]
     extra_terms: list[str] = []
 
     # 1. Japanese → code-term expansion
-    for jp, code_terms in _JP_TO_CODE.items():
+    for jp, code_terms in effective_map.items():
         if jp in query:
             extra_terms.extend(code_terms)
 

@@ -12,13 +12,13 @@ Two-stage approach:
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from .hybrid import RetrievalResult
 from ..ingestion.store import ChunkStore
 
-# File path patterns that are never useful for code analysis questions.
-# Verified against FastAPI repo: these are meta-documents (LLM translation
-# prompts, sponsor lists, GitHub templates) that BM25 ranks high due to
-# ubiquitous FastAPI terminology.
+# Mirror of configs/baseline.yaml retrieval.reranker.noise_patterns
+# (FastAPI default). Update both when modifying.
 _NOISE_PATTERNS: tuple[str, ...] = (
     "llm-prompt",
     "sponsors.yml",
@@ -26,11 +26,6 @@ _NOISE_PATTERNS: tuple[str, ...] = (
     "DISCUSSION_TEMPLATE",
     "general-llm-prompt",
 )
-
-
-def _is_noise(chunk_id: str) -> bool:
-    path = chunk_id.split("::", 1)[1] if "::" in chunk_id else chunk_id
-    return any(p in path for p in _NOISE_PATTERNS)
 
 
 class CrossEncoderReranker:
@@ -43,16 +38,28 @@ class CrossEncoderReranker:
         model_id: HuggingFace model ID.  Defaults to the lightweight
             ms-marco-MiniLM-L-6-v2 (22 M params).
         max_length: Tokenizer truncation.  256 covers most code chunks.
+        noise_patterns: File path patterns to filter out pre-ranking.
+            - None (default): use built-in `_NOISE_PATTERNS` (backward compat).
+            - Sequence of str: use as-is (empty sequence → noise filter
+              explicit disable).
     """
 
     def __init__(
         self,
         model_id: str = "cross-encoder/ms-marco-MiniLM-L-6-v2",
         max_length: int = 256,
+        noise_patterns: Sequence[str] | None = None,
     ) -> None:
         from sentence_transformers import CrossEncoder  # lazy import
 
         self._model = CrossEncoder(model_id, max_length=max_length)
+        self._noise_patterns: tuple[str, ...] = (
+            _NOISE_PATTERNS if noise_patterns is None else tuple(noise_patterns)
+        )
+
+    def _is_noise(self, chunk_id: str) -> bool:
+        path = chunk_id.split("::", 1)[1] if "::" in chunk_id else chunk_id
+        return any(p in path for p in self._noise_patterns)
 
     def rerank(
         self,
@@ -77,7 +84,7 @@ class CrossEncoderReranker:
             return results
 
         # Stage 1: noise filter
-        clean = [r for r in results if not _is_noise(r.chunk_id)]
+        clean = [r for r in results if not self._is_noise(r.chunk_id)]
         if not clean:
             clean = results  # safety fallback
 

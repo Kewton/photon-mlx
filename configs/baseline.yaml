@@ -127,11 +127,80 @@ retrieval:
   reranker:
     enabled: true
     model_id: "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    noise_patterns:
+      - "llm-prompt"
+      - "sponsors.yml"
+      - "language_names"
+      - "DISCUSSION_TEMPLATE"
+      - "general-llm-prompt"
 
   query_expansion:
     enabled: true
     include_symbol_aliases: true
     include_filename_hints: true
+    domain_map:
+      "ミドルウェア": ["middleware", "Middleware", "BaseHTTPMiddleware"]
+      "依存性注入": ["dependency injection", "Depends", "dependencies"]
+      "依存性": ["dependency", "Depends", "dependencies"]
+      "ルーター": ["router", "APIRouter", "include_router"]
+      "エンドポイント": ["endpoint", "route", "path operation"]
+      "認証": ["authentication", "auth", "authenticate"]
+      "認可": ["authorization", "authorize", "permission"]
+      "セキュリティ": ["security", "SecurityScheme", "OAuth2"]
+      "バリデーション": ["validation", "validator", "pydantic"]
+      "スキーマ": ["schema", "BaseModel", "pydantic"]
+      "例外": ["exception", "HTTPException", "error handler"]
+      "エラーハンドラ": ["exception handler", "add_exception_handler"]
+      "リクエスト": ["request", "Request"]
+      "レスポンス": ["response", "Response", "JSONResponse"]
+      "セッション": ["session", "SessionMiddleware"]
+      "テスト": ["test", "TestClient", "pytest"]
+      "移行": ["migration", "migration plan"]
+      "リスク": ["risk", "impact"]
+      "影響": ["impact", "affected", "dependency"]
+      "キャッシュ": ["cache", "use_cache", "dependency_cache"]
+      "デコレータ": ["decorator", "@app.get", "@router"]
+      "ライフサイクル": ["lifecycle", "lifespan", "startup", "shutdown"]
+      "WebSocket": ["websocket", "WebSocket", "ws"]
+      "バックグラウンド": ["background", "BackgroundTasks"]
+      "静的ファイル": ["static", "StaticFiles", "mount"]
+      "設定": ["config", "Settings", "BaseSettings"]
+      "ログ": ["log", "logger", "logging"]
+      "ストリーミング": ["streaming", "StreamingResponse", "stream"]
+      "実行順序": ["execution order", "order", "stack"]
+      "移植": ["migration", "porting", "refactor"]
+      "エンコーディング": ["jsonable_encoder", "ENCODERS_BY_TYPE", "encoders"]
+      "デッドロック": ["run_in_threadpool", "asyncio", "anyio", "concurrency"]
+      "非同期": ["asyncio", "run_in_threadpool", "anyio", "concurrency"]
+      "ステータスコード": ["status_code", "routing"]
+      "マルチパート": ["UploadFile", "ImmutableMultiDict", "datastructures", "multipart"]
+      "フォームデータ": ["UploadFile", "Form", "datastructures"]
+      "ファイルアップロード": ["UploadFile", "File", "datastructures"]
+      "パスパラメータ": ["path_params", "solve_dependencies", "routing", "Path"]
+      "型変換": ["solve_dependencies", "request_path", "routing", "field"]
+      "クエリパラメータ": ["query_params", "Query", "Param", "ParamTypes"]
+      "デフォルト値": ["Param", "ParamTypes", "Query", "Body", "Form"]
+      "独自バリデータ": ["Param", "ParamTypes", "field_validator", "model_validator"]
+      "バリデータ": ["Param", "ParamTypes", "field_validator", "model_validator"]
+      "サブアプリ": ["mount", "sub_applications", "routing"]
+      "サブアプリケーション": ["mount", "sub_applications", "routing"]
+      "エラーハンドリング":
+        - "exception_handler"
+        - "add_exception_handler"
+        - "HTTPException"
+        - "exception_handlers"
+      "ハンドリング": ["exception_handler", "add_exception_handler", "handler"]
+      "ルーティング": ["routing", "APIRouter", "include_router", "route"]
+      "OpenAPI": ["openapi", "get_openapi", "generate_operation_id", "openapi_utils"]
+      "openapi": ["openapi", "get_openapi", "generate_operation_id", "openapi_utils"]
+      "スキーマ生成": ["get_openapi", "generate_operation_id", "openapi_utils"]
+      "セキュリティスキーム":
+        - "SecurityMiddleware"
+        - "add_middleware"
+        - "TrustedHostMiddleware"
+        - "security"
+      "HTTPSリダイレクト": ["HTTPSRedirectMiddleware", "add_middleware", "middleware"]
+      "信頼済みホスト": ["TrustedHostMiddleware", "add_middleware", "middleware"]
 
   neighborhood_expansion:
     enabled: true
