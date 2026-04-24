@@ -82,6 +82,25 @@ python scripts/build_symbol_graph.py \
   --config configs/my_project.yaml
 ```
 
+### 制度文書 (markdown 中心) リポジトリの場合 (Issue #109)
+
+Python シンボルが存在しない制度文書リポジトリ（法令・規程 markdown など）では symbol graph の構築は不要で、かつ runtime の `SymbolGraph.load` もコストなので skip するのが推奨:
+
+```yaml
+# configs/my_institutional_docs.yaml
+indexing:
+  symbol_graph:
+    enabled: false          # Issue #109: symbol graph を完全に skip
+```
+
+この設定で:
+
+- `scripts/build_symbol_graph.py` は `Skipped: indexing.symbol_graph.enabled=false` を出して早期 return（`symbol_graph.json` は作らない）
+- CLI / server / demo 経由の `pipeline_factory.build_pipeline` も `SymbolGraph.load` を呼ばず `graph=None` で pipeline を組み立て
+- retrieval の graph 拡張は skip されるが file-neighbors（同じファイル内の前後 chunk）は継続的に使われる
+
+Markdown chunker（Issue #109）は見出し（H1-H3）・条文（`第N条`/`第N節`）・コードフェンスを尊重するので、制度文書の retrieval 精度（`section_header` の明示など）が改善される。
+
 ---
 
 ## Step 5: baseline_rag で動作確認

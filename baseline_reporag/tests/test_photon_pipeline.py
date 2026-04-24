@@ -4206,3 +4206,70 @@ class TestWorkingMemoryConfigPastTurnPinningYamlPropagation:
         assert wm.enabled is True
         assert wm.max_turns == 5
         assert abs(wm.decay_factor - 0.25) < 1e-9
+
+
+# ---------------------------------------------------------------------------
+# Issue #109: graph=None type compatibility at PHOTON pipeline layer
+# ---------------------------------------------------------------------------
+
+
+class TestPhotonPipelineGraphNoneCompatibility:
+    """``baseline_deps['graph']=None`` must build and query without error.
+
+    The real graph=None runtime branch is covered in
+    ``test_graph_expansion.py``; this test only asserts type compatibility
+    of PHOTON's internal ``RepoRAGPipeline`` construction when callers
+    pass ``graph=None`` (``expand_with_graph`` is still patched).
+    """
+
+    def test_photon_pipeline_builds_with_graph_none(self):
+        from baseline_reporag.ingestion.chunker import Chunk
+
+        cfg = _make_pruning_cfg_disabled()
+        pipeline, baseline_deps, photon_deps, mock_session, mock_results = (
+            _setup_pipeline_for_pruning(cfg, session_turns=0)
+        )
+
+        # Swap baseline.graph to None to simulate the enabled=false path.
+        pipeline.baseline.graph = None
+
+        chunks = [
+            Chunk(
+                chunk_id=f"chunk_{i}",
+                repo_id="test-repo",
+                repo_commit="abc123",
+                rel_path=f"file{i}.py",
+                language="python",
+                start_line=1,
+                end_line=10,
+                content=f"def func_{i}(): pass",
+                symbols=[f"func_{i}"],
+                section_header="",
+                file_header="",
+            )
+            for i in range(16)
+        ]
+
+        def mock_get_many(ids):
+            by_id = {c.chunk_id: c for c in chunks}
+            return [by_id[cid] for cid in ids if cid in by_id]
+
+        baseline_deps["store"].get_many.side_effect = mock_get_many
+        expanded_ids = [f"chunk_{i}" for i in range(16)]
+
+        with (
+            patch(
+                "baseline_reporag.photon_pipeline.hybrid_search",
+                return_value=mock_results,
+            ),
+            patch(
+                "baseline_reporag.photon_pipeline.expand_with_graph",
+                return_value=expanded_ids,
+            ),
+        ):
+            baseline_deps["generator"].generate.return_value = "Answer [C:1]"
+            result = pipeline.query(
+                "test question", session_id="s1", repo_id="test-repo"
+            )
+
+        assert result.answer == "Answer [C:1]"

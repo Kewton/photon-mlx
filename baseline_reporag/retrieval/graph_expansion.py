@@ -8,7 +8,7 @@ from .hybrid import RetrievalResult
 def expand_with_graph(
     results: list[RetrievalResult],
     store: ChunkStore,
-    graph: SymbolGraph,
+    graph: SymbolGraph | None,
     repo_id: str,
     repo_commit: str,
     max_hops: int = 1,
@@ -16,7 +16,12 @@ def expand_with_graph(
     neighborhood_before: int = 1,
     neighborhood_after: int = 1,
 ) -> list[str]:
-    """Return deduplicated chunk IDs: original + graph neighbors + file neighbors."""
+    """Return deduplicated chunk IDs: original + graph neighbors + file neighbors.
+
+    When ``graph is None`` (Issue #109: ``indexing.symbol_graph.enabled=false``
+    for non-Python repositories), the graph-neighbor expansion is skipped
+    but file-neighbor expansion via ``store.get_neighbors`` still runs.
+    """
     seen: set[str] = set()
     ordered: list[str] = []
 
@@ -28,14 +33,15 @@ def expand_with_graph(
     for r in results:
         add(r.chunk_id)
 
-    # Graph-based neighbors
-    for r in results:
-        if len(ordered) >= max_nodes:
-            break
-        for neighbor_id in graph.get_related_chunks(r.chunk_id, max_hops=max_hops):
+    # Graph-based neighbors (skipped when SymbolGraph is disabled)
+    if graph is not None:
+        for r in results:
             if len(ordered) >= max_nodes:
                 break
-            add(neighbor_id)
+            for neighbor_id in graph.get_related_chunks(r.chunk_id, max_hops=max_hops):
+                if len(ordered) >= max_nodes:
+                    break
+                add(neighbor_id)
 
     # File-level neighbors (before/after in the same file)
     primary_chunks = store.get_many([r.chunk_id for r in results])
