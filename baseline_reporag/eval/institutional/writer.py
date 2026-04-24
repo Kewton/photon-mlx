@@ -33,7 +33,7 @@ OPTIONAL_STATIC_KEYS: frozenset[str] = frozenset(
     }
 )
 
-_CITATION_PATTERN_RE = re.compile(r"^第\d+条(?:第\d+項)?(?:第\d+号)?$")
+_CITATION_PATTERN_RE = re.compile(r"^第\d+条(?:の\d+)?(?:第\d+項)?(?:第\d+号)?$")
 
 _NON_EMPTY_STRING_KEYS: frozenset[str] = frozenset({"question", "reference_answer"})
 
