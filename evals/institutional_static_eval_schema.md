@@ -22,7 +22,7 @@
 
 | key | 型 | 説明 |
 |---|---|---|
-| `expected_citation_patterns` | list[str] | `第N条` / `第N条第M項` / `第N条第M項第K号`。各要素は `^第\d+条(?:第\d+項)?(?:第\d+号)?$` に fullmatch する |
+| `expected_citation_patterns` | list[str] | `第N条` / `第N条の枝番` / `第N条第M項` / `第N条第M項第K号`。各要素は `^第\d+条(?:の\d+)?(?:第\d+項)?(?:第\d+号)?$` に fullmatch する（枝番 `の\d+` は任意で、`第24条の2` や `第5条の10第2項第3号` 等に対応） |
 | `source_document_id` | str | `document.md` の親ディレクトリ名 (例: `0123_rental_mgmt`) |
 | `generator_model` | str | 生成モデル名 (例: `gpt-4o-mini-2024-07-18`) |
 | `human_verified` | bool | 人手検証済みかどうか (default false) |

@@ -65,7 +65,16 @@ def test_validate_record_rejects_empty_required_strings(
 
 @pytest.mark.parametrize(
     "pattern",
-    ["第3条", "第3条第1項", "第3条第1項第2号", "第10条", "第100条第2項第99号"],
+    [
+        "第3条",
+        "第3条第1項",
+        "第3条第1項第2号",
+        "第10条",
+        "第100条第2項第99号",
+        "第3条の2",
+        "第24条の2第1項",
+        "第5条の10第2項第3号",
+    ],
 )
 def test_citation_pattern_fullmatch_valid(pattern: str) -> None:
     rec = _valid_record()
@@ -75,7 +84,7 @@ def test_citation_pattern_fullmatch_valid(pattern: str) -> None:
 
 @pytest.mark.parametrize(
     "pattern",
-    ["第3条第1項第2号追加", "第3条の2", "Article 3", "", "第"],
+    ["第3条第1項第2号追加", "Article 3", "", "第", "第3条の"],
 )
 def test_citation_pattern_fullmatch_invalid(pattern: str) -> None:
     rec = _valid_record()
