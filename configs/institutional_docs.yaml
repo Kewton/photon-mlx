@@ -1,0 +1,296 @@
+# 制度文書 (institutional_documents) corpus 専用 config。
+# - Issue #112: Phase 2 制度文書ドメイン検証の baseline Static NC 実測用。
+# - base: configs/photon_small.yaml のコピー + institutional_documents 向け override。
+#   #113 PHOTON 測定は本 config の `model.provider` を "photon" へ切り替えて流用する想定。
+# - Streamlit UI の repo_id と一致しない repo に対して使用すると空結果 (NC=100%) となるため注意。
+# - repo.repo_path はマシン A (M3 Ultra) の絶対パス。他環境では書き換えまたは --repo 引数で上書き。
+# - Streamlit UI の ingest は git rev-parse HEAD を前提とするため institutional_documents (非 git) では利用不可。
+#   本 config の ingest は scripts/ingest_repo.py CLI のみで実行する。
+# - sentinel repo_commit は hashlib.sha1(b"institutional_v1").hexdigest() (= 9e500539f29555364217b773368305e7f59aa026)。
+#   corpus 更新時は `institutional_v2` 等の tag を hash して 40 字 sentinel を更新。
+# - 3 重 handicap (設計 §1-4): (a) E5 prompt prefix 非対応 / (b) 英語 cross-encoder reranker 継承 /
+#   (c) 日本語未調整 chunker size。本 Issue では受容し、follow-up Issue で個別対応。
+
+version: 1
+
+project:
+  name: "photon-reporag"
+  mode: "institutional_docs"
+
+run:
+  name_prefix: "institutional_docs"
+  seed: 42
+  deterministic: true
+
+paths:
+  data_root: "./data"
+  raw_root: "./data/raw"
+  processed_root: "./data/processed"
+  index_root: "./data/indexes"
+  eval_root: "./data/eval_sets"
+  log_root: "./logs"
+  report_root: "./reports"
+  checkpoint_root: "./checkpoints"
+  cache_root: "./.cache"
+
+runtime:
+  device: "auto"
+  dtype: "float16"
+  num_workers: 8
+  profile_latency: true
+  profile_memory: true
+  compile_decode_step: true
+
+repo:
+  repo_id: "institutional_documents"
+  repo_path: "/Users/maenokota/share/work/github_kewton/myWebData/markdowndb/institutional_documents"
+  # sentinel: sha1("institutional_v1") の 40 字 hex。非 git repo のため scripts/ingest_repo.py の
+  # resolve_commit() が len>=40 で git 呼び出しを skip する挙動を利用。ingest 時 --commit と同値にする。
+  repo_commit: "9e500539f29555364217b773368305e7f59aa026"
+  # 4228 md のみ対象。FastAPI 向け code 拡張子・docs/*/docs/** exclude 等は継承させない。
+  include:
+    - "**/*.md"
+  exclude:
+    - "**/.git/**"
+
+ingestion:
+  chunking:
+    # Issue 本文原則『dead key を書かない』に従い、chunking.strategy 行は省略。
+    # #109 以降、.md 自動 dispatch により chunker は language="markdown" を使う。
+    max_chars: 2400
+    overlap_chars: 300
+    max_lines: 120
+    overlap_lines: 12
+    keep_function_boundary: true
+    keep_class_boundary: true
+    attach_section_headers: true
+    attach_file_header: true
+
+indexing:
+  lexical:
+    enabled: true
+    engine: "bm25"
+
+  embedding:
+    enabled: true
+    provider: "local"
+    # 注意 1: 現行 baseline_reporag/indexing/embedding.py は "query: "/"passage: " prefix を
+    # 付与しないため、E5 本来の性能より 2-5pt 下振れする可能性あり (handicap (a))。
+    model_id: "intfloat/multilingual-e5-small"
+    batch_size: 64
+    normalize: true
+
+  symbol_graph:
+    # #109 で honor される。非 code 系 corpus のため無効化。
+    enabled: false
+
+retrieval:
+  mode: "hybrid"
+  lexical_top_k: 20
+  embedding_top_k: 20
+  fused_top_k: 16
+  rerank_top_k: 12
+
+  weights:
+    lexical: 0.45
+    embedding: 0.45
+    graph: 0.10
+
+  reranker:
+    enabled: true
+    # 注意 2: 英語 MS MARCO 学習モデルを継承。日本語 rerank で 5-10pt 下振れる可能性あり (handicap (b))。
+    model_id: "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    # #111 で外部化。FastAPI 向け _NOISE_PATTERNS fallback を抑止するため明示的に空 list。
+    # 制度文書向け path-filter 候補は実データ調査後に別 Issue で追加。
+    noise_patterns: []
+
+  file_type_boost: 0.0
+
+  query_expansion:
+    enabled: true
+    include_symbol_aliases: true
+    include_filename_hints: true
+    # #111 で外部化。FastAPI 向け _JP_TO_CODE fallback を抑止するため明示的に空 dict。
+    domain_map: {}
+
+  neighborhood_expansion:
+    enabled: true
+    before: 1
+    after: 1
+
+  graph_expansion:
+    enabled: true
+    max_hops: 1
+    max_nodes: 24
+
+  two_pass_search:
+    enabled: false
+    pass1_top_k: 64
+    pass2_top_k: 16
+
+evidence_pack:
+  max_chunks: 16
+  max_tokens: 16000
+  include_neighbors: true
+  include_section_headers: true
+
+  local_refresh:
+    enabled: true
+    top_k: 4
+    refresh_before_answer: true
+    refresh_on_exact_quote: true
+    refresh_on_diff_or_patch: true
+
+session_memory:
+  mode: "photon"
+  max_turns: 8
+  summary_max_tokens: 800
+  pin_recent_chunks_max: 8
+  pin_cited_chunks_max: 12
+  track_topic_state: true
+
+  working_memory:
+    enabled: true
+    max_turns: 8
+    decay_factor: 0.5
+    relevant_turn_threshold: 0.7
+    storage_mode: "full"
+    aggregation: weighted
+    past_turn_pinning_enabled: false
+    max_pinned_chunks: 3
+
+tokenizer:
+  tokenizer_id: "mlx-community/Qwen2.5-Coder-14B-Instruct-4bit"
+  vocab_size: 152064
+
+model:
+  architecture: "photon_decoder"
+
+  # **重要**: 本 Issue は baseline Static NC 実測のため provider=baseline に設定。
+  # pipeline_factory.py:52-72 は provider=baseline で `_build_baseline_deps_no_mlx` 経由の
+  # 純 baseline pipeline を返す。#113 PHOTON 測定時はこの行を "photon" に切替える。
+  provider: "baseline"
+  model_id: "mlx-community/Qwen2.5-Coder-14B-Instruct-4bit"
+
+  # PHOTON-specific: 本 Issue baseline では参照されないが、#113 切替時のため継承値を保持。
+  base_embed_dim: 256
+  hidden_size: 1024
+  intermediate_size: 2816
+
+generation:
+  max_new_tokens: 768
+  temperature: 0.2
+  top_p: 0.9
+  repetition_penalty: 1.05
+  do_sample: false
+
+  num_attention_heads: 16
+  num_key_value_heads: 16
+  head_dim: 64
+
+  max_position_embeddings: 2048
+  rope_theta: 1000000.0
+  norm_eps: 0.00001
+  tie_word_embeddings: false
+  dropout: 0.0
+  bias: false
+
+hierarchy:
+  levels: 2
+  chunk_sizes: [4, 4]
+  converter_prefix_lengths: [2, 2]
+
+  chunker:
+    level1_type: "concat"
+    upper_type: "linear"
+
+  encoder_layers_per_level: [3, 3]
+  decoder_layers_per_level: [3, 3]
+
+  context_encoder_arch: "llama_decoder_style"
+  context_decoder_arch: "llama_decoder_style"
+  context_converter_type: "conv1d"
+
+  recursive_loss_weight: 0.0
+  bottleneck_consistency_target: "top_level"
+
+training:
+  enabled: true
+  stage: "small"
+
+  train_corpus: "./data/processed/train_multi.jsonl"
+  val_corpus: "./data/processed/val_multi.jsonl"
+
+  context_length: 2048
+  micro_batch_size: 2
+  gradient_accumulation_steps: 16
+
+  learning_rate: 0.00015
+  min_learning_rate: 0.000015
+  warmup_ratio: 0.03
+  weight_decay: 0.1
+  max_grad_norm: 1.0
+
+  max_steps: 2000
+  eval_every_steps: 100
+  save_every_steps: 100
+  log_every_steps: 20
+
+  early_stopping:
+    enabled: true
+    patience: 3
+    min_delta: 0.001
+    restore_best: true
+
+inference:
+  hierarchical_prefill: true
+  recgen_enabled: true
+  safe_recgen_enabled: true
+  evidence_pruning_enabled: true
+  pruned_max_chunks: 8
+
+  photon_generation_enabled: false
+  generation_fallback_policy: "qwen"
+
+  answer_max_new_tokens: 768
+  temperature: 0.2
+  top_p: 0.9
+  do_sample: false
+
+safe_recgen:
+  enabled: true
+
+  triggers:
+    exact_quote: true
+    diff_or_patch: true
+    high_risk_query: true
+    topic_shift: true
+    latent_drift: true
+    low_confidence: false
+
+  thresholds:
+    latent_cosine_drift: 0.50
+    topic_shift_score: 0.65
+    confidence_floor: 0.40
+    logit_kl: 0.75
+
+  fallback_actions:
+    re_retrieve: true
+    strengthen_local_refresh: true
+    reprefill_hierarchy: true
+    fallback_to_baseline_path: true
+
+drift_monitoring:
+  enabled: true
+  track_latent_cosine_drift: true
+  track_token_agreement: true
+  track_logit_kl: true
+  save_turn_level_metrics: true
+
+logging:
+  level: "INFO"
+  save_hidden_stats: true
+  save_drift_metrics: true
+  save_latency_breakdown: true
+  save_memory_metrics: true
+  save_fallback_reasons: true
