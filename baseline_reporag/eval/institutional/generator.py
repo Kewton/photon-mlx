@@ -16,6 +16,7 @@ _REQUIRED_LLM_KEYS: frozenset[str] = frozenset(
     {"question", "reference_answer", "expected_citation_patterns", "grading_notes"}
 )
 _JSON_BLOCK_RE = re.compile(r"\{.*\}", re.DOTALL)
+_CITATION_PATTERN_RE = re.compile(r"^第\d+条(?:の\d+)?(?:第\d+項)?(?:第\d+号)?$")
 
 MAX_RETRIES: int = 3
 
@@ -37,6 +38,10 @@ def _parse_json_strict(text: str) -> dict:
     missing = _REQUIRED_LLM_KEYS - value.keys()
     if missing:
         raise ValueError(f"LLM response missing keys: {sorted(missing)}")
+    for key in ("question", "reference_answer"):
+        field = value.get(key)
+        if not isinstance(field, str) or not field.strip():
+            raise ValueError(f"LLM response field {key!r} must be a non-empty string")
     return value
 
 
@@ -81,7 +86,13 @@ def _build_row(
     }
     patterns = parsed.get("expected_citation_patterns")
     if patterns:
-        row["expected_citation_patterns"] = list(patterns)
+        cleaned = [
+            p
+            for p in patterns
+            if isinstance(p, str) and _CITATION_PATTERN_RE.fullmatch(p)
+        ]
+        if cleaned:
+            row["expected_citation_patterns"] = cleaned
     return row
 
 
