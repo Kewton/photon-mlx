@@ -54,13 +54,21 @@ class TestE5PrefixHelpers:
     def test_query_prefix_returns_unchanged_for_empty_model_id(self) -> None:
         assert _e5_query_prefix("", "hello") == "hello"
 
+    # DR1-001 / DR2-001 / DR4-006: E5 instruct fail-fast かつ ValueError 本文に
+    # model_id を含めない (private HF org 名 / R&D codename の leak 防止)
     def test_passage_prefix_raises_for_e5_instruct(self) -> None:
-        with pytest.raises(ValueError, match="E5 instruct variants"):
+        with pytest.raises(ValueError, match="E5 instruct variants") as exc_info:
             _e5_passage_prefix("intfloat/multilingual-e5-large-instruct", ["hello"])
+        # DR4-006: model_id (private HF org 名等) を error 本文へ含めない
+        assert "intfloat" not in str(exc_info.value)
+        assert "multilingual-e5-large-instruct" not in str(exc_info.value)
 
     def test_query_prefix_raises_for_e5_instruct(self) -> None:
-        with pytest.raises(ValueError, match="E5 instruct variants"):
+        with pytest.raises(ValueError, match="E5 instruct variants") as exc_info:
             _e5_query_prefix("intfloat/multilingual-e5-large-instruct", "hello")
+        # DR4-006: model_id (private HF org 名等) を error 本文へ含めない
+        assert "intfloat" not in str(exc_info.value)
+        assert "multilingual-e5-large-instruct" not in str(exc_info.value)
 
 
 class TestEmbeddingIndexBuildE5Prefix:

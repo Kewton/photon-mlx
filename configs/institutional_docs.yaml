@@ -8,8 +8,8 @@
 #   本 config の ingest は scripts/ingest_repo.py CLI のみで実行する。
 # - sentinel repo_commit は hashlib.sha1(b"institutional_v1").hexdigest() (= 9e500539f29555364217b773368305e7f59aa026)。
 #   corpus 更新時は `institutional_v2` 等の tag を hash して 40 字 sentinel を更新。
-# - 3 重 handicap (設計 §1-4): (a) E5 prompt prefix 非対応 / (b) 英語 cross-encoder reranker 継承 /
-#   (c) 日本語未調整 chunker size。本 Issue では受容し、follow-up Issue で個別対応。
+# - 3 重 handicap (設計 §1-4): (a) 解消済 (#125, prefix 付与) / (b) 英語 cross-encoder reranker 継承 /
+#   (c) 日本語未調整 chunker size。残り (b)/(c) は follow-up Issue で個別対応。
 
 version: 1
 
@@ -74,8 +74,8 @@ indexing:
   embedding:
     enabled: true
     provider: "local"
-    # 注意 1: 現行 baseline_reporag/indexing/embedding.py は "query: "/"passage: " prefix を
-    # 付与しないため、E5 本来の性能より 2-5pt 下振れする可能性あり (handicap (a))。
+    # 注意 1: `#125` で baseline_reporag/indexing/embedding.py へ "query: "/"passage: " prefix
+    # 付与済、E5 本来性能を発揮 (handicap (a) 解消)。
     model_id: "intfloat/multilingual-e5-small"
     batch_size: 64
     normalize: true
