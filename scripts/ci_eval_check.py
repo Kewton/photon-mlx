@@ -5,9 +5,14 @@ Exit code 0 = pass, 1 = threshold violated.
 
 Usage:
     python scripts/ci_eval_check.py \
-        --static-log logs/baseline_eval_*.jsonl \
-        --mt-log logs/mt_eval_*.jsonl \
+        --static-log logs/baseline_eval_fastapi_fastapi_*.jsonl \
+        --mt-log logs/mt_eval_fastapi_fastapi_*.jsonl \
         --eval-set data/eval_sets/static_eval.jsonl
+
+NOTE: glob patterns must include the corpus repo_id (e.g. ``fastapi_fastapi``)
+so logs from other corpora (e.g. ``institutional_documents``) are not picked
+up by ``_resolve_latest`` (Issue #124). See ``configs/baseline.yaml`` for the
+canonical repo_id used by the weekly workflow.
 """
 
 from __future__ import annotations
@@ -158,12 +163,22 @@ def main() -> None:
     parser.add_argument(
         "--static-log",
         required=True,
-        help="Glob pattern for static eval log (e.g. logs/baseline_eval_*.jsonl)",
+        help=(
+            "Glob pattern for static eval log "
+            "(e.g. logs/baseline_eval_fastapi_fastapi_*.jsonl). "
+            "Include the corpus repo_id to avoid picking up logs from other "
+            "corpora — see Issue #124."
+        ),
     )
     parser.add_argument(
         "--mt-log",
         required=True,
-        help="Glob pattern for multi-turn eval log (e.g. logs/mt_eval_*.jsonl)",
+        help=(
+            "Glob pattern for multi-turn eval log "
+            "(e.g. logs/mt_eval_fastapi_fastapi_*.jsonl). "
+            "Include the corpus repo_id to avoid picking up logs from other "
+            "corpora — see Issue #124."
+        ),
     )
     parser.add_argument(
         "--eval-set",

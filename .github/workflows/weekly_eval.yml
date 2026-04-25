@@ -28,15 +28,18 @@ jobs:
             --config configs/baseline.yaml \
             --max-sessions 30
       - name: Check thresholds
+        # NOTE: glob の repo_id (fastapi_fastapi) は configs/baseline.yaml の
+        # repo.repo_id と同期して保つこと。別 corpus (例: institutional_documents)
+        # の log は別 job で扱う (Issue #124)。
         run: |
           python scripts/ci_eval_check.py \
-            --static-log logs/baseline_eval_*.jsonl \
-            --mt-log logs/mt_eval_*.jsonl
+            --static-log logs/baseline_eval_fastapi_fastapi_*.jsonl \
+            --mt-log logs/mt_eval_fastapi_fastapi_*.jsonl
       - name: Upload results
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: eval-results-${{ github.run_number }}
           path: |
-            logs/baseline_eval_*.jsonl
-            logs/mt_eval_*.jsonl
+            logs/baseline_eval_fastapi_fastapi_*.jsonl
+            logs/mt_eval_fastapi_fastapi_*.jsonl
