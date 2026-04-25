@@ -9,6 +9,36 @@ from sentence_transformers import SentenceTransformer
 
 from ..ingestion.store import ChunkStore
 
+_E5_MODEL_PREFIX = "intfloat/multilingual-e5"
+
+
+def _is_e5_standard(model_id: str) -> bool:
+    if not model_id:
+        return False
+    return model_id.startswith(_E5_MODEL_PREFIX) and "instruct" not in model_id
+
+
+def _assert_not_e5_instruct(model_id: str) -> None:
+    if model_id and model_id.startswith(_E5_MODEL_PREFIX) and "instruct" in model_id:
+        raise ValueError(
+            f"E5 instruct variants ({model_id}) require task-specific prefix; "
+            "not supported by this helper. Use config-based prefix injection instead."
+        )
+
+
+def _e5_passage_prefix(model_id: str, texts: list[str]) -> list[str]:
+    _assert_not_e5_instruct(model_id)
+    if _is_e5_standard(model_id):
+        return [f"passage: {t}" for t in texts]
+    return texts
+
+
+def _e5_query_prefix(model_id: str, query: str) -> str:
+    _assert_not_e5_instruct(model_id)
+    if _is_e5_standard(model_id):
+        return f"query: {query}"
+    return query
+
 
 class EmbeddingResult(NamedTuple):
     chunk_id: str
@@ -43,6 +73,7 @@ class EmbeddingIndex:
             text = f"{chunk.rel_path}\n{chunk.section_header}\n{chunk.content}"
             texts.append(text[:2048])  # truncate to avoid OOM
             self._chunk_ids.append(chunk.chunk_id)
+        texts = _e5_passage_prefix(self._model_id, texts)
         self._embeddings = self._model_().encode(
             texts,
             batch_size=batch_size,
@@ -54,8 +85,9 @@ class EmbeddingIndex:
     def search(self, query: str, top_k: int = 20) -> list[EmbeddingResult]:
         if self._embeddings is None:
             raise RuntimeError("Index not built; call build() or load() first")
+        encoded_query = _e5_query_prefix(self._model_id, query)
         q_emb = self._model_().encode(
-            [query], normalize_embeddings=True, convert_to_numpy=True
+            [encoded_query], normalize_embeddings=True, convert_to_numpy=True
         )[0]
         scores: np.ndarray = self._embeddings @ q_emb
         top_indices = np.argsort(scores)[::-1][:top_k]
