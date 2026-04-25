@@ -57,10 +57,15 @@ ingestion:
   chunking:
     # Issue 本文原則『dead key を書かない』に従い、chunking.strategy 行は省略。
     # #109 以降、.md 自動 dispatch により chunker は language="markdown" を使う。
-    max_chars: 2400
-    overlap_chars: 300
-    max_lines: 120
-    overlap_lines: 12
+    # #126 で 4-variant A/B 実施し short(800) を採用 (handicap (c) 解消):
+    #   - SHORT (800/100):  NC 11.21% (採用、article_lookup regression 完全解消)
+    #   - MEDIUM (1200/150): NC 12.93%
+    #   - BASE (2400/300):  NC 14.66% (post-#125)
+    # 詳細は reports/institutional_chunker_size_ab.md (#126) 参照。
+    max_chars: 800
+    overlap_chars: 100
+    max_lines: 40
+    overlap_lines: 4
     keep_function_boundary: true
     keep_class_boundary: true
     attach_section_headers: true

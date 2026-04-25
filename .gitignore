@@ -31,3 +31,6 @@ logs/eval/
 
 # Scratch / UAT test files
 test-uat*
+
+# Issue #126: chunker A/B variant configs (not committed)
+configs/_experiments/
