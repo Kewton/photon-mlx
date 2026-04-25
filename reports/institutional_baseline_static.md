@@ -52,11 +52,13 @@
 
 ## 3. 全体 NC rate
 
+<!-- aggregate:overall:start -->
 | 指標 | 値 |
 |------|-----|
 | 全質問数 | 116 |
 | NC (no-citation) 件数 | 13 |
 | **NC rate** | **11.21 %** |
+<!-- aggregate:overall:end -->
 
 ### 判定結果（設計 §9）
 
@@ -71,6 +73,7 @@
 
 ## 4. Category 別 NC rate
 
+<!-- aggregate:category:start -->
 | Category | 件数 | NC 件数 | NC rate | 備考 |
 |----------|------|---------|---------|------|
 | article_lookup | 18 | 3 | 16.7 % | 条文番号指定による参照型 |
@@ -80,6 +83,7 @@
 | penalty | 19 | 3 | 15.8 % | 罰則・ペナルティ |
 | scope | 19 | 0 | 0.0 % | 適用範囲 |
 | **合計** | **116** | **13** | **11.21 %** | |
+<!-- aggregate:category:end -->
 
 **所見**: `exception` (30.0%) と `article_lookup` (16.7%) が想定通り高 NC。`overview`/`scope` は 0% で
 hybrid retrieval が広めの context をうまく拾えている。`exception` の高 NC は条文の例外指定（「ただし
@@ -89,6 +93,7 @@ hybrid retrieval が広めの context をうまく拾えている。`exception` 
 
 ## 5. Latency (p50 / p95)
 
+<!-- aggregate:latency:start -->
 | 指標 | 値 |
 |------|-----|
 | 全体 p50 | 13,813 ms |
@@ -102,7 +107,9 @@ hybrid retrieval が広めの context をうまく拾えている。`exception` 
 | Memory peak (p50) | 18.8 MB |
 | Memory peak (p95) | 18.9 MB |
 | Memory peak (max) | 139.6 MB |
-| 116Q 総実時間 | 約 30 分 |
+<!-- aggregate:latency:end -->
+
+**116Q 総実時間**: 約 30 分（手動計測、aggregate 自動化スコープ外）。
 
 **所見**: latency の支配項は generation_ms（mlx-lm Qwen14B-4bit 推論、Apple Silicon GPU）。
 retrieval は BM25 + E5 hybrid で 200ms 弱と高速。memory peak は profile_memory 計測値で
@@ -114,6 +121,12 @@ retrieval は BM25 + E5 hybrid で 200ms 弱と高速。memory peak は profile_
 
 各 category から `no_citation=True` を 1 件抜粋（NC=0 の category は successful sample を併記）。
 
+> **注**: 本セクションの table 構造（eval_id / question / answer 抜粋 / latency_ms / cites）は
+> `scripts/aggregate_institutional_baseline.py --section failures` で再生成可能。
+> 各エントリ末尾の `**コメント**:` 行は人手記入の解釈であり sentinel 範囲内に共存している。
+> follow-up Issue で re-aggregate する際は、再生成後にコメント行を手動で復元する運用とする。
+
+<!-- aggregate:failures:start -->
 ### 6-1. article_lookup（NC 3/18）
 - **eval_id**: `INST-ARTICLE-LOOKUP-002`
 - **question**: 第4条に規定されている「整備」の内容は？
@@ -159,6 +172,7 @@ retrieval は BM25 + E5 hybrid で 200ms 弱と高速。memory peak は profile_
 - **cites**: 4 chunks
 - **latency_ms**: 13,966
 - **コメント**: 適用範囲は法律前段の定義条文で明示されることが多く、retrieval が安定。NC=0%。
+<!-- aggregate:failures:end -->
 
 ---
 
@@ -242,7 +256,7 @@ for cat, (nc, tot) in sorted(per_cat.items()):
 | (ii) | `feat(indexing): E5 embedding で query:/passage: prefix を付与 (handicap a 対応)` | `baseline_reporag/indexing/embedding.py` |
 | (iii) | `feat(retrieval): 多言語 cross-encoder reranker サポート (handicap b 対応)` | `baseline_reporag/retrieval/reranker.py` |
 | (iv) | `tune(ingestion): 日本語 markdown chunker size 実験 (handicap c 対応)` | `baseline_reporag/ingestion/chunker.py` |
-| (v) | `feat(scripts): aggregate_institutional_baseline.py 新設 (§7-8)` | 手動 one-liner の自動化 |
+| (v) | `feat(scripts): aggregate_institutional_baseline.py 新設 (§7-8)` (#127) | 手動 one-liner の自動化 |
 
 ---
 
