@@ -183,10 +183,10 @@ follow-up Issue で是正予定。**baseline の絶対値ではなく #113 PHOTO
 
 | # | handicap | 想定下振れ | 実測 | 修正ポイント | 対応 follow-up Issue |
 |---|----------|----------|------|-----------|---------------------|
-| (a) | E5 prompt prefix 非対応 | −2〜5pt | **+3.45pt (regression)** | `baseline_reporag/indexing/embedding.py` の `EmbeddingIndex.build()` / `search()` で `model.encode(texts, ...)` 直前に `"query: "` / `"passage: "` を前置 | **#125 (PR #130, NOT MERGED — 後述)** |
+| (a) | E5 prompt prefix 非対応 | −2〜5pt | +3.45pt regression（単独）→ (c) 組合せで解消 | `baseline_reporag/indexing/embedding.py` の `EmbeddingIndex.build()` / `search()` で `model.encode(texts, ...)` 直前に `"query: "` / `"passage: "` を前置 | **#125 (merged, `b009036`)** |
 | (b) | 英語 cross-encoder reranker 継承 | −5〜10pt | _未実測_ | `baseline_reporag/retrieval/reranker.py` の `CrossEncoderReranker` model_id を `jinaai/jina-reranker-v2-base-multilingual` 等の多言語モデルへ切替 | #114 |
-| (c) | 日本語未チューニング chunker size | 未定量 | _未実測_ | `baseline_reporag/ingestion/chunker.py` の `_chunk_markdown` で `max_chars=800〜1200` へ縮小実験 | #126 |
-| **合計** | | **−7〜15pt (推定)** | _部分実測のみ_ | | |
+| (c) | 日本語未チューニング chunker size | 未定量 | **(a)+(c) 組合せで NC 11.21% (post-#125 -3.45pt) / pre-#125 baseline 完全回復** | chunker config で `max_chars=2400→800`, `overlap_chars=300→100` (chunker.py 不変) | **#126 (本 PR, SHORT variant 採用)** |
+| **合計** | | **−7〜15pt (推定)** | (a)+(c) で **NC 11.21%** 達成、(b) で更なる改善見込み | | |
 
 ### handicap (a) E5 prefix 実測結果（2026-04-25, PR #130 ブランチ）
 
