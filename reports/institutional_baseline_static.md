@@ -181,12 +181,45 @@ retrieval は BM25 + E5 hybrid で 200ms 弱と高速。memory peak は profile_
 本 Issue の baseline 数値は以下 3 重 handicap 前提で測定（設計 §1-4）。各 handicap は個別の
 follow-up Issue で是正予定。**baseline の絶対値ではなく #113 PHOTON との Δ を重視する前提**。
 
-| # | handicap | 想定下振れ | 修正ポイント | 対応 follow-up Issue |
-|---|----------|----------|-----------|---------------------|
-| (a) | E5 prompt prefix 非対応 | −2〜5pt | `baseline_reporag/indexing/embedding.py` の `EmbeddingIndex.build()` / `search()` で `model.encode(texts, ...)` 直前に `"query: "` / `"passage: "` を前置 | _#TBD_ |
-| (b) | 英語 cross-encoder reranker 継承 | −5〜10pt | `baseline_reporag/retrieval/reranker.py` の `CrossEncoderReranker` model_id を `jinaai/jina-reranker-v2-base-multilingual` 等の多言語モデルへ切替 | _#TBD_ |
-| (c) | 日本語未チューニング chunker size | 未定量 | `baseline_reporag/ingestion/chunker.py` の `_chunk_markdown` で `max_chars=800〜1200` へ縮小実験 | _#TBD_ |
-| **合計** | | **−7〜15pt (推定)** | | |
+| # | handicap | 想定下振れ | 実測 | 修正ポイント | 対応 follow-up Issue |
+|---|----------|----------|------|-----------|---------------------|
+| (a) | E5 prompt prefix 非対応 | −2〜5pt | **+3.45pt (regression)** | `baseline_reporag/indexing/embedding.py` の `EmbeddingIndex.build()` / `search()` で `model.encode(texts, ...)` 直前に `"query: "` / `"passage: "` を前置 | **#125 (PR #130, NOT MERGED — 後述)** |
+| (b) | 英語 cross-encoder reranker 継承 | −5〜10pt | _未実測_ | `baseline_reporag/retrieval/reranker.py` の `CrossEncoderReranker` model_id を `jinaai/jina-reranker-v2-base-multilingual` 等の多言語モデルへ切替 | #114 |
+| (c) | 日本語未チューニング chunker size | 未定量 | _未実測_ | `baseline_reporag/ingestion/chunker.py` の `_chunk_markdown` で `max_chars=800〜1200` へ縮小実験 | #126 |
+| **合計** | | **−7〜15pt (推定)** | _部分実測のみ_ | | |
+
+### handicap (a) E5 prefix 実測結果（2026-04-25, PR #130 ブランチ）
+
+E5 prefix 適用後の baseline 再 build_indexes + 再 eval (116Q) を実施した結果、**想定 -2〜5pt 改善は確認されず、逆に NC rate が +3.45pt regression**:
+
+| 指標 | baseline (#112) | E5 prefix 適用 | Δ |
+|------|----------------|--------------|---|
+| 全体 NC rate | 11.21% (13/116) | **14.66% (17/116)** | **+3.45pt** |
+| article_lookup | 16.7% (3/18) | **55.6% (10/18)** | **+38.9pt（重大）** |
+| definition | 5.0% (1/20) | 0.0% (0/20) | -5.0pt |
+| exception | 30.0% (6/20) | 20.0% (4/20) | -10.0pt |
+| overview | 0.0% (0/20) | 0.0% (0/20) | 0pt |
+| penalty | 15.8% (3/19) | 15.8% (3/19) | 0pt |
+| scope | 0.0% (0/19) | 0.0% (0/19) | 0pt |
+
+#### article_lookup regression の主因
+
+`article_lookup` で OK→NC へ転落した 7 件は **「第3条」「第4条」など短い条文番号 query に集中**。E5 prefix の適用で意味的検索が広がり、複数の制度文書に存在する「第3条」chunks のうち **wrong document の 第3条** が高スコア取得 → reranker が真の参照先を優先できず NC 化、と推測。
+
+例:
+- `INST-ARTICLE-LOOKUP-003 (第3条事業実施期間)` OK→NC
+- `INST-ARTICLE-LOOKUP-004,009,011,013,019 (第3条登録制度の期間)` 全て OK→NC
+- `INST-ARTICLE-LOOKUP-010 (退院証明書)` OK→NC
+
+#### 結論と判断
+
+E5 prefix は **E5 spec 準拠の正しい修正**だが、本 corpus（多数の制度文書に重複する条文番号を含む）では **net regression** を生じた。考えられる対処:
+
+1. **#125 を merge しない**: corpus-specific に prefix off の運用を維持（spec 準拠より実用優先）
+2. **#125 を merge し #114 で multi-model A/B を実施**: prefix が効く別 embedding model（`multilingual-e5-base`, `BAAI/bge-m3` 等）で改善するか確認
+3. **prefix を config flag 化**: `embedding.use_e5_prefix: true/false` を yaml に追加し、corpus ごとに切替可能化
+
+判断を user に仰ぐ（PR #130 でレビュー継続）。**handicap (a) は単独 fix では解消しない** ことが本実測で判明 → handicap (b) reranker fix (#114) と組合せ前提で評価し直す必要がある。
 
 ---
 
