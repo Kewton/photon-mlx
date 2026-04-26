@@ -1,0 +1,20 @@
+{
+  "issue_number": 137,
+  "stage": 1,
+  "stage_name": "通常レビュー（設計原則）反映",
+  "applied_date": "2026-04-26",
+  "source_review": "stage1-review-result.json",
+  "applied_findings": [
+    {"id": "DR1-001", "severity": "Should Fix", "applied": true, "how": "section 4-#1 トレードオフに『DRY 違反の許容前提: base 更新凍結ルール』を明示 + section 10 リスクマップに『Phase B 期間中の base config 並行更新』行を追加"},
+    {"id": "DR1-002", "severity": "Should Fix", "applied": true, "how": "section 5-6 レポートテンプレート『運用波及 (採用後)』を 5 項目のチェックリストに拡張、第 3 invariant test 追加 (V4 採用時のみ) を `✓/✗/N-A` 形式で明示。section 10 リスクマップにも『V4 採用時の invariant 追加忘れ』行を追加"},
+    {"id": "DR1-003", "severity": "Should Fix", "applied": true, "how": "section 4-#5 トレードオフに『技術的負債明示: device 死フィールド残存』を追加 + section 12 に Follow-up 候補として device plumbing を明記"},
+    {"id": "DR1-004", "severity": "Should Fix", "applied": true, "how": "section 4 末尾に新 subsection『設計判断 #6 (LSP 補強): variant model interface 前提』を追加。dense interface 前提と 5 variant 全ての保証を表形式で明示"},
+    {"id": "DR1-005", "severity": "Nice to Have", "applied": true, "how": "section 5-3 修正注を書き直し、skipif デコレータ保持の根拠を『KISS (対称性) + YAGNI 観点での補足』として整理"},
+    {"id": "DR1-006", "severity": "Nice to Have", "applied": true, "how": "section 5-7 として『採用反映時の commit 粒度推奨 (SRP)』を新規追加。4 commit 構成 + index 再 build commit 対象外 + 非採用時の単一 commit を明示"},
+    {"id": "DR1-007", "severity": "Nice to Have", "applied": true, "how": "section 4-#1 トレードオフに『ISP 副次効果: extends 機構不在による interface segregation の自然遵守』を追加"}
+  ],
+  "applied_count": 7,
+  "skipped_count": 0,
+  "design_doc_updated": true,
+  "申し送り": "Stage 1 (設計原則) の Should Fix 4 件 + Nice to Have 3 件を全て設計方針書に反映。Stage 2 (整合性) では本反映で追加された (a) 設計判断 #6 LSP の interface 前提が実コードベースと整合するか、(b) section 5-7 commit 粒度が PR 戦略表 (Issue 本文) と整合するか、(c) Follow-up 候補 (section 12) で参照される SentenceTransformer/CrossEncoder の device 引数 plumbing 機構が現状ゼロ実装であることを再確認、を見ること。"
+}

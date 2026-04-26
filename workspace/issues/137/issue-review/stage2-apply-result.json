@@ -1,0 +1,25 @@
+{
+  "issue_number": 137,
+  "stage": 2,
+  "stage_name": "指摘事項反映（1回目・通常）",
+  "iteration": 1,
+  "applied_date": "2026-04-26",
+  "source_review": "stage1-review-result.json",
+  "applied_findings": [
+    {"id": "S1-001", "severity": "Must Fix", "applied": true, "how": "V0 行を『現 institutional default』に修正、背景に『本 A/B は institutional プロファイル限定、global baseline.yaml は #114 invariant test で保護』を追記"},
+    {"id": "S1-002", "severity": "Must Fix", "applied": true, "how": "worker artifacts 節の『variant configs (gitignore 済)』を『variant configs は Phase B で新規作成 (.gitignore に configs/_experiments/ 先行登録済、現時点では未作成)』に書き換え + 変更内容セクションに『5 variant config 新規作成』を明示タスクとして追加"},
+    {"id": "S1-003", "severity": "Must Fix", "applied": true, "how": "変更内容セクションに『各 variant config で indexing.embedding.max_input_chars を明示宣言 (V0/V1/V2/V3=2048, V4=8192)』を追記、コード変更の institutional_docs.yaml 更新項目に『現状 fallback 2048。最良 variant 値で固定して明示宣言』を明記"},
+    {"id": "S1-004", "severity": "Should Fix", "applied": true, "how": "採用判定基準に『主指標: overall NC rate / タイブレーカー: (1) category 別 NC 悪化数 → (2) p95 latency → (3) build/memory コスト』の優先順位を明示"},
+    {"id": "S1-005", "severity": "Should Fix", "applied": true, "how": "受入条件と採用判定基準を分離。受入条件側は『5 variant 完走 + 採否判断レポート完成』を完了条件とし、採否は -2pt 以上で『採用』、未満で『非採用 (V0 維持)』と明記する形に変更"},
+    {"id": "S1-006", "severity": "Should Fix", "applied": true, "how": "想定 compute 表に『repo_id』列を追加し、V0/V3=`institutional_documents` (共有)、V1/V2/V4=専用 `institutional_documents_V<N>` を明記。ingest/build_indexes/run_baseline_eval のサンプルコマンドも variant 別 repo_id で更新"},
+    {"id": "S1-007", "severity": "Should Fix", "applied": true, "how": "コード変更セクションに『INSTITUTIONAL_RERANKER_MODEL_ID (line 36) / INSTITUTIONAL_EMBEDDING_MODEL_ID (line 37) を採用値に置換 + test_institutional_yaml_reranker_model_id_pinned (line 55-68) / test_institutional_yaml_embedding_model_id_pinned (line 71-78) の skipif 解除』を明記。V4 採用時の第 3 invariant test 追加も条件付きタスクとして記載"},
+    {"id": "S1-008", "severity": "Should Fix", "applied": true, "how": "本文中の『#132 guard test』を『#114 invariant test (tests/test_pipeline_factory_yaml_invariants.py::test_baseline_yaml_reranker_model_id_unchanged、PR #132 で merge)』に修正"},
+    {"id": "S1-009", "severity": "Nice to Have", "applied": true, "how": "worker artifacts 節に『#133 worker branch / 別 worktree に保存。本 worktree には未取り込み』と所在を明記"},
+    {"id": "S1-010", "severity": "Nice to Have", "applied": true, "how": "並列開発セクションに『MPS バックエンドで Apple GPU 消費 → MLX と Metal/GPU 競合の可能性、CPU 強制は latency 5-10x 悪化リスク → 直列推奨』を根拠と回避策として追記"},
+    {"id": "S1-011", "severity": "Nice to Have", "applied": true, "how": "V4 行の rationale を『8192 chars ≒ 4096-8192 tokens、bge-m3 token 上限 8192 とほぼ整合』に書き換え、表下に『chars vs tokens 注記』を追加。token 単位 truncate 化を follow-up Issue 候補として明記"}
+  ],
+  "applied_count": 11,
+  "skipped_count": 0,
+  "github_updated": true,
+  "申し送り": "Stage 3 影響範囲レビューでは、本反映で追加された (a) variant config の新規作成タスク、(b) repo_id 列追加による戦略変更、(c) invariant test 活性化の具体ファイル変更、(d) V4 用第 3 invariant test の条件付き追加、の波及効果を分析する。特に CI 影響、後方互換性、追加 disk 容量 (新 repo_id 別 index 3 セット) の見積もりを推奨。"
+}
