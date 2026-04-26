@@ -502,6 +502,193 @@ class TestBuildPhotonDeps:
 
 
 # ---------------------------------------------------------------------------
+# Issue #135 / S7-001: _build_photon_deps must load checkpoint when configured
+# ---------------------------------------------------------------------------
+
+
+_PHOTON_MODEL_HEAD = (
+    "model:\n"
+    "  provider: photon\n"
+    "  architecture: photon_decoder\n"
+    "  base_embed_dim: 16\n"
+    "  hidden_size: 64\n"
+    "  intermediate_size: 128\n"
+    "  num_heads: 4\n"
+    "  head_dim: 16\n"
+    "  vocab_size: 256\n"
+    "  max_position_embeddings: 128\n"
+)
+_PHOTON_CFG_TAIL = (
+    "hierarchy:\n"
+    "  levels: 2\n"
+    "  chunk_sizes: [4, 4]\n"
+    "  encoder_layers_per_level: [1, 1]\n"
+    "  decoder_layers_per_level: [1, 1]\n"
+    "inference:\n"
+    "  safe_recgen_enabled: false\n"
+)
+_PHOTON_CFG_BASE = _PHOTON_MODEL_HEAD + _PHOTON_CFG_TAIL
+
+
+def _photon_cfg_with_checkpoint(ckpt_path: str) -> str:
+    return _PHOTON_MODEL_HEAD + f"  checkpoint_path: {ckpt_path}\n" + _PHOTON_CFG_TAIL
+
+
+class TestBuildPhotonDepsCheckpointLoad:
+    """Issue #135 S7-001: _build_photon_deps must surface checkpoint loading.
+
+    Until #135, ``_build_photon_deps`` built a fresh ``PhotonModel`` and never
+    loaded any trained weights — every PHOTON eval was running against
+    random-initialised parameters. These tests pin the new contract:
+
+    1. When ``model.checkpoint_path`` is unset, the function logs a WARNING
+       (so the misconfiguration cannot pass silently) and continues with
+       random weights for backwards-compat with dev-only configs.
+    2. When ``model.checkpoint_path`` is set to a valid checkpoint dir,
+       weights are loaded via ``photon_mlx.checkpoint.load_checkpoint``.
+    3. When the path does not exist, a ``FileNotFoundError`` is raised so
+       eval cannot proceed against a missing checkpoint.
+    """
+
+    def _write_checkpoint(self, path):
+        """Write a minimal checkpoint at ``path`` using photon_mlx.checkpoint."""
+        import sys
+        from pathlib import Path
+
+        sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+
+        from torch_ref.config import (
+            HierarchyConfig,
+            ModelConfig,
+            PhotonConfig,
+            TokenizerConfig,
+        )
+        from photon_mlx.checkpoint import CheckpointState, save_checkpoint
+        from photon_mlx.model import PhotonModel
+
+        cfg = PhotonConfig(
+            model=ModelConfig(
+                base_embed_dim=16,
+                hidden_size=64,
+                intermediate_size=128,
+                num_attention_heads=4,
+                num_key_value_heads=4,
+                head_dim=16,
+                max_position_embeddings=128,
+            ),
+            hierarchy=HierarchyConfig(
+                levels=2,
+                chunk_sizes=[4, 4],
+                converter_prefix_lengths=[2, 2],
+                encoder_layers_per_level=[1, 1],
+                decoder_layers_per_level=[1, 1],
+            ),
+            tokenizer=TokenizerConfig(vocab_size=256),
+        )
+        model = PhotonModel(cfg)
+        save_checkpoint(model, CheckpointState(step=42, best_val_loss=1.5), path)
+
+    def test_unset_checkpoint_path_warns(self, tmp_path, caplog):
+        """No checkpoint_path → WARNING logged (random-init not silent)."""
+        import logging
+
+        from baseline_reporag.config import load_config
+        from baseline_reporag.photon_pipeline import _build_photon_deps
+
+        cfg_file = tmp_path / "photon.yaml"
+        cfg_file.write_text(_PHOTON_CFG_BASE)
+        cfg = load_config(str(cfg_file))
+
+        with caplog.at_level(
+            logging.WARNING, logger="baseline_reporag.photon_pipeline"
+        ):
+            _build_photon_deps(cfg)
+
+        assert any(
+            "checkpoint_path" in rec.message and rec.levelno == logging.WARNING
+            for rec in caplog.records
+        ), "expected WARNING about missing model.checkpoint_path"
+
+    def test_valid_checkpoint_loads_weights(self, tmp_path):
+        """checkpoint_path → weights loaded; embedding differs from a fresh model."""
+        import mlx.core as mx
+
+        from baseline_reporag.config import load_config
+        from baseline_reporag.photon_pipeline import _build_photon_deps
+
+        ckpt_dir = tmp_path / "ckpt"
+        self._write_checkpoint(ckpt_dir)
+
+        cfg_file = tmp_path / "photon.yaml"
+        cfg_file.write_text(_photon_cfg_with_checkpoint(str(ckpt_dir)))
+        cfg = load_config(str(cfg_file))
+        deps = _build_photon_deps(cfg)
+
+        # photon_inference.model holds the loaded PhotonModel; pull its
+        # embedding weight and confirm it equals what we wrote (i.e. not
+        # randomly re-initialised after load).
+        loaded_emb = deps["photon_inference"].model.token_embed.weight
+
+        from photon_mlx.checkpoint import CheckpointState, load_checkpoint
+        from photon_mlx.model import PhotonModel
+        from torch_ref.config import (
+            HierarchyConfig,
+            ModelConfig,
+            PhotonConfig,
+            TokenizerConfig,
+        )
+
+        ref = PhotonModel(
+            PhotonConfig(
+                model=ModelConfig(
+                    base_embed_dim=16,
+                    hidden_size=64,
+                    intermediate_size=128,
+                    num_attention_heads=4,
+                    num_key_value_heads=4,
+                    head_dim=16,
+                    max_position_embeddings=128,
+                ),
+                hierarchy=HierarchyConfig(
+                    levels=2,
+                    chunk_sizes=[4, 4],
+                    converter_prefix_lengths=[2, 2],
+                    encoder_layers_per_level=[1, 1],
+                    decoder_layers_per_level=[1, 1],
+                ),
+                tokenizer=TokenizerConfig(vocab_size=256),
+            )
+        )
+        ref_state = load_checkpoint(ref, ckpt_dir)
+        assert isinstance(ref_state, CheckpointState)
+        ref_emb = ref.token_embed.weight
+
+        # Same shape and same values — confirms the load happened.
+        assert loaded_emb.shape == ref_emb.shape
+        diff = mx.max(mx.abs(loaded_emb - ref_emb)).item()
+        assert diff < 1e-6, f"embedding mismatch (max abs diff={diff})"
+
+    def test_missing_checkpoint_path_raises(self, tmp_path):
+        """checkpoint_path that doesn't exist → FileNotFoundError."""
+        from baseline_reporag.config import load_config
+        from baseline_reporag.photon_pipeline import _build_photon_deps
+
+        cfg_file = tmp_path / "photon.yaml"
+        bogus = tmp_path / "does_not_exist"
+        cfg_file.write_text(_photon_cfg_with_checkpoint(str(bogus)))
+        cfg = load_config(str(cfg_file))
+
+        try:
+            _build_photon_deps(cfg)
+        except FileNotFoundError as e:
+            assert "checkpoint_path" in str(e) or str(bogus) in str(e)
+            return
+        raise AssertionError(
+            "_build_photon_deps must raise FileNotFoundError on missing checkpoint_path"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Shared helpers for pipeline query tests (Issue #37+)
 # ---------------------------------------------------------------------------
 

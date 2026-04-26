@@ -306,6 +306,30 @@ def _build_photon_deps(cfg: Config) -> dict[str, Any]:
     # the same stub instance (Issue #58).
     tokenizer = _get_stub_tokenizer(photon_cfg.tokenizer.vocab_size)
     model = PhotonModel(photon_cfg)
+
+    # Issue #135 / S7-001: load trained PHOTON weights when configured.
+    # Until #135, _build_photon_deps silently used a freshly-initialised
+    # PhotonModel for every eval run.  Now ``model.checkpoint_path`` controls
+    # whether a trained checkpoint is loaded; when unset we still build a
+    # random-init model for dev/test parity but emit a WARNING so the
+    # misconfiguration surfaces in production logs.
+    checkpoint_path = cfg.model.get("checkpoint_path", None)
+    if checkpoint_path:
+        from pathlib import Path
+
+        from photon_mlx.checkpoint import load_checkpoint as _ckpt_load
+
+        ckpt_dir = Path(str(checkpoint_path))
+        if not ckpt_dir.exists():
+            raise FileNotFoundError(f"model.checkpoint_path does not exist: {ckpt_dir}")
+        _ckpt_load(model, ckpt_dir)
+        _logger.info("Loaded PHOTON checkpoint from %s", ckpt_dir)
+    else:
+        _logger.warning(
+            "model.checkpoint_path is unset — PHOTON pipeline is running on "
+            "randomly-initialised weights. Set ``model.checkpoint_path`` in "
+            "the YAML to load a trained checkpoint (Issue #135 / S7-001)."
+        )
     # Issue #64 / Codex CB-001: extract working memory policy once, pass it
     # into PhotonInference alongside the Issue #63 drift_level_weights below.
     working_memory_cfg = _extract_working_memory_cfg(cfg)
