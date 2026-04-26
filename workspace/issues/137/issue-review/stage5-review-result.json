@@ -1,0 +1,31 @@
+{
+  "issue_number": 137,
+  "stage": 5,
+  "focus": "通常 (2回目)",
+  "iteration": 2,
+  "reviewer": "codex",
+  "review_date": "2026-04-26",
+  "summary": "Stage 1/3 の主要指摘は Stage 4 後の Issue 本文に概ね反映済み。global default と institutional default の区別、variant config 新規作成、max_input_chars 明示、採用判定基準、resource/deployment/index rebuild/device plumbing/PR 戦略はいずれも改善されている。一方、実行手順をコードベースと照合すると、run_baseline_eval.py の --repo-id は pipeline の index load 先を変えないため variant config 側の repo.repo_id 明示が必須である点と、aggregate_institutional_baseline.py は複数 predictions を variant 別比較せず単一集合として合算する点が未反映。どちらも Phase B 実測結果の正しさに影響するため Must Fix とする。",
+  "findings": [
+    {
+      "id": "S5-001",
+      "severity": "Must Fix",
+      "title": "variant config 側の repo.repo_id 明示がないと run_baseline_eval.py が V1/V2/V4 の index をロードしない",
+      "description": "Issue 本文は eval 実行時に `--repo-id <V0/V3 は institutional_documents、その他は institutional_documents_V<N>>` を渡す手順を示しているが、`scripts/run_baseline_eval.py` の `--repo-id` は `pipeline.query(..., repo_id=repo_id)` に渡る検索対象 ID と出力 run_id に使われるだけで、pipeline の index load 先は変更しない。index load は `build_pipeline(cfg)` -> `pipeline_factory._build_baseline_deps_no_mlx()` 内で `cfg.repo.repo_id` から `data/indexes/<repo_id>/` を決めている。したがって、V1/V2/V4 の variant config に `repo.repo_id: institutional_documents_V<N>` を明示しない場合、base config の `institutional_documents` index をロードしたまま、query だけ `_V<N>` repo_id で走る不整合が起きる。",
+      "evidence": "`scripts/run_baseline_eval.py:40-46` は `cfg = load_config(args.config)` の直後に `pipeline = build_pipeline(cfg)` を呼ぶ / `scripts/run_baseline_eval.py:41,88-92` の `--repo-id` は `pipeline.query(..., repo_id=repo_id)` に渡るだけ / `baseline_reporag/pipeline_factory.py:112-116` は `repo_id = validate_repo_id(cfg.repo.repo_id)` から `idx_dir = data/indexes/<repo_id>` をロード / `configs/institutional_docs.yaml:44-49` の現 repo_id は `institutional_documents`",
+      "suggested_fix": "Issue 本文の variant config 作成手順に、各 config で `repo.repo_id` を V0/V3=`institutional_documents`、V1/V2/V4=`institutional_documents_V<N>` に明示することを追加する。eval 手順にも『`--repo-id` だけでは index load 先は変わらないため、variant config の `repo.repo_id` と `--repo-id` を一致させる』と明記する。"
+    },
+    {
+      "id": "S5-002",
+      "severity": "Must Fix",
+      "title": "aggregate_institutional_baseline.py は 5 variant predictions を比較せず合算する",
+      "description": "Issue 本文は『5 variant predictions JSONL に対し再利用 (--predictions glob で集約)』としているが、現行 `scripts/aggregate_institutional_baseline.py` は入力された全 JSONL の records を単一リストに append し、その全体に対して overall/category/latency を計算する。variant 名やファイル単位で group by する実装はない。5 ファイルを glob で一括指定すると 580Q 相当の合算レポートになり、受入条件の『5 variant 比較表 + category 別 NC + p95 latency + 採否判断』を満たす根拠にならない。",
+      "evidence": "`scripts/aggregate_institutional_baseline.py:72-87` は全 path の全 record を `records.append(record)` で 1 リスト化 / `scripts/aggregate_institutional_baseline.py:90-137` の `compute_overall` / `compute_category` / `compute_latency` は record 集合全体のみを集計 / `scripts/aggregate_institutional_baseline.py:263-267` の SECTION_REGISTRY に variant 別集計 section は存在しない",
+      "suggested_fix": "Issue 本文の集計手順を『各 variant の predictions JSONL に対して個別に `aggregate_institutional_baseline.py --predictions logs/institutional_V<N>_<ts>.jsonl --section overall,category,latency` を実行し、その結果を `reports/institutional_retrieval_ab.md` の比較表へ転記する』に修正する。単一 glob は全 variant 合算になるため使わない、と明記する。"
+    }
+  ],
+  "must_fix_count": 2,
+  "should_fix_count": 0,
+  "nice_to_have_count": 0,
+  "申し送り": "Stage 6 では S5-001/S5-002 を Issue 本文に反映する。特に S5-001 は実測が別 index を読んでいる保証、S5-002 は採否判断レポートの集計単位に関わるため、Stage 7-8 の影響範囲レビューでもこの修正後の運用手順を前提に確認する。"
+}

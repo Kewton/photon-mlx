@@ -1,0 +1,23 @@
+{
+  "issue_number": 137,
+  "stage": 3,
+  "focus": "影響範囲",
+  "reviewer": "codex",
+  "review_date": "2026-04-26",
+  "applied_findings": [
+    {
+      "id": "DR3-001",
+      "applied": true,
+      "updated_file": "workspace/design/issue-137-institutional-multilingual-ab-design-policy.md",
+      "summary": "11 章に Phase B 完了後 cleanup / retention を追加し、未採用 variant index、実験用 index の扱い、predictions JSONL の保持/削除、HF cache の安全な削除方針、du による容量記録を明記した。8 章の品質基準にも cleanup 検証を追加した。"
+    },
+    {
+      "id": "DR3-002",
+      "applied": true,
+      "updated_file": "workspace/design/issue-137-institutional-multilingual-ab-design-policy.md",
+      "summary": "7 章に #135 への業務影響の扱いを追記し、#137 半日 + #135 5 日の直列 5.5 日を許容する前提、並行可能なのは GPU/Metal を使わない準備作業のみであることを明記した。"
+    }
+  ],
+  "skipped_findings": [],
+  "summary": "Stage 3 の Must Fix は 0 件、Should Fix 2 件を設計方針書へ反映した。ソースコードは変更していない。"
+}
