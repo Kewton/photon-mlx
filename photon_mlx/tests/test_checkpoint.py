@@ -111,6 +111,13 @@ class TestCheckpointIO:
         assert loaded.patience_counter == 1
 
     def test_load_ignores_unknown_state_keys(self, tmp_path: Path) -> None:
+        """A future trainer writes a new state.json key; current loader drops it.
+
+        The legitimate forward-compat path is "future trainer writes both
+        state.json (with new key) AND integrity.json (with the new hash)".
+        The test simulates that by re-running save_checkpoint after
+        appending the future key.
+        """
         from photon_mlx.checkpoint import (
             CheckpointState,
             save_checkpoint,
@@ -122,9 +129,18 @@ class TestCheckpointIO:
         model = PhotonModel(cfg)
         save_checkpoint(model, CheckpointState(step=5), tmp_path)
 
+        # Inject an unknown key and re-stamp integrity.json so the post-write
+        # hashes match (this is what a future, schema-extended trainer would
+        # do).
         data = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
         data["future_field"] = "ignored"
         (tmp_path / "state.json").write_text(json.dumps(data), encoding="utf-8")
+        # Rewrite integrity.json to match the now-modified state.json so the
+        # forward-compat path under test (drop unknown keys) is the only thing
+        # being exercised — not the DR4-003 tamper check.
+        from photon_mlx.checkpoint import _write_integrity
+
+        _write_integrity(tmp_path)
 
         model2 = PhotonModel(cfg)
         loaded = load_checkpoint(model2, tmp_path)
@@ -172,6 +188,144 @@ class TestCheckpointIO:
         )
         assert "photon_mlx.loss" not in sys.modules, (
             "photon_mlx.checkpoint must not import photon_mlx.loss (training-only)"
+        )
+
+
+class TestCheckpointIntegrity:
+    """DR4-003: checkpoint tampering detection via integrity.json (SHA-256).
+
+    Issue #135 introduces a long-lived PHOTON checkpoint that other PRs may
+    fetch from external storage / git LFS. ``save_checkpoint`` writes an
+    ``integrity.json`` next to ``weights.npz`` / ``state.json`` recording
+    their SHA-256 hashes. ``load_checkpoint`` verifies them on the way back
+    in so a bit-flip or malicious overwrite cannot silently propagate into
+    eval / production weights.
+    """
+
+    def test_save_writes_integrity_json(self, tmp_path):
+        from photon_mlx.checkpoint import (
+            CheckpointState,
+            save_checkpoint,
+        )
+
+        mx.random.seed(7)
+        cfg = _tiny_cfg()
+        model = PhotonModel(cfg)
+        save_checkpoint(model, CheckpointState(step=42), tmp_path)
+
+        integrity_path = tmp_path / "integrity.json"
+        assert integrity_path.exists()
+        data = json.loads(integrity_path.read_text(encoding="utf-8"))
+        assert "weights_sha256" in data
+        assert "state_sha256" in data
+        assert "format_version" in data
+        # SHA-256 hex digests are 64 chars.
+        assert len(data["weights_sha256"]) == 64
+        assert len(data["state_sha256"]) == 64
+
+    def test_load_passes_when_hashes_match(self, tmp_path):
+        from photon_mlx.checkpoint import (
+            CheckpointState,
+            load_checkpoint,
+            save_checkpoint,
+        )
+
+        mx.random.seed(7)
+        cfg = _tiny_cfg()
+        model = PhotonModel(cfg)
+        save_checkpoint(model, CheckpointState(step=42), tmp_path)
+
+        loaded = load_checkpoint(PhotonModel(cfg), tmp_path)
+        assert loaded.step == 42
+
+    def test_load_raises_on_weights_tamper(self, tmp_path):
+        """Modifying weights.npz after save → load raises ValueError."""
+        from photon_mlx.checkpoint import (
+            CheckpointState,
+            load_checkpoint,
+            save_checkpoint,
+        )
+
+        mx.random.seed(7)
+        cfg = _tiny_cfg()
+        save_checkpoint(PhotonModel(cfg), CheckpointState(step=42), tmp_path)
+
+        # Tamper: append a byte to weights.npz.
+        with (tmp_path / "weights.npz").open("ab") as fh:
+            fh.write(b"\x00")
+
+        try:
+            load_checkpoint(PhotonModel(cfg), tmp_path)
+        except ValueError as e:
+            assert "integrity" in str(e).lower() or "hash" in str(e).lower()
+            return
+        raise AssertionError("tampered weights.npz must raise ValueError")
+
+    def test_load_raises_on_state_tamper(self, tmp_path):
+        """Modifying state.json after save → load raises ValueError."""
+        from photon_mlx.checkpoint import (
+            CheckpointState,
+            load_checkpoint,
+            save_checkpoint,
+        )
+
+        cfg = _tiny_cfg()
+        save_checkpoint(PhotonModel(cfg), CheckpointState(step=42), tmp_path)
+
+        # Tamper: change step in state.json without updating integrity.json.
+        state_path = tmp_path / "state.json"
+        data = json.loads(state_path.read_text(encoding="utf-8"))
+        data["step"] = 9999
+        state_path.write_text(json.dumps(data), encoding="utf-8")
+
+        try:
+            load_checkpoint(PhotonModel(cfg), tmp_path)
+        except ValueError as e:
+            assert "integrity" in str(e).lower() or "hash" in str(e).lower()
+            return
+        raise AssertionError("tampered state.json must raise ValueError")
+
+    def test_load_warns_when_integrity_missing(self, tmp_path, caplog):
+        """Legacy checkpoints (no integrity.json) → warn but still load."""
+        import logging
+
+        from photon_mlx.checkpoint import (
+            CheckpointState,
+            load_checkpoint,
+            save_checkpoint,
+        )
+
+        cfg = _tiny_cfg()
+        save_checkpoint(PhotonModel(cfg), CheckpointState(step=42), tmp_path)
+
+        # Simulate a legacy checkpoint by deleting integrity.json.
+        (tmp_path / "integrity.json").unlink()
+
+        with caplog.at_level(logging.WARNING, logger="photon_mlx.checkpoint"):
+            load_checkpoint(PhotonModel(cfg), tmp_path)
+
+        assert any("integrity" in rec.message.lower() for rec in caplog.records), (
+            "load_checkpoint must surface a WARNING when integrity.json is missing"
+        )
+
+    def test_strict_mode_requires_integrity_file(self, tmp_path):
+        """verify_integrity=True with no integrity.json → raises."""
+        from photon_mlx.checkpoint import (
+            CheckpointState,
+            load_checkpoint,
+            save_checkpoint,
+        )
+
+        cfg = _tiny_cfg()
+        save_checkpoint(PhotonModel(cfg), CheckpointState(step=42), tmp_path)
+        (tmp_path / "integrity.json").unlink()
+
+        try:
+            load_checkpoint(PhotonModel(cfg), tmp_path, verify_integrity=True)
+        except (FileNotFoundError, ValueError):
+            return
+        raise AssertionError(
+            "verify_integrity=True must raise when integrity.json is missing"
         )
 
 

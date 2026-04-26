@@ -140,8 +140,17 @@ class TestCheckpoint:
         assert state2.patience_counter == 2
 
     def test_load_checkpoint_ignores_unknown_state_keys(self, tmp_path: Path) -> None:
-        """load_checkpoint should drop unknown keys from state.json (forward compat)."""
+        """load_checkpoint should drop unknown keys from state.json (forward compat).
+
+        Issue #135 / DR4-003 added integrity.json hash verification, so the
+        legitimate forward-compat path is "future trainer writes both
+        state.json (with new key) AND integrity.json (with the new hash)".
+        We re-stamp integrity.json after the schema injection to keep this
+        test focused on the unknown-key drop, not the tamper guard.
+        """
         import json as _json
+
+        from photon_mlx.checkpoint import _write_integrity
 
         mx.random.seed(42)
         cfg = _tiny_cfg()
@@ -151,11 +160,13 @@ class TestCheckpoint:
         ckpt_dir = tmp_path / "ckpt"
         save_checkpoint(model, state, ckpt_dir)
 
-        # Inject an unknown key (simulating a future schema extension)
+        # Inject an unknown key (simulating a future schema extension) and
+        # refresh integrity.json so the post-write hashes still match.
         state_path = ckpt_dir / "state.json"
         data = _json.loads(state_path.read_text(encoding="utf-8"))
         data["future_unknown_key"] = "ignored"
         state_path.write_text(_json.dumps(data), encoding="utf-8")
+        _write_integrity(ckpt_dir)
 
         model2 = PhotonModel(cfg)
         state2 = load_checkpoint(model2, ckpt_dir)
