@@ -21,11 +21,24 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import random
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Iterator, Protocol
+
+
+# DR4-001: cap the requested session count so a typo (e.g. --sessions 50000
+# instead of 5000) cannot trigger a multi-day LLM run.
+MAX_SESSIONS = 5000
+
+# DR4-001: production allow-lists. Tests pass their own approved_* lists to
+# bypass these without disabling the guard logic itself.
+DEFAULT_APPROVED_CORPUS_ROOTS = (
+    Path("/Users/maenokota/share/work/github_kewton/myWebData/markdowndb"),
+)
+DEFAULT_APPROVED_OUTPUT_ROOTS = (Path("./data/training"),)
 
 _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
@@ -236,6 +249,129 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _resolve_under_root(
+    raw: Path,
+    *,
+    must_exist: bool,
+    approved_roots: Iterable[Path],
+    label: str,
+) -> Path:
+    """DR4-001: ``resolve(strict=True)`` then check ``relative_to`` an approved root.
+
+    For ``--output`` (must_exist=False) we resolve the *parent* dir
+    instead — the file itself is not created yet — and ensure the
+    parent sits under an approved root.
+    """
+    roots = [Path(r).resolve() for r in approved_roots]
+    if must_exist:
+        try:
+            resolved = raw.resolve(strict=True)
+        except FileNotFoundError as e:
+            raise FileNotFoundError(f"{label} does not exist: {raw}") from e
+    else:
+        # Output paths are written, not read; resolve the parent so
+        # we can still detect symlink escape on the directory side.
+        parent = raw.parent.resolve(strict=False)
+        if not parent.exists():
+            parent.mkdir(parents=True, exist_ok=True)
+        resolved = parent / raw.name
+
+    for root in roots:
+        try:
+            (resolved if must_exist else resolved.parent).relative_to(root)
+            return resolved
+        except ValueError:
+            continue
+    raise ValueError(
+        f"{label} is outside approved roots {[str(r) for r in roots]}: {resolved} "
+        "(DR4-001)"
+    )
+
+
+def parse_validated_args(
+    argv: list[str] | None,
+    *,
+    approved_corpus_roots: Iterable[Path] | None = None,
+    approved_output_roots: Iterable[Path] | None = None,
+) -> argparse.Namespace:
+    """Parse CLI args and apply Issue #135 / DR4-001 hardening.
+
+    - --corpus-dir: must exist, must resolve under one of
+      ``approved_corpus_roots`` (production: institutional_documents
+      mount). Rejects symlink escape via ``resolve(strict=True)``.
+    - --output: parent must resolve under one of ``approved_output_roots``
+      (production: ``./data/training``). The file itself is not required
+      to exist — main() creates it via ``write_atomic``.
+    - --sessions: 1 <= n <= MAX_SESSIONS (5000) so a typo cannot trigger
+      a multi-day LLM run.
+    - --seed: argparse already enforces int; we additionally clamp to
+      ``[0, 2**32 - 1]`` for reproducibility-tool consistency.
+    - --val-ratio: must satisfy ``0.0 < val_ratio < 0.5`` (mirrors
+      ``_corpus_core.split_train_val``).
+    """
+    ns = _parse_args(argv)
+    corpus_roots = (
+        list(approved_corpus_roots)
+        if approved_corpus_roots is not None
+        else list(DEFAULT_APPROVED_CORPUS_ROOTS)
+    )
+    output_roots = (
+        list(approved_output_roots)
+        if approved_output_roots is not None
+        else list(DEFAULT_APPROVED_OUTPUT_ROOTS)
+    )
+
+    ns.corpus_dir = _resolve_under_root(
+        ns.corpus_dir,
+        must_exist=True,
+        approved_roots=corpus_roots,
+        label="--corpus-dir",
+    )
+    ns.output = _resolve_under_root(
+        ns.output,
+        must_exist=False,
+        approved_roots=output_roots,
+        label="--output",
+    )
+
+    if not (1 <= ns.sessions <= MAX_SESSIONS):
+        raise ValueError(
+            f"--sessions must be in [1, {MAX_SESSIONS}], got {ns.sessions} "
+            "(DR4-001 cap to prevent runaway LLM costs)"
+        )
+    if not (0 <= ns.seed < 2**32):
+        raise ValueError(f"--seed must be in [0, 2**32), got {ns.seed} (DR4-001)")
+    if not (0.0 < ns.val_ratio < 0.5):
+        raise ValueError(
+            f"--val-ratio must be in (0.0, 0.5), got {ns.val_ratio} (DR1-005)"
+        )
+    return ns
+
+
+def write_atomic(path: Path, content: str, *, mode: int = 0o600) -> None:
+    """Write ``content`` to ``path`` via tmp + os.replace with 0o600 perms.
+
+    DR4-001: training corpora can carry institutional document text, so
+    a crash mid-write must never leave a half-formed file under
+    ``data/training/``. The tmp file is created with ``mode`` (default
+    0600 = owner read/write only) before content is written, so the
+    file is never world-readable in transit.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    fd = os.open(str(tmp), flags, mode)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(content)
+        os.replace(tmp, path)
+    finally:
+        # If something went wrong before os.replace, clean up the tmp.
+        if tmp.exists():
+            tmp.unlink()
+
+
 def _serialise_session(s: Session) -> str:
     return json.dumps(
         {
@@ -259,7 +395,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - LLM gated
     the production run until #137 finishes — this entry point is here
     so the operator has something to execute later, not so CI runs it.
     """
-    args = _parse_args(argv)
+    args = parse_validated_args(argv)
 
     # Build the LLM client lazily. The import is intentionally deferred so
     # the module stays importable for unit tests on machines without the
@@ -297,17 +433,16 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - LLM gated
         return 1
 
     train, val = split_train_val(sessions, val_ratio=args.val_ratio, seed=args.seed)
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    with args.output.open("w", encoding="utf-8") as fh:
-        for s in train:
-            fh.write(_serialise_session(s) + "\n")
+    train_text = "".join(_serialise_session(s) + "\n" for s in train)
+    val_text = "".join(_serialise_session(s) + "\n" for s in val)
+
+    write_atomic(args.output, train_text)
     val_path = args.output.with_name(args.output.stem + "_val.jsonl")
-    with val_path.open("w", encoding="utf-8") as fh:
-        for s in val:
-            fh.write(_serialise_session(s) + "\n")
+    write_atomic(val_path, val_text)
 
     metadata_path = args.output.with_suffix(args.output.suffix + ".metadata.json")
-    metadata_path.write_text(
+    write_atomic(
+        metadata_path,
         json.dumps(
             {
                 "n_sessions_requested": report.n_sessions_requested,
@@ -321,7 +456,6 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - LLM gated
             indent=2,
             ensure_ascii=False,
         ),
-        encoding="utf-8",
     )
     return 0
 

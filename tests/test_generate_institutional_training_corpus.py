@@ -272,3 +272,217 @@ class TestVerifyCorpus:
         report = verify_corpus(sessions, eval_path)
         assert abs(report.jp_sequence_ratio - 0.7) < 1e-9
         assert report.n_sessions_succeeded == 10
+
+
+# ---------------------------------------------------------------------------
+# DR4-001: CLI argument hardening for generate_institutional_training_corpus
+# ---------------------------------------------------------------------------
+
+
+class TestCLIArgValidation:
+    """``parse_validated_args`` rejects unsafe inputs before any LLM call.
+
+    The contract is documented in design policy §6.6 (CLI / I/O security):
+    --corpus-dir / --output must resolve under approved roots, --sessions
+    must fit a sane bound, and --val-ratio / --seed must be inside their
+    well-defined ranges. The validator never reads the LLM client, so we
+    can pin its behaviour without GPU or network.
+    """
+
+    def _approved_dir(self, tmp_path: Path) -> Path:
+        d = tmp_path / "approved_corpus"
+        d.mkdir()
+        # An approved corpus_dir needs at least one .md file so build_sessions
+        # can later proceed; the validator itself doesn't open them, but the
+        # existence check is part of resolve(strict=True).
+        (d / "doc.md").write_text("body", encoding="utf-8")
+        return d
+
+    def test_corpus_dir_must_exist(self, tmp_path: Path) -> None:
+        from scripts.generate_institutional_training_corpus import (
+            parse_validated_args,
+        )
+
+        bogus = tmp_path / "nope"
+        try:
+            parse_validated_args(
+                [
+                    "--corpus-dir",
+                    str(bogus),
+                    "--output",
+                    str(tmp_path / "out.jsonl"),
+                    "--eval-set",
+                    str(tmp_path / "eval.jsonl"),
+                    "--sessions",
+                    "100",
+                ],
+                approved_corpus_roots=[tmp_path],
+                approved_output_roots=[tmp_path],
+            )
+        except (FileNotFoundError, ValueError):
+            return
+        raise AssertionError("missing --corpus-dir must raise")
+
+    def test_corpus_dir_outside_approved_root_rejected(self, tmp_path: Path) -> None:
+        from scripts.generate_institutional_training_corpus import (
+            parse_validated_args,
+        )
+
+        approved = tmp_path / "approved"
+        approved.mkdir()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+
+        try:
+            parse_validated_args(
+                [
+                    "--corpus-dir",
+                    str(outside),
+                    "--output",
+                    str(approved / "out.jsonl"),
+                    "--eval-set",
+                    str(tmp_path / "eval.jsonl"),
+                    "--sessions",
+                    "100",
+                ],
+                approved_corpus_roots=[approved],
+                approved_output_roots=[approved],
+            )
+        except ValueError as e:
+            assert "approved" in str(e).lower() or "root" in str(e).lower()
+            return
+        raise AssertionError("--corpus-dir outside approved roots must raise")
+
+    def test_sessions_upper_bound(self, tmp_path: Path) -> None:
+        from scripts.generate_institutional_training_corpus import (
+            parse_validated_args,
+        )
+
+        approved = self._approved_dir(tmp_path)
+        try:
+            parse_validated_args(
+                [
+                    "--corpus-dir",
+                    str(approved),
+                    "--output",
+                    str(tmp_path / "out.jsonl"),
+                    "--eval-set",
+                    str(tmp_path / "eval.jsonl"),
+                    "--sessions",
+                    "999999",
+                ],
+                approved_corpus_roots=[tmp_path],
+                approved_output_roots=[tmp_path],
+            )
+        except ValueError as e:
+            assert "sessions" in str(e).lower()
+            return
+        raise AssertionError("--sessions above 5000 must raise")
+
+    def test_sessions_must_be_positive(self, tmp_path: Path) -> None:
+        from scripts.generate_institutional_training_corpus import (
+            parse_validated_args,
+        )
+
+        approved = self._approved_dir(tmp_path)
+        try:
+            parse_validated_args(
+                [
+                    "--corpus-dir",
+                    str(approved),
+                    "--output",
+                    str(tmp_path / "out.jsonl"),
+                    "--eval-set",
+                    str(tmp_path / "eval.jsonl"),
+                    "--sessions",
+                    "0",
+                ],
+                approved_corpus_roots=[tmp_path],
+                approved_output_roots=[tmp_path],
+            )
+        except ValueError:
+            return
+        raise AssertionError("--sessions=0 must raise")
+
+    def test_val_ratio_bounds(self, tmp_path: Path) -> None:
+        from scripts.generate_institutional_training_corpus import (
+            parse_validated_args,
+        )
+
+        approved = self._approved_dir(tmp_path)
+        for bad in ("0.0", "0.5", "0.9", "-0.1"):
+            try:
+                parse_validated_args(
+                    [
+                        "--corpus-dir",
+                        str(approved),
+                        "--output",
+                        str(tmp_path / "out.jsonl"),
+                        "--eval-set",
+                        str(tmp_path / "eval.jsonl"),
+                        "--sessions",
+                        "100",
+                        "--val-ratio",
+                        bad,
+                    ],
+                    approved_corpus_roots=[tmp_path],
+                    approved_output_roots=[tmp_path],
+                )
+            except ValueError:
+                continue
+            raise AssertionError(f"--val-ratio={bad} must raise")
+
+    def test_valid_args_pass(self, tmp_path: Path) -> None:
+        from scripts.generate_institutional_training_corpus import (
+            parse_validated_args,
+        )
+
+        approved = self._approved_dir(tmp_path)
+        ns = parse_validated_args(
+            [
+                "--corpus-dir",
+                str(approved),
+                "--output",
+                str(tmp_path / "out.jsonl"),
+                "--eval-set",
+                str(tmp_path / "eval.jsonl"),
+                "--sessions",
+                "1000",
+                "--val-ratio",
+                "0.05",
+                "--seed",
+                "42",
+            ],
+            approved_corpus_roots=[tmp_path],
+            approved_output_roots=[tmp_path],
+        )
+        # The validator returns the parsed args with paths already resolved.
+        assert ns.sessions == 1000
+        assert ns.val_ratio == 0.05
+        assert ns.seed == 42
+        assert ns.corpus_dir == approved.resolve()
+
+
+class TestAtomicWrite:
+    """Output JSONL writes go through ``write_atomic`` so a crash mid-write
+    cannot leave a partial file in ``data/training/``."""
+
+    def test_atomic_write_creates_file_with_restricted_permissions(
+        self, tmp_path: Path
+    ) -> None:
+        from scripts.generate_institutional_training_corpus import write_atomic
+
+        out = tmp_path / "out.jsonl"
+        write_atomic(out, "line1\nline2\n")
+        assert out.exists()
+        assert out.read_text(encoding="utf-8") == "line1\nline2\n"
+        # 0o600 = owner read/write only (DR4-001).
+        assert (out.stat().st_mode & 0o777) == 0o600
+
+    def test_atomic_write_does_not_leave_tmp_on_success(self, tmp_path: Path) -> None:
+        from scripts.generate_institutional_training_corpus import write_atomic
+
+        out = tmp_path / "out.jsonl"
+        write_atomic(out, "hello")
+        # No .tmp file lingers next to the final output.
+        assert list(tmp_path.glob("out.jsonl.tmp*")) == []
