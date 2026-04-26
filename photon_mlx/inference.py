@@ -111,6 +111,39 @@ def _masked_mean_along_time(
     return masked_sum / valid_count
 
 
+def _check_weight_initialization(model: PhotonModel, threshold: float) -> None:
+    """Issue #140 / S7-001: emit a WARNING when ``model.token_embed.weight``
+    looks like a fresh random init (σ above ``threshold``).
+
+    Behaviour (design judgement #2 / DR1-004):
+    * Silent skip when the model lacks ``token_embed`` (or ``weight``), when
+      ``weight`` is not an ``mx.array`` (e.g. ``MagicMock`` test doubles), or
+      when any attribute access raises — the start-up sanity check must NOT
+      break ``__init__`` for non-standard models.
+    * The WARNING records only ``σ`` and ``threshold`` (Issue #58 CB-002 /
+      Issue #64 CB-003 — never log tensor values or sample elements).
+    """
+    try:
+        embed_attr = getattr(model, "token_embed", None)
+        if embed_attr is None:
+            return
+        weight = getattr(embed_attr, "weight", None)
+        if not isinstance(weight, mx.array):
+            return
+        norm_std = float(mx.std(weight).item())
+        if norm_std > threshold:
+            _logger.warning(
+                "PHOTON embedding has high variance (σ=%.4f, threshold=%.4f) — "
+                "possibly random-init. Check model.checkpoint_path and load result "
+                "(Issue #135 / S7-001).",
+                norm_std,
+                threshold,
+            )
+    except Exception as exc:
+        _logger.debug("skip embedding init check (reason=%s)", type(exc).__name__)
+        return
+
+
 def _batch_cosine_similarity(
     query: mx.array,
     keys: mx.array,
@@ -182,6 +215,11 @@ class PhotonInference:
         self._working_memory_cfg: WorkingMemoryConfig | None | _UnsetType = (
             working_memory_cfg
         )
+
+        # Issue #140 / S7-001: start-up sanity check for the embedding norm.
+        # Runs last so all other state is initialised even if the check raises
+        # (it never should — silent skip — but keeping it last is defensive).
+        _check_weight_initialization(model, cfg.model.embedding_random_init_threshold)
 
     def get_session(
         self,
