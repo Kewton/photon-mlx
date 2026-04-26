@@ -1,0 +1,49 @@
+# Pre-commit hooks for PHOTON-RepoRAG (Issue #135 / DR4-006 機密漏洩防止).
+#
+# Setup:
+#   pip install pre-commit
+#   pre-commit install
+#   detect-secrets scan > .secrets.baseline   # one-time baseline
+#
+# After install, every `git commit` runs the hooks below; failures
+# block the commit. Skip in emergencies via `git commit --no-verify`
+# (discouraged — review the failure first).
+#
+# Why detect-secrets specifically: Issue #135 introduces JP institutional
+# documents (data/training/) into the workflow. While the corpus itself is
+# .gitignore'd, runtime configs / scripts could still leak API keys or
+# PII fragments. detect-secrets is the project-wide guard.
+
+repos:
+  # ----------------------------------------------------------------------
+  # Secret scanning (DR4-006): block accidental API key / token commits.
+  # ----------------------------------------------------------------------
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.5.0
+    hooks:
+      - id: detect-secrets
+        args: [--baseline, .secrets.baseline]
+        exclude: |
+          (?x)(
+              # Workspace artefacts (issue review JSON / design notes) often
+              # quote tool output verbatim and produce false positives.
+              ^workspace/.*\.json$
+            | ^workspace/.*\.md$
+              # Existing reports / docs may contain example tokens.
+            | ^reports/.*\.md$
+            | ^docs/.*\.md$
+              # Test fixtures may include tokenized example payloads.
+            | ^.*tests/.*\.json$
+              # The baseline file itself.
+            | \.secrets\.baseline$
+          )
+
+  # ----------------------------------------------------------------------
+  # Project lint / format (matches CLAUDE.md quality gates).
+  # ----------------------------------------------------------------------
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.6.9
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
