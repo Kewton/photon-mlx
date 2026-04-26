@@ -1,10 +1,15 @@
 """Shared pytest fixtures for photon_mlx tests.
 
-Provides a factory fixture that builds a stub tokenizer aligned with a
-:class:`PhotonConfig` instance.  The tokenizer mimics the byte-level stub
-used by :class:`baseline_reporag.photon_pipeline._StubTokenizer` so
-``PhotonInference(model, cfg, tokenizer)`` receives a single unified
-tokenizer instance in tests (Issue #58).
+Provides a factory fixture that builds a test-only stub tokenizer aligned
+with a :class:`PhotonConfig` instance.  The tokenizer encodes UTF-8 bytes
+modulo ``vocab_size`` and is used purely as a deterministic test fixture
+for ``PhotonInference(model, cfg, tokenizer)`` (Issue #58).
+
+This stub is local to the test module and is **not** the production
+tokenizer path. Production PHOTON pipelines use ``transformers.AutoTokenizer``
+loaded via ``baseline_reporag.photon_pipeline._load_hf_tokenizer``;
+test fixtures that omit a ``tokenizer:`` block previously fell back to a
+production stub which was removed in Issue #139.
 """
 
 from __future__ import annotations

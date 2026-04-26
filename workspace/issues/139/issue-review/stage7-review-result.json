@@ -1,0 +1,40 @@
+{
+  "stage": 7,
+  "stage_name": "影響範囲レビュー（2回目 / Codex）",
+  "focus": "影響範囲（2回目）",
+  "iteration": 2,
+  "reviewer": "codex",
+  "findings": [
+    {
+      "id": "S7-001",
+      "severity": "Should Fix",
+      "category": "テスト互換",
+      "title": "no-scaffolding test が pytest cwd に依存し、対象 0 件で偽 pass し得る",
+      "description": "Task 1 Step 3 のサンプルは `PROD_ROOTS = [Path('baseline_reporag'), ...]` とし、root が存在しない場合に `continue` する。pytest を repo root 以外の cwd から実行した場合、3 root すべてが存在しないまま violations 0 件で pass し、scaffolding 検出の CI gate として機能しない。",
+      "evidence": "workspace/issues/139/issue-review/updated-issue-body.md:71-86 (反映前); Stage 7 確認時の sample code は cwd 相対 path + missing root continue",
+      "suggested_fix": "`Path(__file__).resolve().parents[1]` から repo root を解決し、`REPO_ROOT / 'baseline_reporag'` 等を走査する。root が存在しない場合は skip ではなく assert failure にして、対象 0 件の偽 pass を防ぐ。"
+    },
+    {
+      "id": "S7-002",
+      "severity": "Should Fix",
+      "category": "運用",
+      "title": "tokenizer load failure の運用影響が troubleshooting に反映されていない",
+      "description": "S5-002 で `_build_photon_deps` 境界の tokenizer load failure を `ValueError` として固定する方針になったため、PHOTON config を使う server/CLI は pipeline build 時点で HF tokenizer load に失敗すると起動できない。現行 troubleshooting は `model.provider` と MLX の確認のみで、HF Hub 障害、gated model、未 cache、未 login の切り分けがない。",
+      "evidence": "baseline_reporag/server.py:82; baseline_reporag/cli.py:41; baseline_reporag/photon_pipeline.py:493; docs/troubleshooting.md:149-152",
+      "suggested_fix": "Issue の影響ファイルに `docs/troubleshooting.md` の tokenizer load failure 追記を明記する。内容は `tokenizer.tokenizer_id` 未設定だけでなく、HF Hub/network/gated model/cache/login/tokenizer_id 誤りを確認対象に含める。"
+    },
+    {
+      "id": "S7-003",
+      "severity": "Should Fix",
+      "category": "merge衝突",
+      "title": "#135 ブランチは現時点で実衝突しており、単なる rebase 推奨では不足",
+      "description": "Stage 3 では #135 と `_build_photon_deps` の近接行編集による rebase 推奨に留まっていたが、ローカル `feature/issue-135-photon-retrain` は `2dbf458` 後に `994ba29` まで進んでおり、`git merge-tree` で `baseline_reporag/photon_pipeline.py` と `baseline_reporag/tests/test_photon_pipeline.py` に conflict marker が出る。#135 側は stub tokenizer と `model.vocab_size` 前提の checkpoint load 変更を持つため、#139 側の real tokenizer / stub removal と手動統合が必要。",
+      "evidence": "`git log --oneline 2dbf458..feature/issue-135-photon-retrain --max-count=5` → 994ba29, 344caae, 34a833a...; `git merge-tree $(git merge-base HEAD feature/issue-135-photon-retrain) HEAD feature/issue-135-photon-retrain` → conflict markers in baseline_reporag/photon_pipeline.py and baseline_reporag/tests/test_photon_pipeline.py",
+      "suggested_fix": "PR 戦略に現時点の衝突状況を追記し、#135 rebase 時は #139 側の real tokenizer / stub removal を維持した上で、#135 側の `photon_mlx.checkpoint.load_checkpoint` 呼び出しを `PhotonModel` 構築後へ再適用する、と明記する。"
+    }
+  ],
+  "must_fix_count": 0,
+  "should_fix_count": 3,
+  "nice_to_have_count": 0,
+  "overall_assessment": "Stage 3 の影響範囲指摘 10 件は本文に反映済み。2回目影響範囲レビューでは、CI 偽 pass、PHOTON 起動時の tokenizer load 運用影響、#135 との具体的 merge conflict の 3 件を追加で検出した。"
+}

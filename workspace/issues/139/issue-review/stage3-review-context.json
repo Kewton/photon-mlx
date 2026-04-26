@@ -1,0 +1,19 @@
+{
+  "issue_number": "139",
+  "focus_area": "影響範囲",
+  "iteration": 1,
+  "stage": 3,
+  "stage_name": "影響範囲レビュー（1回目）",
+  "previous_stage_result": "workspace/issues/139/issue-review/stage1-review-result.json",
+  "previous_apply_result": "workspace/issues/139/issue-review/stage2-apply-result.json",
+  "hypothesis_verification_path": "workspace/issues/139/issue-review/hypothesis-verification.md",
+  "review_focus": [
+    "影響範囲: 本 Issue の変更が他モジュール / 他テスト / CI / 設定 / 後方互換性 にどう波及するか",
+    "破壊的変更: tokenizer_id 必須化 + raise への切替で既存 yaml / 既存テスト / 既存運用 が壊れないか",
+    "後方互換: production yaml で tokenizer_id が未設定のものはあるか (configs/*.yaml 全件)",
+    "CI 影響: 新規 invariant test と境界 test が weekly_eval.yml / pytest 経路でどう動くか",
+    "リリース影響: develop / main にマージ後、運用ドキュメント (docs/deployment.md, docs/troubleshooting.md) の更新要否",
+    "既存テスト互換性: photon_mlx/tests/conftest.py の test 用 _StubTokenizer は対象外のはずだが、新 invariant が誤検出しないか",
+    "並列マージ衝突: #135 (本格再学習) との merge conflict 可能性 (両方とも baseline_reporag/photon_pipeline.py を触る)"
+  ]
+}

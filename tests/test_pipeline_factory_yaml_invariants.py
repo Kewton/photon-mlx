@@ -76,3 +76,66 @@ def test_institutional_yaml_embedding_model_id_pinned() -> None:
     """``configs/institutional_docs.yaml`` embedding.model_id を採用後値に pin する。"""
     cfg = load_config(CONFIGS_DIR / "institutional_docs.yaml")
     assert cfg.indexing.embedding.model_id == INSTITUTIONAL_EMBEDDING_MODEL_ID
+
+
+# ---------------------------------------------------------------------------
+# Issue #139 — Phase A: PHOTON profile yaml must declare ``tokenizer.vocab_size``
+# and ``tokenizer.tokenizer_id`` so ``_build_photon_deps`` (which now raises
+# ValueError on missing tokenizer_id) cannot silently break a yaml. Phase B
+# (other ``getattr default`` patterns) is tracked separately.
+#
+# Hardening (Issue #139 / DR4-004): this test is **never** skipped or xfailed.
+# Adding ``@pytest.mark.skip`` / ``skipif`` / ``xfail`` here would re-open the
+# CI gate that the design closes — review must reject any such patch.
+# ---------------------------------------------------------------------------
+
+
+def _is_photon_profile_yaml(path: Path, cfg) -> bool:
+    """Return True if ``path`` is a PHOTON-profile yaml.
+
+    Filename judgment is the main signal — every PHOTON yaml in this repo is
+    named ``photon_*.yaml`` or ``institutional_docs_photon.yaml``. A
+    ``model.provider == 'photon'`` check is kept as a fallback so a future
+    yaml that follows a different naming scheme but still declares
+    ``provider=='photon'`` is also covered (DR Stage 1 / DR1-006).
+    """
+    name = path.name
+    if name.startswith("photon_") or name == "institutional_docs_photon.yaml":
+        return True
+    model_section = getattr(cfg, "model", None)
+    if model_section is None:
+        return False
+    return getattr(model_section, "provider", None) == "photon"
+
+
+def test_photon_yaml_has_required_tokenizer_fields() -> None:
+    """Every PHOTON-profile yaml in ``configs/`` must declare
+    ``tokenizer.vocab_size`` and ``tokenizer.tokenizer_id``.
+
+    Issue #139: ``_build_photon_deps`` raises ``ValueError`` if
+    ``tokenizer.tokenizer_id`` is missing or unsafe (the previous
+    ``_StubTokenizer`` fallback was deleted). This invariant test catches
+    yaml-side regressions at CI time so a future PR adding a new PHOTON
+    profile config without a ``tokenizer:`` block fails the merge gate
+    rather than the production server start-up.
+
+    ``tokenizer.vocab_size`` is the canonical embedding size (Issue #138)
+    and is also pinned here.
+
+    Non-PHOTON yaml (e.g. ``configs/baseline.yaml`` with provider=mlx_lm,
+    ``configs/eval.yaml`` benchmark runner config) are filtered out by
+    ``_is_photon_profile_yaml``.
+    """
+    failures: list[tuple[str, str]] = []
+    for yaml_path in sorted(CONFIGS_DIR.glob("*.yaml")):
+        cfg = load_config(yaml_path)
+        if not _is_photon_profile_yaml(yaml_path, cfg):
+            continue
+        tok = getattr(cfg, "tokenizer", None)
+        for key in ("vocab_size", "tokenizer_id"):
+            value = getattr(tok, key, None) if tok is not None else None
+            if value in (None, ""):
+                failures.append((str(yaml_path), f"tokenizer.{key}"))
+    assert not failures, (
+        f"PHOTON profile yaml missing required tokenizer fields: {failures}"
+    )
