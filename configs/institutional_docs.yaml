@@ -80,10 +80,14 @@ indexing:
     enabled: true
     provider: "local"
     # 注意 1: `#125` で baseline_reporag/indexing/embedding.py へ "query: "/"passage: " prefix
-    # 付与済、E5 本来性能を発揮 (handicap (a) 解消)。
-    model_id: "intfloat/multilingual-e5-small"
-    batch_size: 64
+    # 付与済 (E5 系のみ動作、bge-m3 は prefix なし passthrough)。
+    # #137 Phase B: 5-variant A/B (V0 e5-small, V1 e5-base, V2 ruri 計測不能,
+    # V3 bge-reranker swap, V4 bge-m3) で V4 採用 (NC -6.90pt vs V0 12.93%)。
+    # 詳細: reports/institutional_retrieval_ab.md
+    model_id: "BAAI/bge-m3"
+    batch_size: 32  # bge-m3 (1024dim) のため batch を縮小
     normalize: true
+    max_input_chars: 8192  # #137 V4: bge-m3 token 上限 8192 と整合 (chars ≒ 4096-8192 tokens)
 
   symbol_graph:
     # #109 で honor される。非 code 系 corpus のため無効化。
@@ -103,8 +107,10 @@ retrieval:
 
   reranker:
     enabled: true
-    # 注意 2: 英語 MS MARCO 学習モデルを継承。日本語 rerank で 5-10pt 下振れる可能性あり (handicap (b))。
-    model_id: "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    # 注意 2: #137 で多言語 reranker (bge-reranker-v2-m3) に切替済 (handicap (b) 解消)。
+    # global default は cross-encoder/ms-marco-MiniLM-L-6-v2 (#114 invariant test で保護)。
+    # institutional プロファイル限定で日本語制度文書向けに上書き。
+    model_id: "BAAI/bge-reranker-v2-m3"
     # #111 で外部化。FastAPI 向け _NOISE_PATTERNS fallback を抑止するため明示的に空 list。
     # 制度文書向け path-filter 候補は実データ調査後に別 Issue で追加。
     noise_patterns: []
