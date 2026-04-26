@@ -31,10 +31,13 @@ CONFIGS_DIR = Path(__file__).resolve().parent.parent / "configs"
 
 GLOBAL_DEFAULT_RERANKER_MODEL_ID = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
-# Issue #133 で採用 variant が決定したら以下を実値で埋め、@pytest.mark.skip を外す。
-# 採用判断は reports/institutional_retrieval_ab.md で行う。
-INSTITUTIONAL_RERANKER_MODEL_ID: str | None = None
-INSTITUTIONAL_EMBEDDING_MODEL_ID: str | None = None
+# Issue #137 Phase B: 5-variant A/B で V4 (bge-m3 + bge-reranker-v2-m3, 8192 chars)
+# 採用 (NC -6.90pt vs V0 12.93%、reports/institutional_retrieval_ab.md 参照)。
+# 定数を実値に置換することで skipif 条件 (is None) が False になり test が自動活性化する。
+INSTITUTIONAL_RERANKER_MODEL_ID: str | None = "BAAI/bge-reranker-v2-m3"
+INSTITUTIONAL_EMBEDDING_MODEL_ID: str | None = "BAAI/bge-m3"
+# Issue #137 V4 採用に伴い max_input_chars=8192 を pin (fallback 2048 への drift を防止)。
+INSTITUTIONAL_EMBEDDING_MAX_INPUT_CHARS: int | None = 8192
 
 
 def test_baseline_yaml_reranker_model_id_unchanged() -> None:
@@ -76,6 +79,26 @@ def test_institutional_yaml_embedding_model_id_pinned() -> None:
     """``configs/institutional_docs.yaml`` embedding.model_id を採用後値に pin する。"""
     cfg = load_config(CONFIGS_DIR / "institutional_docs.yaml")
     assert cfg.indexing.embedding.model_id == INSTITUTIONAL_EMBEDDING_MODEL_ID
+
+
+@pytest.mark.skipif(
+    INSTITUTIONAL_EMBEDDING_MAX_INPUT_CHARS is None,
+    reason="Issue #137: V4 (bge-m3 8192 chars) 採用時のみ有効化",
+)
+def test_institutional_yaml_embedding_max_input_chars_pinned() -> None:
+    """``configs/institutional_docs.yaml`` embedding.max_input_chars を採用値に pin する。
+
+    fallback 2048 への drift (config を編集して max_input_chars を消す等) を防ぐ。
+    cfg.indexing.embedding は Config オブジェクト (baseline_reporag/config.py) で
+    attribute access と .get() の両 API を提供する。max_input_chars は optional
+    フィールドのため、未宣言時に AttributeError を起こさない .get() 経路を採用
+    (build_indexes.py の getattr fallback パターンと整合)。
+    """
+    cfg = load_config(CONFIGS_DIR / "institutional_docs.yaml")
+    assert (
+        cfg.indexing.embedding.get("max_input_chars")
+        == INSTITUTIONAL_EMBEDDING_MAX_INPUT_CHARS
+    )
 
 
 # ---------------------------------------------------------------------------

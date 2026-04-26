@@ -1,0 +1,25 @@
+{
+  "stage": 4,
+  "applied_findings": [
+    {
+      "id": "DR4-001",
+      "applied": true,
+      "section": "§3 設計判断 #4 / §5 セキュリティ設計 / §7.5",
+      "note": "ISSUE の数値検証、Python `sys.argv[1]` 経由の path 受け渡し、invalid ISSUE の smoke test を追加した。"
+    },
+    {
+      "id": "DR4-002",
+      "applied": true,
+      "section": "§3 設計判断 #1 / §3 設計判断 #3 / §7.2 / §7.4 / §8",
+      "note": "ModelConfig.__post_init__ の閾値 validation 方針を追加し、test suppress 値を `float('inf')` から有限の `TEST_EMBEDDING_RANDOM_INIT_THRESHOLD = 1e9` に置き換えた。"
+    },
+    {
+      "id": "DR4-003",
+      "applied": true,
+      "section": "§3 設計判断 #4 / §5 セキュリティ設計",
+      "note": "reviewer 値は比較には raw value を使い、ログ出力前に制御文字を置換する方針へ変更した。"
+    }
+  ],
+  "applied_count": 3,
+  "skipped_count": 0
+}
