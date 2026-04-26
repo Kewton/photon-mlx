@@ -20,7 +20,7 @@ from .checkpoint import (
     load_checkpoint as _ckpt_load,
     save_checkpoint as _ckpt_save,
 )
-from .data import iterate_batches
+from .data import iterate_batches, iterate_mixed_batches
 from .loss import photon_loss
 from .model import PhotonModel
 
@@ -231,8 +231,17 @@ def train(
     checkpoint_dir: str | Path,
     log_dir: str | Path,
     resume_from: str | Path | None = None,
+    *,
+    approved_roots: list[str | Path] | None = None,
 ) -> TrainState:
-    """Full training loop driven by cfg.training."""
+    """Full training loop driven by cfg.training.
+
+    ``approved_roots`` is forwarded to ``iterate_mixed_batches`` when
+    ``cfg.training.train_corpora_mix`` is set; production runs leave it
+    ``None`` so the loader falls back to the production allow-list
+    (``data/training/`` + ``data/processed/``). Tests pass tmp paths
+    here to bypass the production guard without disabling DR4-002.
+    """
     h_cfg = cfg.hierarchy
 
     # Training config (use defaults if not provided)
@@ -269,15 +278,49 @@ def train(
     max_grad_norm = t_cfg.max_grad_norm
 
     # Data
-    print("Loading training data...")
-    train_batches = iterate_batches(t_cfg.train_corpus, context_length, batch_size)
-    print(f"  {len(train_batches)} train batches")
+    if t_cfg.train_corpora_mix is not None:
+        # Issue #135 / Phase 4: mixed-corpus path. iterate_mixed_batches
+        # builds an independent sequence pool per corpus, weighted-samples
+        # at sequence level, and (when val_split > 0) returns a (train, val)
+        # tuple drawn from the same shuffled mixture so train/val share
+        # the train_corpora_mix ratio (DR1-005). Strict validation
+        # (DR1-003 / DR4-002) lives in iterate_mixed_batches; cfg-side
+        # checks already ran in TrainingConfig.__post_init__.
+        print("Loading mixed training data...")
+        result = iterate_mixed_batches(
+            t_cfg.train_corpora_mix,
+            context_length=context_length,
+            batch_size=batch_size,
+            vocab_size=cfg.tokenizer.vocab_size,
+            val_split=t_cfg.val_split,
+            approved_roots=approved_roots,
+        )
+        if t_cfg.val_split > 0.0:
+            train_batches, val_batches = result  # type: ignore[misc]
+        else:
+            train_batches = result  # type: ignore[assignment]
+            # Legacy single val_corpus is allowed alongside a mix when
+            # val_split=0 — e.g. an external val set held out from the
+            # training mixture entirely.
+            val_batches = (
+                iterate_batches(
+                    t_cfg.val_corpus, context_length, batch_size, shuffle=False
+                )
+                if t_cfg.val_corpus
+                else []
+            )
+        print(f"  {len(train_batches)} train batches (mixed)")
+        print(f"  {len(val_batches)} val batches")
+    else:
+        print("Loading training data...")
+        train_batches = iterate_batches(t_cfg.train_corpus, context_length, batch_size)
+        print(f"  {len(train_batches)} train batches")
 
-    print("Loading validation data...")
-    val_batches = iterate_batches(
-        t_cfg.val_corpus, context_length, batch_size, shuffle=False
-    )
-    print(f"  {len(val_batches)} val batches")
+        print("Loading validation data...")
+        val_batches = iterate_batches(
+            t_cfg.val_corpus, context_length, batch_size, shuffle=False
+        )
+        print(f"  {len(val_batches)} val batches")
 
     if not train_batches:
         raise ValueError("No training batches. Check corpus and context_length.")

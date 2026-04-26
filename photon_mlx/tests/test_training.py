@@ -904,3 +904,56 @@ class TestLongContextModelInit:
         model = PhotonModel(cfg)
         # Touch the top-level RoPE table to confirm it got allocated.
         assert model._rope_cos.shape[0] == 65536
+
+
+# ---------------------------------------------------------------
+# Issue #135 / Phase 4: train() dispatches to iterate_mixed_batches
+# ---------------------------------------------------------------
+
+
+class TestTrainerMixedDispatch:
+    """When ``t_cfg.train_corpora_mix`` is set, train() must route data
+    loading through ``iterate_mixed_batches`` (Phase 3 result + Phase 4-1
+    schema combined). When the field is None, the legacy
+    ``iterate_batches`` path stays unchanged so #135 doesn't regress
+    existing single-corpus configs.
+    """
+
+    def test_train_uses_mixed_batches_when_mix_set(self, tmp_path: Path) -> None:
+        """train() with train_corpora_mix runs end-to-end and produces a checkpoint."""
+        # Two tiny corpora; weights sum to 1.0 (DR1-003).
+        a_path = tmp_path / "a.jsonl"
+        b_path = tmp_path / "b.jsonl"
+        _write_dummy_corpus(a_path, n_docs=20, seq_len=32)
+        _write_dummy_corpus(b_path, n_docs=20, seq_len=32)
+
+        cfg = _tiny_train_cfg(
+            tmp_path,
+            max_steps=4,
+            eval_every_steps=100,
+            save_every_steps=100,
+            log_every_steps=100,
+        )
+        cfg.training.train_corpora_mix = {str(a_path): 0.5, str(b_path): 0.5}
+        cfg.training.val_split = 0.1
+        # Tests live outside data/training/ so override the default
+        # approved root list (DR4-002 production guard) for tmp_path.
+        cfg.training.train_corpus = ""
+        cfg.training.val_corpus = ""
+
+        state = train(
+            cfg,
+            checkpoint_dir=tmp_path / "ckpt",
+            log_dir=tmp_path / "logs",
+            approved_roots=[tmp_path],
+        )
+        assert state.step == 4
+        assert (tmp_path / "ckpt" / "final").exists()
+
+    def test_train_legacy_path_when_mix_unset(self, tmp_path: Path) -> None:
+        """train_corpora_mix=None → legacy iterate_batches path unchanged."""
+        cfg = _tiny_train_cfg(tmp_path, max_steps=4)
+        # Confirm the schema default is None (Phase 4-1 contract).
+        assert cfg.training.train_corpora_mix is None
+        state = train(cfg, checkpoint_dir=tmp_path / "ckpt", log_dir=tmp_path / "logs")
+        assert state.step == 4
