@@ -10,7 +10,9 @@
 | **Storage** | ~10 GB (model + indexes) | 20 GB+ |
 
 > The Qwen2.5-Coder-14B-Instruct-4bit model loads approximately 8 GB into memory.
-> Sentence-transformers embedding model and cross-encoder reranker require additional ~1 GB.
+> Sentence-transformers embedding model and cross-encoder reranker require additional memory:
+> - **Global default profile** (`configs/baseline.yaml`, `all-MiniLM-L6-v2` + `ms-marco-MiniLM-L-6-v2`): ~1 GB
+> - **Institutional profile** (`configs/institutional_docs.yaml`, `BAAI/bge-m3` + `BAAI/bge-reranker-v2-m3` post-#137): **~5-6 GB** (bge-m3 ~2.3 GB + bge-reranker-v2-m3 ~2.3 GB resident).
 
 ---
 
@@ -85,7 +87,9 @@ The main configuration file is `configs/baseline.yaml`.
 | Section | Parameter | Default | Description |
 |---------|-----------|---------|-------------|
 | `model.model_id` | LLM model | `mlx-community/Qwen2.5-Coder-14B-Instruct-4bit` | Auto-downloaded on first run |
-| `retrieval.reranker.model_id` | Reranker | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Auto-downloaded on first run |
+| `retrieval.reranker.model_id` | Reranker (global default) | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Auto-downloaded on first run |
+| `retrieval.reranker.model_id` (institutional) | Reranker for institutional profile | `BAAI/bge-reranker-v2-m3` | Used by `configs/institutional_docs.yaml` (#137) |
+| `indexing.embedding.model_id` (institutional) | Embedding for institutional profile | `BAAI/bge-m3` | Used by `configs/institutional_docs.yaml` (#137), `max_input_chars=8192` |
 | `retrieval.weights` | Fusion weights | lexical: 0.45, embedding: 0.45, graph: 0.10 | Hybrid retrieval blending |
 | `retrieval.rerank_top_k` | Rerank cutoff | 12 | Number of chunks after reranking |
 | `evidence_pack.max_chunks` | Max evidence chunks | 16 | Reduce to save memory |
