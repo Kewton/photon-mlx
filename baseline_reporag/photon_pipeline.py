@@ -292,9 +292,27 @@ def _build_photon_deps(cfg: Config) -> dict[str, Any]:
         encoder_layers_per_level=cfg.hierarchy.encoder_layers_per_level,
         decoder_layers_per_level=cfg.hierarchy.decoder_layers_per_level,
     )
-    tok_cfg = TokenizerConfig(
-        vocab_size=cfg.model.get("vocab_size", 1000),
+    # Issue #138: ``tokenizer.vocab_size`` is the canonical source for
+    # production photon configs (institutional_docs_photon.yaml,
+    # photon_small.yaml, photon_long_context.yaml all set it under the
+    # ``tokenizer:`` block). The legacy ``model.vocab_size`` lookup is kept
+    # as a fallback so the ~17 unit tests that pre-date the
+    # ``tokenizer:`` section keep working without modification.
+    tokenizer_section = cfg.get("tokenizer")
+    tokenizer_id: str | None = (
+        getattr(tokenizer_section, "tokenizer_id", None)
+        if tokenizer_section is not None
+        else None
     )
+    cfg_vocab_size: int
+    if (
+        tokenizer_section is not None
+        and getattr(tokenizer_section, "vocab_size", None) is not None
+    ):
+        cfg_vocab_size = tokenizer_section.vocab_size
+    else:
+        cfg_vocab_size = cfg.model.get("vocab_size", 1000)
+    tok_cfg = TokenizerConfig(vocab_size=cfg_vocab_size)
     photon_cfg = PhotonConfig(
         model=model_cfg,
         hierarchy=hierarchy_cfg,
@@ -303,8 +321,26 @@ def _build_photon_deps(cfg: Config) -> dict[str, Any]:
 
     # Build the tokenizer before PhotonInference so both paths (question+evidence
     # prefill in PhotonRAGPipeline and chunk scoring in prune_evidence) share
-    # the same stub instance (Issue #58).
-    tokenizer = _get_stub_tokenizer(photon_cfg.tokenizer.vocab_size)
+    # the same instance (Issue #58).
+    #
+    # Issue #138 fix: when ``tokenizer.tokenizer_id`` is set we MUST load the
+    # matching HuggingFace tokenizer so training and inference encode text the
+    # same way. The previous unconditional ``_StubTokenizer`` (UTF-8
+    # byte-mod-vocab encoding) silently diverged from the real Qwen subword
+    # vocabulary used by ``scripts/generate_training_corpus.py``, which would
+    # have made any re-trained PHOTON checkpoint return garbage at inference
+    # time. ``_StubTokenizer`` is retained only as a fallback for legacy
+    # test fixtures that omit the ``tokenizer:`` block (and is not reachable
+    # from production photon configs).
+    if tokenizer_id:
+        tokenizer = _load_hf_tokenizer(tokenizer_id, photon_cfg.tokenizer.vocab_size)
+    else:
+        _logger.warning(
+            "config.tokenizer.tokenizer_id is unset; falling back to "
+            "_StubTokenizer (test/dev only — production photon configs "
+            "must set tokenizer_id, Issue #138)."
+        )
+        tokenizer = _get_stub_tokenizer(photon_cfg.tokenizer.vocab_size)
     model = PhotonModel(photon_cfg)
     # Issue #64 / Codex CB-001: extract working memory policy once, pass it
     # into PhotonInference alongside the Issue #63 drift_level_weights below.
@@ -428,6 +464,47 @@ class _StubTokenizer:
 
 def _get_stub_tokenizer(vocab_size: int) -> _StubTokenizer:
     return _StubTokenizer(vocab_size)
+
+
+def _load_hf_tokenizer(tokenizer_id: str, expected_vocab_size: int) -> Any:
+    """Load the HuggingFace ``AutoTokenizer`` matched to ``tokenizer_id``.
+
+    Issue #138: training (``scripts/generate_training_corpus.py``) loads a
+    real Qwen subword tokenizer, but inference previously used the
+    byte-mod ``_StubTokenizer``. A re-trained PHOTON checkpoint would then
+    receive garbage token streams at inference. This helper is the single
+    production code path that builds the inference-side tokenizer, and it
+    enforces:
+
+    - vocab_size parity between the loaded tokenizer and ``photon_cfg``,
+      so the embedding matrix and tokenizer agree on row count;
+    - a non-None ``pad_token_id`` so ``tokenize_evidence_pack`` can
+      chunk-align via padding without raising ``TypeError`` on tokenizers
+      that ship without a pad token (Qwen / GPT-style families).
+    """
+    try:
+        from transformers import AutoTokenizer
+    except ImportError as exc:  # pragma: no cover - dependency-time error
+        raise ImportError(
+            "transformers is required for PHOTON inference (Issue #138). "
+            "Install it via `pip install transformers`."
+        ) from exc
+
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_id, trust_remote_code=False)
+    actual_vocab_size = getattr(tokenizer, "vocab_size", None)
+    if actual_vocab_size is not None and actual_vocab_size != expected_vocab_size:
+        raise ValueError(
+            "tokenizer vocab_size mismatch (Issue #138): "
+            f"tokenizer={actual_vocab_size} cfg={expected_vocab_size}. "
+            "Update cfg.tokenizer.vocab_size to match the loaded tokenizer."
+        )
+    if getattr(tokenizer, "pad_token_id", None) is None:
+        eos_id = getattr(tokenizer, "eos_token_id", None)
+        if eos_id is not None:
+            tokenizer.pad_token_id = eos_id
+        else:
+            tokenizer.pad_token_id = 0
+    return tokenizer
 
 
 def _clear_photon_session_state(photon_inference: Any, session_id: str) -> None:

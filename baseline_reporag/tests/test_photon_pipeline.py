@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from baseline_reporag.generation.evidence_pack import build_evidence_pack
 
 # ---------------------------------------------------------------------------
@@ -499,6 +501,182 @@ class TestBuildPhotonDeps:
         cfg = load_config(str(cfg_file))
         deps = _build_photon_deps(cfg)
         assert deps["safe_recgen"] is None
+
+
+# ---------------------------------------------------------------------------
+# Issue #138: training/inference tokenizer must be unified
+# ---------------------------------------------------------------------------
+
+
+class TestBuildPhotonDepsRealTokenizer:
+    """``_build_photon_deps`` must load the real HuggingFace tokenizer when
+    ``cfg.tokenizer.tokenizer_id`` is set, instead of the byte-mod
+    ``_StubTokenizer`` (which caused the training/inference mismatch
+    documented in Issue #138).
+    """
+
+    def test_loads_real_tokenizer_when_tokenizer_id_set(self, tmp_path):
+        from baseline_reporag.config import load_config
+        from baseline_reporag.photon_pipeline import (
+            _StubTokenizer,
+            _build_photon_deps,
+        )
+
+        cfg_file = tmp_path / "photon.yaml"
+        cfg_file.write_text(
+            "model:\n"
+            "  provider: photon\n"
+            "  architecture: photon_decoder\n"
+            "  base_embed_dim: 64\n"
+            "  hidden_size: 128\n"
+            "  intermediate_size: 256\n"
+            "  num_heads: 4\n"
+            "hierarchy:\n"
+            "  levels: 2\n"
+            "  chunk_sizes: [4, 4]\n"
+            "  encoder_layers_per_level: [2, 2]\n"
+            "  decoder_layers_per_level: [2, 2]\n"
+            "tokenizer:\n"
+            '  tokenizer_id: "fake-org/fake-tokenizer"\n'
+            "  vocab_size: 152064\n"
+            "inference:\n"
+            "  hierarchical_prefill: true\n"
+            "  safe_recgen_enabled: false\n"
+        )
+        cfg = load_config(str(cfg_file))
+
+        fake_tokenizer = MagicMock()
+        fake_tokenizer.vocab_size = 152064
+        fake_tokenizer.pad_token_id = 0
+        fake_tokenizer.encode.return_value = [1, 2, 3]
+
+        with patch(
+            "transformers.AutoTokenizer.from_pretrained",
+            return_value=fake_tokenizer,
+        ) as mock_from_pretrained:
+            deps = _build_photon_deps(cfg)
+
+        mock_from_pretrained.assert_called_once_with(
+            "fake-org/fake-tokenizer", trust_remote_code=False
+        )
+        assert deps["tokenizer"] is fake_tokenizer
+        assert not isinstance(deps["tokenizer"], _StubTokenizer)
+        assert deps["photon_cfg"].tokenizer.vocab_size == 152064
+
+    def test_vocab_size_mismatch_raises(self, tmp_path):
+        from baseline_reporag.config import load_config
+        from baseline_reporag.photon_pipeline import _build_photon_deps
+
+        cfg_file = tmp_path / "photon.yaml"
+        cfg_file.write_text(
+            "model:\n"
+            "  provider: photon\n"
+            "  architecture: photon_decoder\n"
+            "  base_embed_dim: 64\n"
+            "  hidden_size: 128\n"
+            "  intermediate_size: 256\n"
+            "  num_heads: 4\n"
+            "hierarchy:\n"
+            "  levels: 2\n"
+            "  chunk_sizes: [4, 4]\n"
+            "  encoder_layers_per_level: [2, 2]\n"
+            "  decoder_layers_per_level: [2, 2]\n"
+            "tokenizer:\n"
+            '  tokenizer_id: "fake-org/fake-tokenizer"\n'
+            "  vocab_size: 152064\n"
+            "inference:\n"
+            "  hierarchical_prefill: true\n"
+            "  safe_recgen_enabled: false\n"
+        )
+        cfg = load_config(str(cfg_file))
+
+        fake_tokenizer = MagicMock()
+        fake_tokenizer.vocab_size = 32000  # mismatch
+        fake_tokenizer.pad_token_id = 0
+
+        with patch(
+            "transformers.AutoTokenizer.from_pretrained",
+            return_value=fake_tokenizer,
+        ):
+            with pytest.raises(ValueError, match="vocab_size"):
+                _build_photon_deps(cfg)
+
+    def test_falls_back_to_stub_when_tokenizer_id_missing(self, tmp_path):
+        """Test/dev configs without ``tokenizer.tokenizer_id`` keep the stub
+        path so the existing 17 unit tests remain hermetic (no network).
+        Production configs always set ``tokenizer_id`` and therefore never
+        reach this branch (Issue #138)."""
+        from baseline_reporag.config import load_config
+        from baseline_reporag.photon_pipeline import (
+            _StubTokenizer,
+            _build_photon_deps,
+        )
+
+        cfg_file = tmp_path / "photon.yaml"
+        cfg_file.write_text(
+            "model:\n"
+            "  provider: photon\n"
+            "  architecture: photon_decoder\n"
+            "  base_embed_dim: 64\n"
+            "  hidden_size: 128\n"
+            "  intermediate_size: 256\n"
+            "  num_heads: 4\n"
+            "  vocab_size: 1000\n"
+            "hierarchy:\n"
+            "  levels: 2\n"
+            "  chunk_sizes: [4, 4]\n"
+            "  encoder_layers_per_level: [2, 2]\n"
+            "  decoder_layers_per_level: [2, 2]\n"
+            "inference:\n"
+            "  hierarchical_prefill: true\n"
+            "  safe_recgen_enabled: false\n"
+        )
+        cfg = load_config(str(cfg_file))
+        deps = _build_photon_deps(cfg)
+        assert isinstance(deps["tokenizer"], _StubTokenizer)
+
+    def test_institutional_docs_photon_uses_tokenizer_section_vocab(self, tmp_path):
+        """``cfg.tokenizer.vocab_size`` (152064) must drive PhotonModel sizing,
+        not ``cfg.model.vocab_size`` (which is unset in production photon
+        configs and would silently fall back to a 1000-vocab embedding —
+        the latent half of the Issue #138 mismatch)."""
+        from baseline_reporag.config import load_config
+        from baseline_reporag.photon_pipeline import _build_photon_deps
+
+        cfg_file = tmp_path / "photon.yaml"
+        cfg_file.write_text(
+            "model:\n"
+            "  provider: photon\n"
+            "  architecture: photon_decoder\n"
+            "  base_embed_dim: 64\n"
+            "  hidden_size: 128\n"
+            "  intermediate_size: 256\n"
+            "  num_heads: 4\n"
+            "hierarchy:\n"
+            "  levels: 2\n"
+            "  chunk_sizes: [4, 4]\n"
+            "  encoder_layers_per_level: [2, 2]\n"
+            "  decoder_layers_per_level: [2, 2]\n"
+            "tokenizer:\n"
+            '  tokenizer_id: "fake-org/qwen-like"\n'
+            "  vocab_size: 152064\n"
+            "inference:\n"
+            "  hierarchical_prefill: true\n"
+            "  safe_recgen_enabled: false\n"
+        )
+        cfg = load_config(str(cfg_file))
+
+        fake_tokenizer = MagicMock()
+        fake_tokenizer.vocab_size = 152064
+        fake_tokenizer.pad_token_id = 0
+
+        with patch(
+            "transformers.AutoTokenizer.from_pretrained",
+            return_value=fake_tokenizer,
+        ):
+            deps = _build_photon_deps(cfg)
+
+        assert deps["photon_cfg"].tokenizer.vocab_size == 152064
 
 
 # ---------------------------------------------------------------------------
