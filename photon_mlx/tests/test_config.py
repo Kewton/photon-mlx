@@ -310,3 +310,50 @@ class TestTrainingConfigCorporaMix:
         """val_split=0 means "no train-pool split" (legacy single-corpus path)."""
         t = TrainingConfig(val_split=0.0)
         assert t.val_split == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Issue #135 / Phase 4-3: institutional_docs_photon_retrain.yaml shape
+# ---------------------------------------------------------------------------
+
+
+def test_institutional_retrain_yaml_loads_with_expected_hyperparams(
+    tmp_path: Path,
+) -> None:
+    """Pin the retrain yaml's key knobs so silent edits surface in CI.
+
+    The retrain yaml is the source of truth for Issue #135's training
+    hyperparameters; if any of these drift, eval comparisons against
+    earlier runs become invalid. We assert the values that the design
+    policy nailed down (S5-001 lr / DR1-005 val_split / DR1-003 mix
+    sums to 1) rather than every line, so harmless edits to comments
+    or repo paths don't churn this test.
+    """
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    cfg_path = repo_root / "configs" / "institutional_docs_photon_retrain.yaml"
+    assert cfg_path.exists(), f"missing: {cfg_path}"
+
+    from torch_ref.config import load_photon_config
+
+    cfg = load_photon_config(str(cfg_path))
+
+    t = cfg.training
+    # S5-001 / DR2-009: cosine_decay 経路に乗るには min_lr > 0 必須。
+    assert t.learning_rate == 3.0e-5
+    assert t.min_learning_rate == 3.0e-6
+    assert t.warmup_ratio == 0.0
+    # DR1-005 / S5-002 reflected.
+    assert t.val_split == 0.05
+    assert t.max_steps >= 10000  # 10K-20K range; concrete value is per-run
+    # S5-004 reflected: micro_batch * grad_accum = effective batch 32.
+    assert t.micro_batch_size == 2
+    assert t.gradient_accumulation_steps == 16
+    # DR1-003: train_corpora_mix must be a non-empty dict summing to 1.0.
+    mix = t.train_corpora_mix
+    assert mix is not None and len(mix) == 2
+    assert abs(sum(mix.values()) - 1.0) < 1e-6
+    # Both keys must point under data/training/ (DR4-002 approved root).
+    for path in mix:
+        assert path.startswith("./data/training/"), (
+            f"corpus path must be under ./data/training/ (DR4-002), got {path}"
+        )

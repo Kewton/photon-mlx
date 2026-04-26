@@ -1,0 +1,336 @@
+# 制度文書 (institutional_documents) corpus PHOTON 再学習用 config。
+#
+# - Issue #135 専用。`configs/institutional_docs_photon.yaml` (旧) は
+#   #112/#126 ベースライン eval 再現性のため温存し、本 yaml は別ファイルとして
+#   分離する (S3-007 / DR3-007 に従う)。差分は training セクション + model
+#   セクションの一部に限定。
+# - training:
+#   - train_corpora_mix で mulmoclaude (英語コード) 50% / JP institutional 50%
+#     を混合 (DR1-005: val_corpora_mix dict は廃止し val_split で train pool
+#     内分割)。実 corpus は `data/training/` 配下に配置 (gitignore)。
+#   - 累計 step 採用 (S5-002): max_steps は state.step の通算値。既存 mulmoclaude
+#     600 step から 10K 追加するなら max_steps=10600 を指定し、
+#     `model.checkpoint_path` を resume_from の起点として渡す。
+#   - LR schedule (S5-001): lr=3e-5 → min_lr=3e-6 cosine decay。warmup_ratio=0.0
+#     のため _build_lr_schedule は cosine_decay 単体を返し、初回 step は lr=3e-5
+#     から開始。`min_lr=0` だと constant LR fallback に乗るので 0 にしない (DR2-009)。
+# - model.checkpoint_path: 本格再学習成果物の load 経路。Day 5 採用判定後に
+#   `./checkpoints/photon_institutional_step<NNNNNN>_<yyyymmdd>/` を埋める。
+#   現在は未確定なのでコメントアウト。S7-001: PHOTON eval は random-init weights
+#   を避けるため、本ファイル使用前に必ず checkpoint_path を埋める。
+# - DR4-003 integrity.json による checkpoint 改竄検出は `photon_mlx.checkpoint`
+#   が自動で実施 (本 yaml に追加設定不要)。
+
+version: 1
+
+project:
+  name: "photon-reporag"
+  mode: "institutional_docs"
+
+run:
+  name_prefix: "institutional_docs_retrain"
+  seed: 42
+  deterministic: true
+
+paths:
+  data_root: "./data"
+  raw_root: "./data/raw"
+  processed_root: "./data/processed"
+  index_root: "./data/indexes"
+  eval_root: "./data/eval_sets"
+  log_root: "./logs"
+  report_root: "./reports"
+  checkpoint_root: "./checkpoints"
+  cache_root: "./.cache"
+
+runtime:
+  device: "auto"
+  dtype: "float16"
+  num_workers: 8
+  profile_latency: true
+  profile_memory: true
+  compile_decode_step: true
+
+repo:
+  repo_id: "institutional_documents"
+  repo_path: "/Users/maenokota/share/work/github_kewton/myWebData/markdowndb/institutional_documents"
+  # sentinel: sha1("institutional_v1") の 40 字 hex。非 git repo のため scripts/ingest_repo.py の
+  # resolve_commit() が len>=40 で git 呼び出しを skip する挙動を利用。ingest 時 --commit と同値にする。
+  repo_commit: "9e500539f29555364217b773368305e7f59aa026"
+  # 4228 md のみ対象。FastAPI 向け code 拡張子・docs/*/docs/** exclude 等は継承させない。
+  include:
+    - "**/*.md"
+  exclude:
+    - "**/.git/**"
+
+ingestion:
+  chunking:
+    # Issue 本文原則『dead key を書かない』に従い、chunking.strategy 行は省略。
+    # #109 以降、.md 自動 dispatch により chunker は language="markdown" を使う。
+    # #126 で 4-variant A/B 実施し short(800) を採用 (handicap (c) 解消):
+    #   - SHORT (800/100):  NC 11.21% (採用、article_lookup regression 完全解消)
+    #   - MEDIUM (1200/150): NC 12.93%
+    #   - BASE (2400/300):  NC 14.66% (post-#125)
+    # 詳細は reports/institutional_chunker_size_ab.md (#126) 参照。
+    max_chars: 800
+    overlap_chars: 100
+    max_lines: 40
+    overlap_lines: 4
+    keep_function_boundary: true
+    keep_class_boundary: true
+    attach_section_headers: true
+    attach_file_header: true
+
+indexing:
+  lexical:
+    enabled: true
+    engine: "bm25"
+
+  embedding:
+    enabled: true
+    provider: "local"
+    # 注意 1: `#125` で baseline_reporag/indexing/embedding.py へ "query: "/"passage: " prefix
+    # 付与済、E5 本来性能を発揮 (handicap (a) 解消)。
+    model_id: "intfloat/multilingual-e5-small"
+    batch_size: 64
+    normalize: true
+
+  symbol_graph:
+    # #109 で honor される。非 code 系 corpus のため無効化。
+    enabled: false
+
+retrieval:
+  mode: "hybrid"
+  lexical_top_k: 20
+  embedding_top_k: 20
+  fused_top_k: 16
+  rerank_top_k: 12
+
+  weights:
+    lexical: 0.45
+    embedding: 0.45
+    graph: 0.10
+
+  reranker:
+    enabled: true
+    # 注意 2: 英語 MS MARCO 学習モデルを継承。日本語 rerank で 5-10pt 下振れる可能性あり (handicap (b))。
+    model_id: "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    # #111 で外部化。FastAPI 向け _NOISE_PATTERNS fallback を抑止するため明示的に空 list。
+    # 制度文書向け path-filter 候補は実データ調査後に別 Issue で追加。
+    noise_patterns: []
+
+  file_type_boost: 0.0
+
+  query_expansion:
+    enabled: true
+    include_symbol_aliases: true
+    include_filename_hints: true
+    # #111 で外部化。FastAPI 向け _JP_TO_CODE fallback を抑止するため明示的に空 dict。
+    domain_map: {}
+
+  neighborhood_expansion:
+    enabled: true
+    before: 1
+    after: 1
+
+  graph_expansion:
+    enabled: true
+    max_hops: 1
+    max_nodes: 24
+
+  two_pass_search:
+    enabled: false
+    pass1_top_k: 64
+    pass2_top_k: 16
+
+evidence_pack:
+  max_chunks: 16
+  max_tokens: 16000
+  include_neighbors: true
+  include_section_headers: true
+
+  local_refresh:
+    enabled: true
+    top_k: 4
+    refresh_before_answer: true
+    refresh_on_exact_quote: true
+    refresh_on_diff_or_patch: true
+
+session_memory:
+  mode: "photon"
+  max_turns: 8
+  summary_max_tokens: 800
+  pin_recent_chunks_max: 8
+  pin_cited_chunks_max: 12
+  track_topic_state: true
+
+  working_memory:
+    enabled: true
+    max_turns: 8
+    decay_factor: 0.5
+    relevant_turn_threshold: 0.7
+    storage_mode: "full"
+    aggregation: weighted
+    past_turn_pinning_enabled: false
+    max_pinned_chunks: 3
+
+tokenizer:
+  tokenizer_id: "mlx-community/Qwen2.5-Coder-14B-Instruct-4bit"
+  vocab_size: 152064
+
+model:
+  architecture: "photon_decoder"
+
+  # **重要**: 本 Issue は baseline Static NC 実測のため provider=baseline に設定。
+  # pipeline_factory.py:52-72 は provider=baseline で `_build_baseline_deps_no_mlx` 経由の
+  # 純 baseline pipeline を返す。#113 PHOTON 測定時はこの行を "photon" に切替える。
+  provider: "photon"
+  model_id: "mlx-community/Qwen2.5-Coder-14B-Instruct-4bit"
+
+  # PHOTON-specific: 本 Issue baseline では参照されないが、#113 切替時のため継承値を保持。
+  base_embed_dim: 256
+  hidden_size: 1024
+  intermediate_size: 2816
+
+generation:
+  max_new_tokens: 768
+  temperature: 0.2
+  top_p: 0.9
+  repetition_penalty: 1.05
+  do_sample: false
+
+  num_attention_heads: 16
+  num_key_value_heads: 16
+  head_dim: 64
+
+  max_position_embeddings: 2048
+  rope_theta: 1000000.0
+  norm_eps: 0.00001
+  tie_word_embeddings: false
+  dropout: 0.0
+  bias: false
+
+hierarchy:
+  levels: 2
+  chunk_sizes: [4, 4]
+  converter_prefix_lengths: [2, 2]
+
+  chunker:
+    level1_type: "concat"
+    upper_type: "linear"
+
+  encoder_layers_per_level: [3, 3]
+  decoder_layers_per_level: [3, 3]
+
+  context_encoder_arch: "llama_decoder_style"
+  context_decoder_arch: "llama_decoder_style"
+  context_converter_type: "conv1d"
+
+  recursive_loss_weight: 0.0
+  bottleneck_consistency_target: "top_level"
+
+training:
+  enabled: true
+  stage: "small"
+
+  # Issue #135 / Phase 4-1: 混合 corpus 学習 (DR1-005 簡素化版)。
+  # - train_corpora_mix の sum は 1.0 (±1e-6) 必須。TrainingConfig.__post_init__ が
+  #   strict 検証する (DR1-003)。
+  # - 実 corpus は data/training/ 配下に配置 (gitignore)。本 commit 時点で
+  #   ファイル本体は未生成 — Phase 2 で
+  #   `scripts/generate_institutional_training_corpus.py` を作成し、実行は
+  #   #137 完了後にユーザー承認のもと走らせる。
+  # - val_split=0.05: train pool の 5% を sequence-level で hold-out。train/val
+  #   は同じ corpora ratio を共有する (DR1-005)。
+  train_corpora_mix:
+    "./data/training/institutional/train_jp.jsonl": 0.5
+    "./data/training/mulmoclaude/train_en.jsonl": 0.5
+  val_split: 0.05
+
+  # Legacy single-corpus fields。train_corpora_mix が設定されているため、
+  # trainer は混合経路に dispatch する。後方互換のため残置するが本 config
+  # では参照されない。
+  train_corpus: ""
+  val_corpus: ""
+
+  context_length: 2048
+  # S5-004 反映: micro_batch=2 × grad_accum=16 = effective batch 32。
+  # tokens/step = 2 × 16 × 2048 = 65,536。
+  micro_batch_size: 2
+  gradient_accumulation_steps: 16
+
+  # S5-001 反映: warmup_ratio=0.0 で cosine_decay 単体。init=3e-5, end=3e-6
+  # (= 1/10 flatten)。min_lr を 0 にすると constant LR fallback に落ちて
+  # cosine schedule が効かないので絶対 0 にしない (DR2-009)。
+  learning_rate: 3.0e-5
+  min_learning_rate: 3.0e-6
+  warmup_ratio: 0.0
+  weight_decay: 0.1
+  max_grad_norm: 1.0
+
+  # S5-002 反映: 累計 step 採用。既存 mulmoclaude 600 step に 10K 追加するなら
+  # max_steps=10600。Day 5 採用判定で 10K/15K/20K 候補から決定。
+  max_steps: 10600
+  eval_every_steps: 1000  # 1K step 毎に英語コード eval (forgetting 早期検出)
+  save_every_steps: 1000  # 1K step 毎の中間 checkpoint。eval 後に削除可
+  log_every_steps: 20
+
+  early_stopping:
+    enabled: true
+    # forgetting 5pp 超で停止 (workspace/issues/135/work-plan.md Phase 6)。
+    patience: 3
+    min_delta: 0.001
+    restore_best: true
+
+inference:
+  hierarchical_prefill: true
+  recgen_enabled: true
+  safe_recgen_enabled: true
+  evidence_pruning_enabled: true
+  pruned_max_chunks: 8
+
+  photon_generation_enabled: false
+  generation_fallback_policy: "qwen"
+
+  answer_max_new_tokens: 768
+  temperature: 0.2
+  top_p: 0.9
+  do_sample: false
+
+safe_recgen:
+  enabled: true
+
+  triggers:
+    exact_quote: true
+    diff_or_patch: true
+    high_risk_query: true
+    topic_shift: true
+    latent_drift: true
+    low_confidence: false
+
+  thresholds:
+    latent_cosine_drift: 0.50
+    topic_shift_score: 0.65
+    confidence_floor: 0.40
+    logit_kl: 0.75
+
+  fallback_actions:
+    re_retrieve: true
+    strengthen_local_refresh: true
+    reprefill_hierarchy: true
+    fallback_to_baseline_path: true
+
+drift_monitoring:
+  enabled: true
+  track_latent_cosine_drift: true
+  track_token_agreement: true
+  track_logit_kl: true
+  save_turn_level_metrics: true
+
+logging:
+  level: "INFO"
+  save_hidden_stats: true
+  save_drift_metrics: true
+  save_latency_breakdown: true
+  save_memory_metrics: true
+  save_fallback_reasons: true
