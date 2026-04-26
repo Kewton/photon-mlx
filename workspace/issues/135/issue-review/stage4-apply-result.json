@@ -1,0 +1,83 @@
+{
+  "stage": 4,
+  "iteration": 1,
+  "applied_count": 12,
+  "skipped_count": 0,
+  "applied": [
+    {
+      "finding_id": "S3-001",
+      "applied": true,
+      "section": "アプローチ A-1 / 影響ファイル / 受入条件",
+      "summary": "data.py 拡張方針を「新関数 iterate_mixed_batches を追加し既存 iterate_batches() の signature は変更しない」と一本化。既存 4 callsite (trainer.py:297-303 / scripts/train_photon_quick.py:48-49) と test_training.py:23 の 27+ tests が無改修で動作することを保護。torch_ref/config.py の TrainingConfig に train_corpora_mix: dict[str, float] | None を追加し trainer.py 側で None/dict で iterate_batches/iterate_mixed_batches に分岐する旨を明記。受入条件にも『signature 無改修』チェック追加。"
+    },
+    {
+      "finding_id": "S3-002",
+      "applied": true,
+      "section": "受入条件 / 影響ファイル / リスクと緩和策",
+      "summary": "受入条件に『photon_mlx/tests/test_training.py に test_resume_from_continual_learning を追加 (warmup から始まらず continual の min_lr→max_lr 起点になること / step counter / optimizer state 新規 / 既存重み非恒等 を assert)』を追加。リスク表に『resume_from が想定外の LR 起点を取り 600 step 重みを破壊』を追加 (緩和策 = 学習開始前に CI で test 追加)。影響ファイルにも test 追記。"
+    },
+    {
+      "finding_id": "S3-003",
+      "applied": true,
+      "section": "アプローチ A-0 (新設) / 影響ファイル / 受入条件 / リスクと緩和策",
+      "summary": "アプローチに新セクション『A-0. 機密保護とリポジトリ衛生 (本 Issue 最初の commit)』を追加し『.gitignore に data/training/ を追加』を必須化。機密前提として JP 制度文書 corpus / 派生 checkpoint は public 配布対象外 (private repo / ACL 制限) を明記。受入条件に『.gitignore に data/training/ 登録済み』追加。リスクに『学習 corpus institutional_documents の機密漏洩』を追加。"
+    },
+    {
+      "finding_id": "S3-004",
+      "applied": true,
+      "section": "アプローチ A-1 / B-1 / 影響ファイル / 受入条件",
+      "summary": "A-1 の generation script サブ項目に『既存 generate_training_corpus.py のロジック (tokenize / pack / val split / validate_tokenizer_id / resolve_tokenizer_id) を scripts/_corpus_core.py (新設、private module) に抽出し、新 script は institutional 固有の (a) session 構築 (turn_sep 挿入) (b) eval set との session_id 重複チェック を上乗せ』を明記。B-1 に『trainer.py の改修方針: 既存 resume_from / cosine schedule ロジックをそのまま利用、本体ロジック改修不要』のガード追加。受入条件に『新 script の関数 / CLI 引数が既存 generate_training_corpus.py と top-level 関数名で衝突しない』を追加。"
+    },
+    {
+      "finding_id": "S3-005",
+      "applied": true,
+      "section": "アプローチ D / 影響ファイル / 受入条件",
+      "summary": "D 節に『採用 checkpoint 確定後のドキュメント更新』ブロックを追加: (1) CLAUDE.md L156-160 の現メトリクスを新 PHOTON 値で更新、(2) reports/gate2_judgment_v4_final.md は履歴として保持し reports/gate2_judgment_v5_post_retrain.md を新規作成 (冒頭で v4→v5 cross-link)、(3) workspace/mvp/roadmap.md Phase 2 conditional 表に『>6% 分岐実行済』マーキング追加、(4) workspace/mvp/metrics.md 反映。影響ファイル / 受入条件にも対応項目を追加。"
+    },
+    {
+      "finding_id": "S3-006",
+      "applied": true,
+      "section": "アプローチ D / 受入条件 / 影響ファイル",
+      "summary": "D 節に『CI/CD 事前確認 (Day 5 着手前)』を追加: GitHub Actions の actions/checkout@v4 lfs: true 有無 / external secret 有無を確認し、不可なら本 Issue 範囲で CI 設定変更も実施。pytest 全 tests 実行時 data/training/ ignore (CI で --ignore=data/training/ 確認) を明記。pipeline_factory.py photon provider 経路を baseline_reporag/tests/ にモック checkpoint smoke test として新規追加。受入条件にも対応項目追加。"
+    },
+    {
+      "finding_id": "S3-007",
+      "applied": true,
+      "section": "アプローチ D / 影響ファイル / 受入条件",
+      "summary": "D 節 config 更新を『既存 configs/institutional_docs_photon.yaml は #112 / #126 baseline 再現用に直接編集せず維持し、新規 configs/institutional_docs_photon_retrain.yaml を作成して本 Issue 用 hyperparam を分離』と明記。影響ファイル / 受入条件にも反映 (新 yaml 新規作成 / 既存 yaml 不変)。"
+    },
+    {
+      "finding_id": "S3-008",
+      "applied": true,
+      "section": "並列開発 / リスクと緩和策",
+      "summary": "並列開発セクションに新サブセクション『ファイル単位の編集衝突回避』を追加: Day 3-4 学習期間中は photon_mlx/trainer.py / photon_mlx/data.py / configs/institutional_docs_photon.yaml / 新 configs/institutional_docs_photon_retrain.yaml への外部 PR マージを保留。Day 5 ロールアウト前に develop 最新 commit に rebase し全テスト再実行。リスク表に『他 PR との merge conflict』を 1 行追加。#133 が PR #136 = aeb2233 で merged 済も明記。"
+    },
+    {
+      "finding_id": "S3-009",
+      "applied": true,
+      "section": "アプローチ A-1 / 影響ファイル / 受入条件",
+      "summary": "A-1 に『eval リーク検証の実装責務』を新設: 新 generate_institutional_training_corpus.py の出力 step 内で eval set を読み込み session_id 集合の積が空であることを assert し、非空なら exit code 1 で abort (検証は generate script 自身に内蔵、別 script への分離はしない)。受入条件に『generate script 単体実行時、eval リーク検出で exit code 非ゼロになる pytest を新規追加』を追加。影響ファイルに tests/test_generate_institutional_training_corpus.py を追加。"
+    },
+    {
+      "finding_id": "S3-010",
+      "applied": true,
+      "section": "リスクと緩和策 / 想定 compute コスト",
+      "summary": "リスク表に『checkpoint / corpus による M3 Ultra SSD 逼迫』を追加。緩和策として (1) Day 1 着手時に df -h で残量 50GB 以上確認、(2) 1K step 単位 checkpoint のうち eval 対象外 (10K/15K/20K 以外) は eval 完了時点で即削除 (state.step not in {10000,15000,20000} なら 5K step 経過後に shutil.rmtree)、(3) 学習開始前に古い不要 checkpoint (mulmoclaude 以外) を archive へ移動。想定 compute コストにも『SSD 残量前提: Day 1 着手時に df -h で残量 50GB 以上確認』を追記。"
+    },
+    {
+      "finding_id": "S3-011",
+      "applied": true,
+      "section": "影響ファイル / 受入条件 (Nice to Have)",
+      "summary": "影響ファイルに docs/deployment.md (新 checkpoint パス初回 fetch 手順) と docs/troubleshooting.md (checkpoint 不在時の症状と対処) を追加。受入条件に Nice to Have として『docs/deployment.md / docs/troubleshooting.md 追記 (本 Issue で困難なら follow-up Issue 起票でも可)』を追加。"
+    },
+    {
+      "finding_id": "S3-012",
+      "applied": true,
+      "section": "リスクと緩和策",
+      "summary": "リスク表『再学習で Turn 5-6 NC < 6% 達成失敗』緩和策を具体化: Phase 2 pivot = (1) 本 Issue で 3-6% 帯にしか改善しなかった場合、追加で軽量 fine-tune 5K step を本 Issue 内で実施 (compute 余裕あれば、roadmap.md L88-94 conditional 表 3-6% 分岐に該当)、(2) それでも < 6% に至らない場合、Phase 2 完了基準を再定義する別 Issue を起票し本 Issue は close。"
+    }
+  ],
+  "skipped": [],
+  "issue_updated": true,
+  "github_issue_url": "https://github.com/Kewton/photon-mlx/issues/135"
+}

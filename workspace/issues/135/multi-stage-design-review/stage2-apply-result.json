@@ -1,0 +1,80 @@
+{
+  "stage": 2,
+  "applied_count": 11,
+  "skipped_count": 0,
+  "applied": [
+    {
+      "finding_id": "DR2-001",
+      "applied": true,
+      "section": "Issue本文 L50/L53/L81/L121/L137/L142/L177 + 設計方針書 §5 設計判断 #1 トレードオフ",
+      "summary": "Issue 本文の 7 箇所の `val_corpora_mix` 表記を `val_split: float = 0.05` (DR1-005) に統一。設計方針書 §5 設計判断 #1 のトレードオフ末尾も val_split=0.05 で sequence-level split / val_split=0.0 で従来 val_corpus fallback の明示分岐に書換え。Issue ↔ 設計方針書 schema 乖離を解消。"
+    },
+    {
+      "finding_id": "DR2-002",
+      "applied": true,
+      "section": "Issue本文 L122 / L137 / L138 / L149 / L186",
+      "summary": "Issue 本文の `photon_mlx.trainer.load_checkpoint` 直接 import 記述を `photon_mlx.checkpoint.load_checkpoint` 経由 (DR1-002 境界規約) へ統一。trainer.py は `from .checkpoint import load_checkpoint` で再 export、_build_photon_deps は photon_mlx.checkpoint のみを import (trainer 直 import 禁止) と明文化。Issue 本文 L138 (影響ファイル baseline_reporag/photon_pipeline.py)、L149 (baseline_reporag/tests/)、L186 (受入条件) も同期。"
+    },
+    {
+      "finding_id": "DR2-003",
+      "applied": true,
+      "section": "設計方針書 §8 テスト戦略 + §10 影響範囲表",
+      "summary": "test_data.py 配置宣言を「新規 `photon_mlx/tests/test_data.py` を作成し iterate_mixed_batches 関連 unit test (5-6 件) と signature snapshot (1 件) を集約。既存 `test_training.py::TestData` クラス L23-110 (`test_pack_sequences`/`test_create_batches`/`test_load_jsonl`) は移動せず in-place 維持」と明記。新関数の責務分離 / SOLID 観点優先。"
+    },
+    {
+      "finding_id": "DR2-004",
+      "applied": true,
+      "section": "設計方針書 §11 リスク表 (S7-006 / DR1-010 行)",
+      "summary": "原理計算 `batch_size=4` を `micro_batch_size=2 (effective batch = 2 × 16 = 32)` に修正し、'sec/step' は **optimizer step (= 16 micro-step を集約した 1 optimizer update)** あたりの時間であると明記。例として '~3-6 sec/optimizer step (16 micro × forward+backward = ~190-380 ms/micro)' を追記。Day 3 lr-finder の elapsed_s 集計単位 (optimizer step) も併記。"
+    },
+    {
+      "finding_id": "DR2-005",
+      "applied": true,
+      "section": "設計方針書 §11 リスク表 + §8 テスト戦略",
+      "summary": "リスク行に `warmup_ratio=0.0 ∧ min_lr=3e-6 (≠ 0)` のとき `_build_lr_schedule` が `cosine_decay(init=3e-5, end=3e-6)` パス (trainer.py:178-181) を取る、`min_lr=0` だと L182-183 のフォールバックで定数 LR になる事実を併記。§8 test_resume_from_continual_learning 行にも前提条件 'min_lr=3e-6 が yaml に記述されていること' を追記。"
+    },
+    {
+      "finding_id": "DR2-006",
+      "applied": true,
+      "section": "設計方針書 §5 設計判断 #1",
+      "summary": "iterate_mixed_batches signature から `epochs=1` 引数を削除し §6.2 API 契約と表記統一。'epochs 概念は持たず trainer.py の `while state.step < max_steps` ループが `batch_idx % len(train_batches)` で round-robin する' を 1 行追記。"
+    },
+    {
+      "finding_id": "DR2-007",
+      "applied": true,
+      "section": "設計方針書 §10 影響範囲表 + Issue 本文 L152",
+      "summary": "新 `reports/institutional_photon_mt_eval_v2.md` の責務に「旧 `reports/institutional_photon_mt_eval.md` (#113) は履歴として保持、_v2.md は冒頭で旧 report への cross-link を持ち、両 report は並列保持 = `gate2_judgment_v4_final.md` → v5 と同一パターン」を追加。Issue 本文 L152 にも同期。"
+    },
+    {
+      "finding_id": "DR2-008",
+      "applied": true,
+      "section": "設計方針書 §6.2 API契約",
+      "summary": "iterate_mixed_batches signature に `val_split: float = 0.0` 引数を追加し、戻り値型注釈を `list[mx.array] | tuple[list[mx.array], list[mx.array]]` (val_split=0 で list、val_split>0 で (train, val) tuple) に修正。docstring に分岐ロジック (val_split>0 のとき train_corpora_mix の比率を val でも維持) を追記し §6.4 trainer 分岐の tuple unpack と整合。"
+    },
+    {
+      "finding_id": "DR2-009",
+      "applied": true,
+      "section": "Issue本文 L121 (config 更新 hyperparam 列挙)",
+      "summary": "Issue 本文 L121 hyperparam 列挙に `min_lr=3e-6` を追記し、設計方針書 §4 / §5 設計判断 #3 / §11 S5-001 行と完全一致。'min_lr=3e-6 は `_build_lr_schedule` の cosine_decay 経路を有効化する必須キー条件' を併記。同時に `val_corpora_mix` を `val_split=0.05` に変更 (DR2-001 連動)。"
+    },
+    {
+      "finding_id": "DR2-010",
+      "applied": true,
+      "section": "設計方針書 §8 テスト戦略 末尾",
+      "summary": "pyproject.toml/pytest.ini/setup.cfg 不在の事実と CI yaml command line のみで担保される現状、testpaths 一元化の follow-up Issue 起票案を §8 末尾に追記 (Nice to Have、本 Issue 範囲外、DR1-011 と同パターン)。"
+    },
+    {
+      "finding_id": "DR2-011",
+      "applied": true,
+      "section": "設計方針書 §11 リスク表 + Issue 本文 L130",
+      "summary": "リスク行参照を「workspace/mvp/roadmap.md L88-94 conditional 表 3-6% 行 (軽量 fine-tune 5K step) と > 6% 行 (本格再学習 10-20K step) の両方を参照、本 Issue 採用結果に応じて該当行に『実行済』マーキング」へ修正。Issue 本文 L130 も「Phase 2 conditional 表 (>6% 分岐) に『実行済』マーキング、必要に応じて 3-6% fallback も追記」へ統一。"
+    }
+  ],
+  "skipped": [],
+  "design_policy_updated": true,
+  "issue_body_updated": true,
+  "must_fix_applied": 3,
+  "should_fix_applied": 6,
+  "nice_to_have_applied": 2,
+  "notes": "Stage 2 整合性レビュー指摘 11 件 (Must 3 / Should 6 / Nice 2) を全て反映。Issue 本文と設計方針書の双方向 sync を完了し schema 乖離を解消。ソースコード (.py) は変更なし。Issue 本文は GitHub に gh issue edit で反映済 (https://github.com/Kewton/photon-mlx/issues/135)、final-issue-body.md にも最新版を保存。"
+}

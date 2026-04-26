@@ -1,0 +1,66 @@
+{
+  "stage": 5,
+  "focus": "通常（2回目）",
+  "reviewer": "codex",
+  "issue_number": 135,
+  "findings": [
+    {
+      "id": "S5-001",
+      "severity": "Must Fix",
+      "category": "正確性",
+      "title": "warmup_ratio=0.0 時の LR 起点が本文・受入条件と既存実装で逆",
+      "description": "Issue 本文は `warmup_ratio=0.0` を指定しつつ、受入条件とリスク表で「min_lr→max_lr 起点」を検証すると書いている。しかし `photon_mlx/trainer.py` の `_build_lr_schedule()` は warmup_steps=0 かつ min_lr>0 の場合、`mlx.optimizers.cosine_decay(init=lr, end=min_lr)` を返すため、初回更新は `lr=3e-5` から開始し `min_lr=3e-6` へ減衰する。本文の「既存 resume_from / cosine schedule ロジックをそのまま利用」と、テスト期待値「min_lr→max_lr 起点」は同時に満たせない。",
+      "suggested_fix": "B-1 と受入条件/リスク表を「warmup_ratio=0.0 の場合は既存実装通り `lr=3e-5` から cosine decay で `min_lr=3e-6` へ下げる」と修正する。もし重み破壊を避けるために min_lr から立ち上げたいなら、`warmup_ratio>0` または新 schedule 実装を明示し、trainer.py 改修を影響ファイルに追加する。",
+      "affected_section": "B-1 ハイパーパラメータ / 受入条件 / リスクと緩和策"
+    },
+    {
+      "id": "S5-002",
+      "severity": "Must Fix",
+      "category": "整合性",
+      "title": "resume_from 後の max_steps が追加 step ではなく絶対 step として扱われる",
+      "description": "`photon_mlx/trainer.py` は `resume_from` で `TrainState.step` を checkpoint から復元し、training loop は `while state.step < max_steps` で終了する。したがって `step_600` から `max_steps=10000` で実行すると追加 10,000 step ではなく追加 9,400 step で止まる。Issue 本文は「10-20K step 再学習」「10K/15K/20K checkpoint」と書くが、これが累計 step なのか追加 step なのか未定義で、採用 checkpoint 名・eval 対象・token 数見積もりがずれる。",
+      "suggested_fix": "B-1/B-2/受入条件に「10K/15K/20K は `state.step` の累計値（step_600 からの追加 9.4K/14.4K/19.4K）」なのか「追加学習 step（max_steps=10600/15600/20600 相当）」なのかを明記する。追加 step を採用するなら checkpoint 名も `additional_10000` または `step_010600` のように曖昧さをなくす。",
+      "affected_section": "B-1 ハイパーパラメータ / B-2 checkpoint 保存 / 受入条件"
+    },
+    {
+      "id": "S5-003",
+      "severity": "Must Fix",
+      "category": "完全性",
+      "title": "generate_institutional_training_corpus.py の入力 source と生成責務が実装不能な粒度",
+      "description": "A-1 は source を「`data/eval_sets/institutional_multi_turn_eval.jsonl` の同領域 corpus」としているが、これは実ファイル/CLI 入力として解釈できない。既存 `scripts/generate_institutional_eval_set.py` は `--corpus-dir` または `INSTITUTIONAL_CORPUS_DIR` から institutional_documents を読み、LLM provider を選んで eval set を生成する CLI である。新 training corpus script も 2,000-5,000 sessions を生成するなら、入力 corpus dir、provider/model、sessions 数、出力 train/val split、失敗率閾値、resume/dry-run の扱いを本文で指定しないと、Issue 記述だけでは実装者が同じ成果物を再現できない。",
+      "suggested_fix": "A-1 に `scripts/generate_institutional_training_corpus.py --corpus-dir <institutional_documents_dir> --provider <auto|openai|qwen> --sessions 2000 --output data/training/institutional --val-ratio 0.1 --seed 42` のような標準 CLI を追記する。source 表記は eval set ではなく `institutional_documents` raw corpus を指す形に修正し、eval set はリーク検証入力としてのみ使うと明記する。",
+      "affected_section": "A-1 学習 corpus 構築 / 影響ファイル / 受入条件"
+    },
+    {
+      "id": "S5-004",
+      "severity": "Should Fix",
+      "category": "正確性",
+      "title": "1 step あたり token 数の根拠が micro_batch=2, grad_accum=16, context_length=2048 と合わない",
+      "description": "B-1 の根拠は「1 step あたり ~16K token、20K step = 320M token」としている。しかし既存 trainer.py では optimizer step ごとに `micro_batch_size` 個の `(context_length)` sequence を `gradient_accumulation_steps` 回蓄積するため、初期値どおりなら 2 × 16 × 2048 = 65,536 token/optimizer step である。20K step は約 1.31B token になり、compute 見積もり・Chinchilla/scaling 根拠・JP/EN 混合比の必要 corpus サイズが本文と大きくずれる。",
+      "suggested_fix": "B-1 と想定 compute コストの token 数を `micro_batch_size * grad_accum * context_length` で再計算する。16K token/step を維持したい場合は `grad_accum=4` 相当へ変更し、effective batch と M3 Ultra OOM 条件も併せて更新する。",
+      "affected_section": "B-1 ハイパーパラメータ / 想定 compute コスト"
+    },
+    {
+      "id": "S5-005",
+      "severity": "Should Fix",
+      "category": "整合性",
+      "title": "iterate_mixed_batches の混合単位が pack_sequences/create_batches と未接続",
+      "description": "A-1 は `iterate_mixed_batches(corpus_paths: dict[str, float], context_length, batch_size, ...)` とだけ定義しているが、既存 `pack_sequences()` は docs を連結して固定長 sequence に切り、`create_batches()` がその sequence を shuffle/batch 化する。単純に JP/EN docs を 50/50 で concat してから pack すると、doc 長の違いで token 比が崩れ、session 境界をまたいだ sequence も作られ得る。逆に corpus ごとに pack して batch 単位で sample するなら、val split と batch 内構成も定義が必要。",
+      "suggested_fix": "A-1 に `iterate_mixed_batches` の実装契約を追記する。例: corpus ごとに `load_jsonl -> pack_sequences` し、sequence pool から optimizer micro-batch 単位で weighted sampling する。比率判定は packed token 数または yielded sequence 数のどちらかに固定し、session 境界を跨ぐ pack を許可するか禁止するか、validation も `val_corpora_mix` で同じ比率にするかを明記する。",
+      "affected_section": "A-1 学習 corpus 構築 / photon_mlx/data.py 拡張"
+    },
+    {
+      "id": "S5-006",
+      "severity": "Should Fix",
+      "category": "整合性",
+      "title": "<|turn_sep|> を special token と呼ぶと固定 vocab の PHOTON と衝突する",
+      "description": "A-1 の出力 schema は turn 境界を special token `<|turn_sep|>` で区切るとしている。しかし現行 `TokenizerConfig.vocab_size` と `PhotonModel` の embedding は固定で、tokenizer に新 special token を追加して vocab を拡張する実装や checkpoint embedding resize は存在しない。新 token ID が vocab 外になると学習が壊れ、文字列を普通に encode するだけなら special token ではなく通常文字列 delimiter である。",
+      "suggested_fix": "A-1 の表現を「既存 tokenizer で通常文字列として encode する delimiter `<|turn_sep|>`」に修正するか、既存 tokenizer の EOS/BOS など vocab 内 token を turn separator として使う方針に変更する。真の special token を追加する場合は tokenizer resize と embedding resize を影響ファイル・受入条件に追加する。",
+      "affected_section": "A-1 学習 corpus 構築 / 出力 schema"
+    }
+  ],
+  "must_fix_count": 3,
+  "should_fix_count": 3,
+  "nice_to_have_count": 0,
+  "summary": "前回レビュー反映により Issue はかなり実装可能な粒度に近づいた。一方、2回目の Codex 視点では、反映後に追加された具体値・実装方針が既存 `photon_mlx` の実際の挙動と数カ所で衝突している。特に `warmup_ratio=0.0` の LR 起点、`resume_from` 後の `max_steps` 解釈、training corpus generator の入力 source/CLI はこのままだと実装者ごとに異なる解釈になり、Must Fix と判断する。加えて token/step 見積もり、mixed batch の混合単位、turn separator の special token 扱いは、学習量・混合比・固定 vocab との整合に関わるため Should Fix とする。"
+}
