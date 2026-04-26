@@ -238,3 +238,75 @@ def test_validate_cross_config_on_bare_dataclasses() -> None:
     t_bad = TrainingConfig(context_length=33)
     with pytest.raises(ValueError, match="multiple"):
         _validate_cross_config(m, h, t_bad)
+
+
+# ---------------------------------------------------------------------------
+# Issue #135 / Phase 4-1: TrainingConfig.train_corpora_mix + val_split
+# ---------------------------------------------------------------------------
+# DR1-005 simplification: val_corpora_mix dict was dropped in favour of a
+# single ``val_split: float`` that carves val out of the same shuffled
+# train pool, preserving the train_corpora_mix ratio.
+# DR1-003 strict validation: empty mix dict, weight <= 0 or non-finite,
+# sum(weights) outside ±1e-6 of 1.0 must all raise ValueError at config
+# construction time so trainer never sees an invalid mix.
+
+
+class TestTrainingConfigCorporaMix:
+    """TrainingConfig.train_corpora_mix + val_split schema (DR1-003 / DR1-005)."""
+
+    def test_default_train_corpora_mix_is_none(self) -> None:
+        """Backwards compat: default config keeps the legacy single-corpus path."""
+        t = TrainingConfig()
+        assert t.train_corpora_mix is None
+        assert t.val_split == 0.0
+
+    def test_explicit_mix_with_valid_weights(self) -> None:
+        t = TrainingConfig(
+            train_corpora_mix={"a.jsonl": 0.5, "b.jsonl": 0.5},
+            val_split=0.05,
+        )
+        assert t.train_corpora_mix == {"a.jsonl": 0.5, "b.jsonl": 0.5}
+        assert t.val_split == 0.05
+
+    def test_empty_mix_dict_raises(self) -> None:
+        with pytest.raises(ValueError, match="train_corpora_mix"):
+            TrainingConfig(train_corpora_mix={})
+
+    def test_negative_weight_raises(self) -> None:
+        with pytest.raises(ValueError, match="weight"):
+            TrainingConfig(train_corpora_mix={"a.jsonl": -0.1, "b.jsonl": 1.1})
+
+    def test_zero_weight_raises(self) -> None:
+        with pytest.raises(ValueError, match="weight"):
+            TrainingConfig(train_corpora_mix={"a.jsonl": 0.0, "b.jsonl": 1.0})
+
+    def test_non_finite_weight_raises(self) -> None:
+        with pytest.raises(ValueError):
+            TrainingConfig(train_corpora_mix={"a.jsonl": float("inf"), "b.jsonl": 0.5})
+
+    def test_non_numeric_weight_raises(self) -> None:
+        with pytest.raises((TypeError, ValueError)):
+            TrainingConfig(
+                train_corpora_mix={"a.jsonl": "0.5", "b.jsonl": 0.5}  # type: ignore[dict-item]
+            )
+
+    def test_sum_off_target_raises(self) -> None:
+        with pytest.raises(ValueError, match="sum"):
+            TrainingConfig(train_corpora_mix={"a.jsonl": 0.4, "b.jsonl": 0.5})  # 0.9
+
+    def test_sum_within_tolerance_passes(self) -> None:
+        # 0.5 + 0.4999999999 = 0.9999999999 — within 1e-6 of 1.0.
+        TrainingConfig(train_corpora_mix={"a.jsonl": 0.5, "b.jsonl": 0.4999999999})
+
+    def test_val_split_negative_raises(self) -> None:
+        with pytest.raises(ValueError, match="val_split"):
+            TrainingConfig(val_split=-0.1)
+
+    def test_val_split_one_or_more_raises(self) -> None:
+        with pytest.raises(ValueError, match="val_split"):
+            TrainingConfig(val_split=1.0)
+
+    def test_val_split_zero_is_allowed(self) -> None:
+        """val_split=0 means "no train-pool split" (legacy single-corpus path)."""
+        t = TrainingConfig(val_split=0.0)
+        assert t.val_split == 0.0
