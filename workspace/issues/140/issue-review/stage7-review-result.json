@@ -1,0 +1,39 @@
+{
+  "stage": 7,
+  "focus": "影響範囲（2回目）",
+  "reviewer": "codex",
+  "iteration": 2,
+  "findings": [
+    {
+      "id": "S7-001",
+      "severity": "Must Fix",
+      "title": "Task 2 の reviewer 検証 `test fixture` が実行可能コードなのか Markdown 手順なのか未定義",
+      "description": "Issue 本文は `/pm-auto-issue2dev` / `/pm-auto-design2dev` に reviewer=\"codex\" 検証を追加し、受入条件で「検証ロジックを通る test 1 件以上」を要求している。しかし影響ファイルは `.claude/commands/*.md` が中心で、現行 PM コマンドは実行可能 Python モジュールではなく Markdown の運用手順である。実装者が Markdown に `python -c` / `jq` などの検証 snippet を追記して string-existence test を書くのか、再利用可能な helper script を新設して unit test するのかが未確定のため、受入条件を満たすテストの置き場と対象が曖昧になる。",
+      "issue_section": "Task 2 / 受入条件 / 影響ファイル",
+      "suggested_fix": "Task 2 に実装形態を明記する。最小スコープなら「PM command Markdown に JSON パース検証 snippet と completion report テンプレートを追記し、`tests/test_skill_descriptions.py` で snippet / テンプレートの存在と fixture 文字列を検証する」と定義する。実行可能ロジックを求めるなら新規 helper script のパスを影響ファイルに追加し、その helper の unit test を受入条件にする。",
+      "evidence": ".claude/commands/pm-auto-issue2dev.md:59-69, .claude/commands/pm-auto-design2dev.md:79-89, workspace/issues/140/issue-review/stage6-apply-result.json"
+    },
+    {
+      "id": "S7-002",
+      "severity": "Should Fix",
+      "title": "Stage 5-8 自動スキップ廃止の更新対象が multi-stage-issue-review 内の複数箇所に波及する",
+      "description": "Stage 5/6 で auto-skip 判定の矛盾は反映済みだが、現行 `.claude/commands/multi-stage-issue-review.md` では自動スキップ判定セクション以外にも summary report の `5-8 | ... | 完了/スキップ` 行、完了条件の `2回目イテレーション自動スキップ` 注記が残っている。Issue 本文は「判定は廃止」と書いているため方向性は正しいが、実装時に該当セクションだけを直すと、完了報告テンプレートや完了条件に古い skip 前提が残る。",
+      "issue_section": "Task 1 / 受入条件",
+      "suggested_fix": "Task 1 に、`.claude/commands/multi-stage-issue-review.md` 内の auto-skip 関連参照を全箇所更新することを明記する。対象例: 自動スキップ判定セクション、summary report の Stage 5-8 行、完了条件の auto-skip 注記。`tests/test_skill_descriptions.py` に「2回目イテレーション自動スキップ」が残らないこと、または許容文脈のみであることを確認するケースを追加する。",
+      "evidence": ".claude/commands/multi-stage-issue-review.md:202-207, .claude/commands/multi-stage-issue-review.md:334-342, .claude/commands/multi-stage-issue-review.md:378-380"
+    },
+    {
+      "id": "S7-003",
+      "severity": "Should Fix",
+      "title": "閾値 field を WorkingMemoryConfig に置く候補は PhotonInference 起動時 check と config 互換テストの経路がずれる",
+      "description": "Task 4 は閾値 field の配置候補として ModelConfig / WorkingMemoryConfig / 新規 RuntimeChecksConfig を列挙している。影響範囲として、`PhotonInference.__init__` は `cfg: PhotonConfig` と `working_memory_cfg` (`_UNSET` / `None` / `WorkingMemoryConfig`) を受け取り、baseline 側では `session_memory.working_memory` から WorkingMemoryConfig を別経路で解決している。閾値を WorkingMemoryConfig に置く場合、`configs/photon_*.yaml` の load 互換テストだけではその field 経路を検証できず、`working_memory_cfg=None` や `_UNSET` のときに起動時 check がどの閾値を読むかも未定義になる。",
+      "issue_section": "Task 4 / 受入条件 / 影響ファイル",
+      "suggested_fix": "Task 4 に、WorkingMemoryConfig 案を採用する場合の追加要件を明記する。具体的には (1) `_UNSET` / `None` / 明示 WorkingMemoryConfig の各ケースで閾値解決規則を定義する、(2) baseline の `session_memory.working_memory` YAML 経路の roundtrip test を追加する、(3) `configs/photon_*.yaml` load 互換テストは ModelConfig / RuntimeChecksConfig 経路に対する確認であり、WorkingMemoryConfig 経路を選んだ場合は別テストが必要である、と明記する。",
+      "evidence": "photon_mlx/inference.py:147-184, baseline_reporag/photon_pipeline.py:194-250, baseline_reporag/photon_pipeline.py:435-440"
+    }
+  ],
+  "must_fix_count": 1,
+  "should_fix_count": 2,
+  "nice_to_have_count": 0,
+  "summary": "Stage 5/6 の指摘 (auto-skip 判定矛盾、strict vs WARNING、yaml 個数、conftest 新規扱い) は最新 Issue 本文に反映済み。追加の影響範囲レビューでは、PM コマンドの reviewer 検証を Markdown 手順として扱うのか実行可能 helper として扱うのかが未定義で、受入テストの対象が曖昧な点を Must Fix とした。Should Fix として、auto-skip 廃止が multi-stage-issue-review の summary/完了条件にも波及する点、WorkingMemoryConfig を閾値 field 候補に残す場合の config 経路とテスト経路のずれを補強した。"
+}

@@ -11,6 +11,7 @@ Covers:
 
 from __future__ import annotations
 
+import logging
 import math
 import sys
 from pathlib import Path
@@ -36,8 +37,16 @@ from photon_mlx.model import PhotonModel
 from photon_mlx.session import HierarchicalState, weighted_hierarchical_score
 
 
+# Issue #140 / DR4-002: tests construct fresh small PhotonModel instances whose
+# random-init embedding has high σ; we suppress the start-up WARNING by setting
+# a finite-but-large threshold. ``float('inf')`` is intentionally NOT used —
+# production validation rejects non-finite values, and using a finite sentinel
+# keeps the test path on the same code branch as production configs.
+TEST_EMBEDDING_RANDOM_INIT_THRESHOLD = 1e9
+
+
 def _tiny_cfg() -> PhotonConfig:
-    return PhotonConfig(
+    cfg = PhotonConfig(
         model=ModelConfig(
             base_embed_dim=16,
             hidden_size=64,
@@ -56,6 +65,20 @@ def _tiny_cfg() -> PhotonConfig:
         ),
         tokenizer=TokenizerConfig(vocab_size=256),
     )
+    cfg.model.embedding_random_init_threshold = TEST_EMBEDDING_RANDOM_INIT_THRESHOLD
+    return cfg
+
+
+def _photon_cfg(
+    threshold: float = TEST_EMBEDDING_RANDOM_INIT_THRESHOLD,
+) -> PhotonConfig:
+    """Issue #140 (§7.2 / DR1-007): wrapper that lets the embedding-norm
+    threshold be controlled per test. Defaults to a finite high value so
+    existing tests do not emit WARNING logs.
+    """
+    cfg = _tiny_cfg()
+    cfg.model.embedding_random_init_threshold = threshold
+    return cfg
 
 
 @pytest.fixture
@@ -534,3 +557,70 @@ class TestScoringPathAcrossStorageModes:
 
         for (_, s_batched), s_expected in zip(batched, expected_list):
             assert abs(s_batched - s_expected) < 1e-4
+
+
+# ---------------------------------------------------------------
+# Issue #140 / S7-001: PhotonInference start-up embedding-norm WARNING
+# ---------------------------------------------------------------
+
+
+class _BrokenTokenizerForInit:
+    """Stand-in tokenizer for the MagicMock-model start-up test.
+
+    ``PhotonInference`` only stores the tokenizer; it isn't called in
+    ``__init__``, so any object with ``vocab_size`` / ``pad_token_id`` will
+    do. ``encode`` is provided in case future code paths exercise it during
+    construction.
+    """
+
+    vocab_size = 256
+    pad_token_id = 0
+
+    def encode(self, text: str) -> list[int]:  # pragma: no cover - defensive
+        raise RuntimeError("broken tokenizer (test stub)")
+
+
+class TestCheckWeightInitialization:
+    """Behaviour of :func:`_check_weight_initialization` invoked by
+    ``PhotonInference.__init__`` (Issue #140 / S7-001).
+
+    The threshold absolute value is intentionally NOT asserted: we only
+    verify the WARNING fires above threshold and stays silent below.
+    """
+
+    def test_check_weight_initialization_warns_on_high_variance(
+        self, stub_tokenizer_for_cfg, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        mx.random.seed(42)
+        cfg = _photon_cfg(threshold=0.1)  # low threshold → WARNING expected
+        model = PhotonModel(cfg)
+        tokenizer = stub_tokenizer_for_cfg(cfg)
+        with caplog.at_level(logging.WARNING, logger="photon_mlx.inference"):
+            PhotonInference(model, cfg, tokenizer)
+        assert any(
+            "high variance" in rec.getMessage()
+            and rec.name == "photon_mlx.inference"
+            and rec.levelno == logging.WARNING
+            for rec in caplog.records
+        )
+
+    def test_check_weight_initialization_silent_on_low_variance(
+        self, stub_tokenizer_for_cfg, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        mx.random.seed(42)
+        cfg = _photon_cfg(threshold=10.0)  # high threshold → silent
+        model = PhotonModel(cfg)
+        tokenizer = stub_tokenizer_for_cfg(cfg)
+        with caplog.at_level(logging.WARNING, logger="photon_mlx.inference"):
+            PhotonInference(model, cfg, tokenizer)
+        assert not any("high variance" in rec.getMessage() for rec in caplog.records)
+
+    def test_check_weight_initialization_silent_on_magicmock_model(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """MagicMock model → silent skip via ``isinstance(weight, mx.array)``
+        guard. No exception, no WARNING."""
+        cfg = _photon_cfg()
+        with caplog.at_level(logging.WARNING, logger="photon_mlx.inference"):
+            PhotonInference(MagicMock(), cfg, _BrokenTokenizerForInit())
+        assert not any("high variance" in rec.getMessage() for rec in caplog.records)

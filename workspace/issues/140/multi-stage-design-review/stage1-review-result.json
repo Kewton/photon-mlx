@@ -1,0 +1,91 @@
+{
+  "stage": 1,
+  "focus": "設計原則",
+  "reviewer": "opus",
+  "findings": [
+    {
+      "id": "DR1-001",
+      "severity": "Must Fix",
+      "title": "設計判断 #3 の WARNING 抑制実装記述が conftest.py の実体と矛盾している",
+      "description": "設計判断 #3 (S3-007) は『photon_mlx/tests/conftest.py の既存 fixture (_make) で cfg.model.embedding_random_init_threshold = float(\"inf\") を default にすれば既存 28+ test に効く』と記述しているが、実際の photon_mlx/tests/conftest.py の `_make` は `stub_tokenizer_for_cfg` fixture が返す tokenizer factory であり、引数の cfg を mutate せず tokenizer のみ返す関数である。さらに既存 test (photon_mlx/tests/test_inference.py:39-58) は `_tiny_cfg()` というモジュール内ヘルパーで cfg を新規生成しており、conftest.py を経由しない。したがって設計通りに conftest.py の `_make` に `cfg.model.embedding_random_init_threshold = float('inf')` を書き込んでも、(1) cfg を mutate して呼び出し側に副作用を返すのは tokenizer factory の単一責任を破壊し SOLID-SRP 違反 (2) `_tiny_cfg()` 経路の cfg はそもそも `_make` を通らないため WARNING 抑制が効かない、という二重の論理破綻が発生する。実装順序 §8 の Step 3 もこの記述に依存しているため、実装フェーズで必ずブロックする欠陥になる。",
+      "principle": "論理整合性",
+      "suggested_fix": "設計判断 #3 を以下のいずれかに書き換える。(1) ModelConfig.embedding_random_init_threshold の default 値を `0.3` のままとしつつ、`_tiny_cfg()` および各 test 内の `PhotonConfig(...)` 生成箇所で test 用に閾値を float('inf') にする autouse fixture を photon_mlx/tests/conftest.py に新設する案 (caplog.set_level 案 (a) と同等の autouse fixture 化)。(2) より単純な代替として、test 用 cfg ヘルパー (`_tiny_cfg`) 自体に `embedding_random_init_threshold=float('inf')` を直接埋め込む方針とし、conftest.py 改変は不要にする。設計判断 #3 の『_make に default 設定すれば 28+ test に効く』という現状の記述は事実誤認のため削除する。実装順序 §8 Step 3 も対応して書き換える。"
+    },
+    {
+      "id": "DR1-002",
+      "severity": "Must Fix",
+      "title": "設計判断 #1 で却下された WorkingMemoryConfig 案 (b) 用テスト要件が S7-003 として残存",
+      "description": "設計判断 #1 では (a) ModelConfig 拡張を確定採用しており、(b) WorkingMemoryConfig 案・(c) RuntimeChecksConfig 案は却下している。しかし Issue 本文の S7-003 受入条件『WorkingMemoryConfig 案を採用する場合は _UNSET / None / 明示 WorkingMemoryConfig の閾値解決規則と baseline_reporag YAML roundtrip test を含める』が、設計方針書では (a) 確定後にどう扱うかの記述が無い。Issue 受入条件と設計方針書の整合性が取れておらず、作業計画フェーズで『この受入条件は対象外』と判断する根拠が読み取れない。Issue 本文に基づき pm-auto-design2dev が実装するため、ここで明示的に『(a) 採用により S7-003 の WorkingMemoryConfig 経路は本 Issue では実装しない (受入条件から除外)』を宣言しないと、テスト追加が二重になるか、逆に YAML roundtrip test を実装しないことが受入条件未達と誤判定される。",
+      "principle": "論理整合性",
+      "suggested_fix": "設計判断 #1 のセクション末尾または §6 後方互換性表に以下を追記: 『本 Issue では (a) ModelConfig 拡張を選択するため、Issue 本文 S7-003 のうち WorkingMemoryConfig 案採用時の閾値解決規則・baseline_reporag YAML roundtrip test 要件は対象外とする。代わりに configs/photon_*.yaml 5 件の load 互換 test (新 field 未指定時に default 0.3 で load 成功) を追加する。』"
+    },
+    {
+      "id": "DR1-003",
+      "severity": "Must Fix",
+      "title": "Issue 受入条件 Task 4 config 経路の YAML 互換テストが §7 テスト戦略に欠落",
+      "description": "Issue 本文の受入条件『**Task 4 config 経路**: 閾値 field の設置先を設計フェーズで確定し、選んだ経路に応じた互換 test を追加する』に対し、設計方針書 §7.1〜7.3 では (a) ModelConfig 採用時の互換 test (configs/photon_*.yaml 5 件で field 未指定でも load 成功すること) が記述されていない。設計判断 #1 §セキュリティ設計の表で『field 未指定時も load 成功』を述べているのみで、テストケースとして明示されておらず受入条件カバレッジが不完全。",
+      "principle": "完全性",
+      "suggested_fix": "§7.1 (新規テスト) または §7.4 を新設し、以下を追加: ```python\ndef test_existing_yaml_loads_without_threshold_field():\n    for yml in Path('configs').glob('photon_*.yaml'):\n        cfg = load_photon_config(yml)\n        assert cfg.model.embedding_random_init_threshold == 0.3\n``` (既存 5 件の photon_*.yaml が新 field なしで load 成功し default 0.3 が適用されることを確認)。実装順序 §8 にも Step 4-D として追加する。"
+    },
+    {
+      "id": "DR1-004",
+      "severity": "Should Fix",
+      "title": "設計判断 #2 の `_check_weight_initialization` が SRP を逸脱している",
+      "description": "現在の実装は (1) embedding 属性アクセス、(2) MagicMock ガード、(3) σ 計算、(4) 例外吸収、(5) WARNING ログ整形 を 1 関数で兼務している。SOLID-SRP の観点では『取得』『判定』『通知』に責務が分離していない。とはいえ約 20 行の小関数であり KISS の観点では一体化が合理的でもある。両者のトレードオフ判断と『現段階では 1 関数に集約することの根拠』が設計判断 #2 に明示されていない。将来 'norm check 以外の起動時 check を増やす' (§3 リスク欄に YAGNI 留保あり) ときに分割するという宣言だけでは、レビュアーが『今分割しないことの根拠』を判断しづらい。",
+      "principle": "SOLID",
+      "suggested_fix": "設計判断 #2 のトレードオフ節に以下を追記: 『_check_weight_initialization は責務 (a) 属性取得 (b) σ 計算 (c) WARNING 通知 を兼務するが、いずれも 5 行未満かつ起動時 1 回のみ実行されるため KISS を優先して分割しない。将来 (i) 別の起動 check 追加時、または (ii) σ 計算ロジックを test 直接呼び出ししたいケースが出た時点で `_compute_embedding_std()` と `_warn_if_high_variance()` に分離する (DR1-004)』"
+    },
+    {
+      "id": "DR1-005",
+      "severity": "Should Fix",
+      "title": "設計判断 #4 の string-existence test だけでは reviewer 検証ロジックの正しさを保証できず DRY 性が弱い",
+      "description": "設計判断 #4 で『Markdown snippet + string-existence test』を選択した理由は妥当だが、test 戦略 §7.1 の `test_pm_auto_issue2dev_reviewer_check_snippet` は『reviewer=\"codex\" 文字列が存在する』のみを検証しており、(a) snippet 内の jq/python script が実行可能か、(b) reviewer フィールド欠落 / 値ミスマッチ時に WARNING が完了レポートに記録されるか、を担保しない。Issue 本文受入条件『欠落・reviewer!=\"codex\" ケースが WARNING + completion report 記録になることも fixture で確認する (S7-001)』を満たすには、Markdown snippet 単独 test では不足。helper script 案 (b) を YAGNI として却下した判断は妥当だが、最低限 snippet を実機で 1 回 dry-run する shell-based smoke test (例: `bash -c \"$(extract_snippet_from_markdown)\"`) を追加するか、もしくは『この受入条件は (a) では構造的に達成不能なため fixture 文字列存在確認に縮退する』と明示するべき。",
+      "principle": "DRY",
+      "suggested_fix": "設計判断 #4 末尾と §7.1 に以下を追加: 『Markdown snippet の動作検証 test (例: tests/test_skill_descriptions.py::test_reviewer_check_snippet_executes) として、snippet を一時ファイルに展開し reviewer=\"codex\" / reviewer=\"claude\" / ファイル欠落 の 3 ケースで bash 実行し、WARNING が出力されること (もしくは exit 0 で通過すること) を確認する』を新規テストとして追加する。あるいは Issue 受入条件 S7-001 の充足条件を『snippet 文字列存在のみ』に明示縮退する宣言を §7.1 に書き、scope を一致させる。"
+    },
+    {
+      "id": "DR1-006",
+      "severity": "Should Fix",
+      "title": "実装順序 §8 のレイヤー間依存に逆転リスク (Step 4 で test 失敗 → Step 1-3 を修正必要)",
+      "description": "実装順序は Step 1 (config field) → Step 2 (inference.py) → Step 3 (conftest.py 閾値 inf) → Step 4 (新 test 3 件) → Step 5 (skill description test) と並んでいる。しかし Step 3 で WARNING 抑制 fixture を入れた瞬間に既存 27 件の `PhotonInference(...)` test が WARNING を出さなくなる前提のはずだが、DR1-001 で指摘した通り conftest.py 改変だけでは抑制が効かないため、Step 4-A の Step 1 で『高 σ で WARNING が出る』という新規 test と Step 3 の『既存 test では WARNING を出さない』という二要件が干渉する。Step 4 で test 失敗 → Step 3 設計の見直し → Step 1-2 まで遡る逆転が発生する。",
+      "principle": "実装容易性",
+      "suggested_fix": "DR1-001 の修正方針 (conftest.py 改変 ではなく `_tiny_cfg` 修正、または autouse fixture 新設) に応じて、§8 を以下の順に再編成: Step 1 ModelConfig field 追加 → Step 2 既存テスト conftest/`_tiny_cfg` の閾値 inf 設定 → Step 3 inference.py 実装 → Step 4 既存テスト全パス確認 (回帰なし) → Step 5 新規 norm check test 3 件追加 → Step 6 yaml load 互換 test → Step 7 以降は skill / docs。すなわち『WARNING 抑制基盤を先に置いてから norm check 本体を入れる』順に変える。"
+    },
+    {
+      "id": "DR1-007",
+      "severity": "Should Fix",
+      "title": "テスト戦略 §7.2 の `_photon_cfg(threshold=0.1)` ヘルパーが定義されていない",
+      "description": "§7.2 のテストケースで `cfg = _photon_cfg(threshold=0.1)` `cfg = _photon_cfg(threshold=10.0)` などのヘルパーを使っているが、既存 test_inference.py は `_tiny_cfg()` (引数なし) を使っており、`_photon_cfg(threshold=...)` は新規ヘルパー。設計方針書には新規ヘルパーの位置・signature が定義されておらず、実装フェーズで誤って `_tiny_cfg` を改造するか、無関係な命名で別ヘルパーを作るかの分岐が発生する。",
+      "principle": "完全性",
+      "suggested_fix": "§7.2 冒頭または §8 Step 4-B に以下のヘルパー定義を追加: ```python\ndef _photon_cfg(threshold: float = float('inf')) -> PhotonConfig:\n    cfg = _tiny_cfg()\n    cfg.model.embedding_random_init_threshold = threshold\n    return cfg\n``` (`_tiny_cfg` をベースに閾値だけ差し替える wrapper) — このヘルパーを test_inference.py に追加する旨を明記する。"
+    },
+    {
+      "id": "DR1-008",
+      "severity": "Should Fix",
+      "title": "設計判断 #5 の auto-skip 廃止波及範囲で行番号参照が古い可能性",
+      "description": "§3.5 設計判断 #5 で『line 202-207 相当』『line 334-342 相当』『line 378-380 相当』と具体行番号を記載しているが、`/multi-stage-issue-review.md` は本 Issue 自身で更新対象ファイルでもあり、Issue review プロセスで既に更新が入っている可能性がある。実装フェーズで行番号がずれると修正対象セクションを誤判別するリスクがある。'相当' とは書かれているが、目安が文字列マッチにならないと再現しにくい。",
+      "principle": "実装容易性",
+      "suggested_fix": "設計判断 #5 の行番号参照を文字列キーに置換する。例: 『「2回目イテレーション自動スキップ判定」見出しを含むセクション全体を削除』『「5-8 | 2回目イテレーション | X | X | 完了/スキップ」の行を「完了」固定 + reviewer=codex 検証済列に変更』『完了条件内の「2回目イテレーション自動スキップ」を含む箇条書きを削除』のように、行番号ではなく見出し or 引用文字列で対象を特定する記述に置き換える。"
+    },
+    {
+      "id": "DR1-009",
+      "severity": "Nice to Have",
+      "title": "§5 セキュリティ設計の grep 対象範囲指定が code_review_checklist.md と微妙に異なる",
+      "description": "§5 セキュリティ表で grep 対象を『baseline_reporag/, photon_mlx/, torch_ref/ の production import path』としているが、Issue 本文 Task 3 の docs (code_review_checklist.md) では除外パターンに `*/tests/**, bench/**, scripts/dev/**, demo/**, conftest.py` を挙げており、scripts/dev と demo の扱いが §5 では明記されていない。本 Issue で test 実装は #139 委譲のため大きな問題ではないが、checklist と設計方針書間で除外スコープが微妙に齟齬しており、レビュー時に 2 つの真の出典を読み比べる必要が生じる。",
+      "principle": "DRY",
+      "suggested_fix": "§5 セキュリティ設計の表に『grep 対象/除外スコープは docs/code_review_checklist.md と単一出典化する。本表では production import path に限定すると要約記述するに留め、詳細パターンは checklist を Single Source of Truth とする』と注記する。"
+    },
+    {
+      "id": "DR1-010",
+      "severity": "Nice to Have",
+      "title": "設計判断 #6 と『Codex 担当 Stage 必須』記述の表現に矛盾の余地",
+      "description": "Issue 本文ゴール 1 『Codex 担当 Stage 必須化』と設計判断 #6 『初期実装は WARNING + completion report 記録に留め fatal にしない』は、表面的には『必須なのに skip しても WARNING で済む』と読める。設計判断 #6 の『1 リリース猶予』『次回 Issue で fatal 化』という意図は読めるが、ゴール 1 の『必須』語と整合させるため『現フェーズの「必須」は強制力 = WARNING、完全強制 = 次回 Issue』と明示するのが望ましい。レビュー観点 §5『設計判断間での矛盾』に該当するか微妙だが、初学者が読むと矛盾と感じる可能性がある。",
+      "principle": "論理整合性",
+      "suggested_fix": "§1 ゴールまたは設計判断 #6 冒頭に注記を追加: 『本 Issue における「必須」は段階的厳格化の第 1 段階を指し、現実装では skip 時に WARNING + completion report 記録までを強制する。raise/exit 1 への昇格 (= 完全強制) は次回 Issue で扱う』。"
+    }
+  ],
+  "must_fix_count": 3,
+  "should_fix_count": 5,
+  "nice_to_have_count": 2,
+  "summary": "全体としては Issue 本文 29 finding をよく整理した設計方針書だが、Stage 1 設計原則レビューでは以下の重大論理ギャップを 3 件検出した。最も影響が大きいのは DR1-001 (設計判断 #3 の WARNING 抑制実装が conftest.py の実体と矛盾) で、photon_mlx/tests/conftest.py の `_make` は tokenizer factory であって cfg mutator ではないため、設計記述通りに実装すると 27 件の既存 PhotonInference test で WARNING 抑制が効かず、§8 実装順序が破綻する。DR1-002・DR1-003 は (a) ModelConfig 採用確定にもかかわらず Issue 本文 S7-003 受入条件・YAML 互換 test の設計方針書側カバレッジが欠落している点で、受入条件カバレッジ不足。Should Fix 5 件はテスト戦略の補完 (`_photon_cfg` ヘルパー未定義、Markdown snippet 動作 test の不足、行番号参照の脆弱性、実装順序の依存逆転) と SOLID-SRP の判断根拠補強。Nice to Have 2 件は DRY (grep 対象スコープの単一出典化) と論理整合性 (『必須』語と『WARNING のみ』の表現整合) の細部改善。設計判断 #1-#6 の選択根拠と KISS/YAGNI トレードオフは妥当であり、骨格設計に再構築は不要。Must Fix 3 件と Should Fix のうち少なくとも DR1-006・DR1-007 を反映すれば実装容易性が大幅に改善する。"
+}

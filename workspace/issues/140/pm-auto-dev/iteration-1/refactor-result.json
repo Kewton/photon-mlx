@@ -1,0 +1,14 @@
+{
+  "phase": "Phase 4: リファクタリング",
+  "issue_number": 140,
+  "refactoring_actions": [
+    {"id": "CB-001", "action": "applied_inline", "description": "_check_weight_initialization の比較を try 範囲内に移動。invalid threshold (None / str / NaN) でも __init__ を fail させずに silent skip する。docstring の WARNING-only / silent-skip 方針との整合確保"},
+    {"id": "CB-002", "action": "applied_inline", "description": "PM コマンド内 reviewer 検証 snippet で invalid ISSUE 値の生 echo を排除。LC_ALL=C tr で英数字以外を ? に置換してから printf で出力 (ログ注入対策)。pm-auto-issue2dev.md / pm-auto-design2dev.md の両方で対応"},
+    {"id": "CB-003", "action": "applied_inline", "description": "test_reviewer_snippet_smoke / test_reviewer_snippet_rejects_invalid_issue で returncode == 0 を assert。snippet 自体の syntax / runtime error を検出"}
+  ],
+  "additional_quality_improvements": [],
+  "ruff_check_after_refactor": "All checks passed",
+  "ruff_format_check_after_refactor": "148 files already formatted",
+  "test_status_after_refactor": "1084 passed (既知 pre-existing 2 件除外、2 skipped)",
+  "verdict": "pass"
+}

@@ -1,0 +1,25 @@
+{
+  "stage": 3,
+  "applied_findings": [
+    {
+      "id": "DR3-001",
+      "applied": true,
+      "section": "設計判断 #3 / §7.3 / §8 / Layer 4",
+      "note": "WARNING 抑制対象を test_inference.py / test_generate.py / test_session.py の実 PhotonInference 経路に拡張し、test_optimize.py は対象外と明記"
+    },
+    {
+      "id": "DR3-002",
+      "applied": true,
+      "section": "§7.4 / Layer 4",
+      "note": "既存 yaml load 互換テストの配置先を photon_mlx/tests/test_config.py と明記し、Layer 4 変更マップへ追加"
+    },
+    {
+      "id": "DR3-003",
+      "applied": true,
+      "section": "§7.5",
+      "note": "reviewer snippet smoke test の `...` を tmp_path workspace 作成、ISSUE 変数設定、擬似 JSON 作成、WARNING 出力判定を含む具体コードに置換"
+    }
+  ],
+  "applied_count": 3,
+  "skipped_count": 0
+}

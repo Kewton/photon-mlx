@@ -1,0 +1,18 @@
+{
+  "issue_number": "140",
+  "focus_area": "影響範囲",
+  "iteration": 1,
+  "stage": 3,
+  "stage_name": "影響範囲レビュー（1回目）",
+  "previous_review": "stage1-review-result.json",
+  "previous_apply": "stage2-apply-result.json",
+  "current_issue_body_path": "workspace/issues/140/issue-review/stage2-issue-body.md",
+  "review_focus": [
+    "変更の波及効果 (どの skill / コマンド / モジュールが影響を受けるか)",
+    "後方互換性 (--skip-stage 利用ケース、既存 progress-report テンプレートとの整合)",
+    "テスト範囲の完全性 (skill 文言検証 / Phase 完了判定 / norm check の test 漏れ)",
+    "CI / 自動化への影響 (CI grep スクリプト、pre-commit hook 等)",
+    "ドキュメント波及 (CLAUDE.md / docs/ / agents/ ハイパーリンク)",
+    "他 Issue (#135, #139) との依存・競合"
+  ]
+}

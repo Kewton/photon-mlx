@@ -1,0 +1,17 @@
+{
+  "stage": 1,
+  "applied_findings": [
+    {"id": "DR1-001", "applied": true, "section": "設計判断 #3", "note": "conftest.py 改造案を撤回し _tiny_cfg() の default 変更 + _photon_cfg ヘルパー方式に書き換え"},
+    {"id": "DR1-002", "applied": true, "section": "設計判断 #1", "note": "S7-003 (WorkingMemoryConfig 案) の対象外宣言を末尾に追記"},
+    {"id": "DR1-003", "applied": true, "section": "§7.4 (新規)", "note": "configs/photon_*.yaml 5 件の load 互換 test を追加"},
+    {"id": "DR1-004", "applied": true, "section": "設計判断 #2", "note": "SRP/KISS トレードオフ判断と将来の分割条件を明記"},
+    {"id": "DR1-005", "applied": true, "section": "設計判断 #4 / §7.5 (新規)", "note": "Markdown snippet 動作 smoke test を §7.5 として追加"},
+    {"id": "DR1-006", "applied": true, "section": "§8", "note": "実装順序を再編成 (test ヘルパー先行 → 本体実装)、Step を 12 → 14 に拡張"},
+    {"id": "DR1-007", "applied": true, "section": "§7.2", "note": "_photon_cfg(threshold=...) ヘルパーの定義を §7.2 冒頭に追加"},
+    {"id": "DR1-008", "applied": true, "section": "設計判断 #5", "note": "行番号参照を見出し / 引用文字列マッチに置換"},
+    {"id": "DR1-009", "applied": true, "section": "§5", "note": "grep 対象/除外の Single Source of Truth を docs/code_review_checklist.md に明示"},
+    {"id": "DR1-010", "applied": true, "section": "§1", "note": "「必須」の段階的厳格化 (= 第 1 段階 = WARNING のみ) 注記を冒頭に追加"}
+  ],
+  "applied_count": 10,
+  "skipped_count": 0
+}
