@@ -1,0 +1,101 @@
+{
+  "stage": 2,
+  "focus": "整合性",
+  "reviewer": "opus",
+  "findings": [
+    {
+      "id": "DR2-001",
+      "severity": "Must Fix",
+      "title": "§7.3 と §3 設計判断 #3 で `_tiny_cfg()` の default 変更方針が二重定義になっており、複数 test ファイル間の整合性が破綻している",
+      "description": "設計判断 #3 (DR1-001 反映) §7.3 §8 Step 2 で『`_tiny_cfg()` の戻り値の `cfg.model.embedding_random_init_threshold` の default を `float('inf')` に変更することで全件 WARNING 抑制を効かせる』と明記している。しかし実コードで `_tiny_cfg` ヘルパーは `photon_mlx/tests/test_inference.py:39` `photon_mlx/tests/test_optimize.py:31` `photon_mlx/tests/test_generate.py:23` `photon_mlx/tests/test_session.py:40` の **4 ファイルに重複定義** されている (それぞれ独立関数)。設計方針書は test_inference.py の `_tiny_cfg` のみ言及しており、他 3 ファイルでの扱いが定義されていない。test_optimize.py / test_session.py は PhotonInference を直接生成しないが、test_session.py:412 で `cfg = _tiny_cfg()` を呼び後で `PhotonInference` 経路に辿る可能性 (もしくは将来的拡張) があるため、4 ヘルパーすべてに対する方針 (一括変更 vs test_inference.py のみ) を明示しないと実装フェーズで分岐判断を強いられる。",
+      "category": "設計書vs実コード",
+      "evidence": "photon_mlx/tests/test_inference.py:39, photon_mlx/tests/test_optimize.py:31, photon_mlx/tests/test_generate.py:23, photon_mlx/tests/test_session.py:40 (4 重複定義); 設計書 §7.3 / §8 Step 2 (_tiny_cfg の言及は 1 箇所のみ)",
+      "suggested_fix": "§7.3 または §8 Step 2 を以下のように具体化する: 『`_tiny_cfg` ヘルパーは photon_mlx/tests 配下に 4 ファイル (test_inference.py, test_optimize.py, test_generate.py, test_session.py) で重複定義されている。本 Issue では PhotonInference を直接生成する `test_inference.py` (12 件) の `_tiny_cfg` のみを更新し default を float(\"inf\") にする。他 3 ファイルは PhotonInference 生成経路がないため変更不要 (もしくは将来の WARNING 出現時に対応する)。』もしくは 4 ヘルパーすべてを共通化する (重複解消) ことを別 Issue として宣言する。"
+    },
+    {
+      "id": "DR2-002",
+      "severity": "Must Fix",
+      "title": "§7.4 の `load_photon_config` 経路と ModelConfig.__post_init__ 起動による『新 field default 0.3 適用』検証手順に欠陥がある",
+      "description": "§7.4 (DR1-003 反映) は `load_photon_config(yml)` で『新 field 未指定時に default 0.3 で load 成功』することを assert しているが、実コード `torch_ref/config.py:215-257` の `load_photon_config` は (1) `_set_fields(cfg.model, raw.get('model', {}))` で yaml の model section を ModelConfig に流し込み、(2) その後 `cfg.model.__post_init__()` を **明示再実行** する (line 222: `cfg.model.__post_init__()`)。新 field `embedding_random_init_threshold: float = 0.3` を ModelConfig dataclass に追加するだけでは __post_init__ で何もしないが、もし将来 __post_init__ で threshold 範囲チェック (例: `if self.embedding_random_init_threshold < 0: raise`) を追加した場合、yaml load 時に再 raise する経路が二重に走る。設計方針書 §7.4 / §3 設計判断 #1 は __post_init__ 再実行経路を考慮していない。さらに重要な問題として、`configs/photon_long_context.yaml` `photon_600m_paper.yaml` は `training` セクションも持つため `_validate_cross_config` (line 189-212) が走り、そこで `context_length` チェック等が発生する。`load_photon_config` を test parametrize に投入するなら、そちらが既存 yaml で pass している前提を確認しないと、新 field 追加が yaml に対する副作用を生む可能性を見逃す。",
+      "category": "設計書vs実コード",
+      "evidence": "torch_ref/config.py:215-257 (load_photon_config 全体), :220-222 (model section 流し込み + __post_init__ 再実行), :255-256 (_validate_cross_config 起動条件)",
+      "suggested_fix": "§7.4 に以下の注記を追加: (a) ModelConfig に追加する `embedding_random_init_threshold: float = 0.3` field は __post_init__ で範囲検証を行わない (default 0.3 をそのまま使用)。(b) test では `load_photon_config(yml)` を呼び、`cfg.model.embedding_random_init_threshold == 0.3` のみ assert する (training セクションを持つ yaml では _validate_cross_config が走るため、そこで既知の cross-validation 違反が起きないことを暗黙的に保証する)。(c) もし将来 __post_init__ で範囲検証を追加するなら、本 field のみのスコープでは行わず別 Issue で扱う。"
+    },
+    {
+      "id": "DR2-003",
+      "severity": "Should Fix",
+      "title": "§3 設計判断 #3 と §7.3 で『既存 27+ 件』『28+ 件』『28 件超』と test 数表現が揺れており、実数 (test_inference.py 内 12 + baseline_reporag 内含む) と乖離",
+      "description": "設計方針書 §3 設計判断 #3 (line 127) では『既存 27+ 件の PhotonInference(...) 生成 test』、§7.3 line 308 では同じ表現、§3 §7.3 の冒頭 §設計判断 #3 直前で Issue 本文も『既存 28 件超の PhotonInference(...) 呼び出しテスト』としている。実際に grep した結果は photon_mlx/tests/ 内に 12 件 (test_inference.py)、baseline_reporag/tests/ 内 4 件 + photon_mlx/tests/ 全体で約 16 件、合計 28 件 = test 数の感覚的下限。表記の揺れは小さいが、設計方針書 §3 設計判断 #3 の『default を `float('inf')` に変更することで全件 WARNING 抑制を効かせる』という前提が成立するためには **test_inference.py 内の 12 件 + baseline_reporag/tests/ 内の MagicMock 16 件**を別経路で抑制する必要がある (DR2-001 と関連)。`baseline_reporag/tests/test_photon_pipeline.py:1860` の MagicMock 経路は『MagicMock の getattr で token_embed が MagicMock を返す → isinstance(weight, mx.array) が False → silent skip』で動作するため WARNING 抑制不要。一方 baseline_reporag/tests/ で実 PhotonModel を渡す test がある場合は別途 _photon_cfg 経由になっておらず WARNING が出る可能性あり。",
+      "category": "設計書内部整合性",
+      "evidence": "設計方針書 line 127, 308 (27+/28 件), Issue 本文 (28 件超); 実コード grep で全 PhotonInference(...) test = 28 件 (test_inference.py 12 件 + baseline_reporag/tests/ + 他)",
+      "suggested_fix": "§3 設計判断 #3 / §7.3 で件数表記を『test_inference.py 12 件 (実 PhotonModel 経路) + baseline_reporag/tests/test_photon_pipeline.py 1860 の MagicMock 経路 (silent skip で WARNING を出さない)』のように **経路別に分割明示** する。実 PhotonModel を渡す test (test_inference.py の 12 件) のみが WARNING 抑制対象である旨を明記する。"
+    },
+    {
+      "id": "DR2-004",
+      "severity": "Should Fix",
+      "title": "§7.2 の `_build_real_model` / `_stub_tokenizer` が未定義で、既存 fixture (`stub_tokenizer_for_cfg`) との関係が曖昧",
+      "description": "§7.2 のテストケース 3 件は `model = _build_real_model(cfg)` `tokenizer = _stub_tokenizer(cfg)` という未定義のヘルパーを呼んでいる。実コード photon_mlx/tests/test_inference.py:65 では `model = PhotonModel(cfg)` `tokenizer = stub_tokenizer_for_cfg(cfg)` (conftest.py の fixture 経由) で生成している。設計方針書の `_build_real_model` `_stub_tokenizer` は (a) 新規ヘルパーなのか (b) `PhotonModel(cfg)` `stub_tokenizer_for_cfg(cfg)` への単なる別名なのかが未定義で、実装フェーズでヘルパー新設の判断が分岐する。さらに `_stub_tokenizer(cfg)` は conftest.py の fixture (`stub_tokenizer_for_cfg`) と異なる名前のため、新規 import 関数とすると既存 conftest fixture との命名衝突リスクがある。",
+      "category": "設計書vs実コード",
+      "evidence": "設計書 §7.2 line 286, 290, 294 (`_build_real_model`, `_stub_tokenizer` 未定義); 実コード photon_mlx/tests/test_inference.py:65 (`PhotonModel(cfg)`, `stub_tokenizer_for_cfg(cfg)`)",
+      "suggested_fix": "§7.2 のテストコード例を以下に書き換える: (a) `_build_real_model(cfg)` → `PhotonModel(cfg)` (既存 `from photon_mlx.model import PhotonModel`) と直接記述。(b) `_stub_tokenizer(cfg)` → `stub_tokenizer_for_cfg(cfg)` (既存 conftest fixture を引数として受け取る) または直接 `_StubTokenizer(cfg.tokenizer.vocab_size)` をインポートして呼ぶ。新規ヘルパーは作らない (YAGNI)。"
+    },
+    {
+      "id": "DR2-005",
+      "severity": "Should Fix",
+      "title": "§3 設計判断 #5 の auto-skip 廃止『3 箇所』記述と実ファイル内の対象範囲の整合確認が不十分",
+      "description": "設計判断 #5 (DR1-008 反映) は auto-skip 関連を 3 箇所『見出し「2回目イテレーション自動スキップ判定」』『「5-8 | 2回目イテレーション | X | X | 完了/スキップ」を含む行』『完了条件内の「2回目イテレーション自動スキップ」を含む行』と特定。実ファイル `multi-stage-issue-review.md` を grep すると一致対象は line 202 (見出し), line 342 (summary 表), line 380 (完了条件) の 3 箇所で確かに対応する。しかし設計判断 #5 の (2) は『5-8 | ... | X | X | 完了/スキップ』を **「完了」固定 + reviewer=codex 検証済列に変更** と書いているが、実際の summary template line 339-342 は 5 列構成 (Stage / 内容 / opus / Codex / 状態) であり『reviewer=codex 検証済列を新規追加』するなら 6 列 (Stage / 内容 / opus / Codex / 状態 / reviewer 検証) に変える必要がある。設計方針書はこの **列数変更** を明示しておらず、実装フェーズで『どの列を更新／追加するか』が読み取れない。",
+      "category": "設計書vs実コード",
+      "evidence": ".claude/commands/multi-stage-issue-review.md:339-342 (summary template 5 列構成); 設計書 §3 設計判断 #5 line 167 (『reviewer=codex 検証済列に変更』)",
+      "suggested_fix": "§3 設計判断 #5 の (2) を以下に明確化: 『line 339-342 の summary 表 (5 列構成: Stage / 内容 / opus / Codex / 状態) について、Stage 5-8 行を「完了/スキップ」→「完了」固定に変更し、新規 6 列目「reviewer 検証」(✓ / WARNING) を追加する。table header も同期更新する。』 もしくは『状態列に「完了 (reviewer=codex 検証済)」のような統合表現にする』のいずれかを選択する。"
+    },
+    {
+      "id": "DR2-006",
+      "severity": "Should Fix",
+      "title": "§3 設計判断 #4 の reviewer 検証 snippet で issue review (Stage 5/7) と design review (Stage 3/4) のループ範囲が単一 sample のみ提示されている",
+      "description": "設計判断 #4 §7.5 の reviewer 検証 snippet は `for stage in 3 4; do ...` (design review 用) のみを示しており、issue review の Stage 5/7 用 snippet が独立して例示されていない。Issue 本文 Task 2 では『issue review = Stage 5, 7 の reviewer=codex 検証 / design review = Stage 3, 4 の reviewer=codex 検証』を要求しており、PM コマンドは pm-auto-issue2dev.md (Phase 1 = issue review, Phase 3 = design review) と pm-auto-design2dev.md (Phase 2 = design review) で **異なるディレクトリ** (`workspace/issues/N/issue-review/` vs `workspace/issues/N/multi-stage-design-review/`) を参照する必要がある。設計方針書の snippet は design review path のみを例示しており、issue review path 用の snippet が独立して定義されていない。設計判断 #4 内の該当 stage は『3 4』固定だが Phase 1 では『5 7』。",
+      "category": "設計書vs実コード",
+      "evidence": "設計書 line 148-156 (snippet で `for stage in 3 4`); Issue 本文 Task 2 (issue review = Stage 5, 7 / design review = Stage 3, 4)",
+      "suggested_fix": "§3 設計判断 #4 の snippet を以下のように 2 種類に分けて例示: (a) issue review 用 (Phase 1: pm-auto-issue2dev.md): `for stage in 5 7; do f=\"workspace/issues/$ISSUE/issue-review/stage${stage}-review-result.json\"; ...`、(b) design review 用 (Phase 3: pm-auto-issue2dev.md / Phase 2: pm-auto-design2dev.md): `for stage in 3 4; do f=\"workspace/issues/$ISSUE/multi-stage-design-review/stage${stage}-review-result.json\"; ...`。§7.5 smoke test の parametrize でも 2 経路をカバーする旨を明記する。"
+    },
+    {
+      "id": "DR2-007",
+      "severity": "Should Fix",
+      "title": "§7.5 reviewer snippet smoke test の REVIEWER_SNIPPET_RE が PM コマンド Markdown 内のコードブロック構造に依存しており頑健性が低い",
+      "description": "§7.5 の `REVIEWER_SNIPPET_RE = re.compile(r'```bash\\n(?P<body>[^`]*reviewer=\"codex\"[^`]*)\\n```', re.S)` は (a) 開始フェンスが ```bash` (b) snippet 内に ` (backtick) が含まれない (c) reviewer=\"codex\" の前後に他のコードブロックがない、を前提としている。しかし設計判断 #4 の snippet 例 (line 148-156) を見ると snippet 内に ` 文字を含む可能性は低いが、PM コマンド Markdown 全体には他にも ```bash コードブロックが存在する (`commandmatedev` 起動例など)。最初に出現する ```bash ブロックが reviewer 検証 snippet とは限らず、re.search が誤った snippet を返す可能性がある。さらに [^`]* は最短マッチではないため、reviewer=\"codex\" 文字列が含まれない別の ```bash ブロックを跨いで貪欲に巨大な body を取得するリスクもある。",
+      "category": "テスト整合性",
+      "evidence": "設計書 §7.5 line 335 (`REVIEWER_SNIPPET_RE` 定義); 実ファイル .claude/commands/pm-auto-issue2dev.md / pm-auto-design2dev.md には複数の ```bash ブロックが存在",
+      "suggested_fix": "§7.5 の REVIEWER_SNIPPET_RE を以下に強化: (a) `r'```bash\\n([^`]*?reviewer=\"codex\"[^`]*?)\\n```'` (最短マッチ `*?`) にする。(b) もしくは PM コマンド Markdown 内の reviewer 検証 snippet の前後に明示的なマーカーコメント (例: `# REVIEWER_VERIFICATION_SNIPPET_BEGIN/END`) を埋め込み、snippet 抽出を範囲指定にする。(c) いずれかの方針を §7.5 で明示する。"
+    },
+    {
+      "id": "DR2-008",
+      "severity": "Should Fix",
+      "title": "§8 実装順序 Step 4 の検証範囲が『既存 27+ 件』に限定されており、新 ModelConfig field の互換性検証 (Step 6) と前後関係が逆",
+      "description": "§8 実装順序 (DR1-006 反映) は Step 1 ModelConfig field 追加 → Step 2 _tiny_cfg default 変更 → Step 3 inference.py 実装 → Step 4 既存 27+ 件 PhotonInference test 無回帰確認 → Step 5 norm check 挙動 test → Step 6 yaml load 互換 test → Step 7 skill description test という順番。しかし Step 1 で ModelConfig に field を追加した時点で、既存 yaml 5 件の load 互換性が破壊される可能性がある (実装ミス時)。Step 4 の『既存 27+ 件 PhotonInference test 無回帰』は inference.py 経路の検証であり、yaml load 経路の検証ではない。Step 6 を Step 4 と同等の早期段階 (Step 1 直後) に置くと、ModelConfig 追加が yaml に対して副作用を持つかを早期検出できる。実装容易性 (作業計画段階での問題発見の早さ) を考えると Step 6 の前倒しが望ましい。",
+      "category": "設計書内部整合性",
+      "evidence": "設計書 §8 line 357-360 (Step 1-6 の順序)",
+      "suggested_fix": "§8 の Step 順を以下に再編成: Step 1 ModelConfig field 追加 → **Step 1.5 (新規) yaml load 互換性 quick check** (configs/photon_*.yaml 5 件が新 field 追加直後に load 成功することを手動 verify) → Step 2 _tiny_cfg default 変更 → Step 3 inference.py 実装 → Step 4 既存 PhotonInference test 無回帰 → Step 5 norm check 挙動 test → Step 6 yaml load 互換 test (formal pytest) → ... もしくは Step 1.5 を pytest で書く場合 Step 2 と Step 6 を入れ替える: Step 1 → Step 6 → Step 2 → Step 3 → Step 4 → Step 5 → ... の順にする。"
+    },
+    {
+      "id": "DR2-009",
+      "severity": "Nice to Have",
+      "title": "§7.1 `test_design_review_codex_required` / `test_issue_review_codex_required` の assertion が文字列存在のみで意味的検証が弱い",
+      "description": "§7.1 の test 6 件のうち上 2 件は `'Codex 担当 Stage' in body and '必須' in body` のみを assert している。実ファイル multi-stage-design-review.md には既に line 40 に『Stage 3-4（影響分析・セキュリティ） | **Codex**（commandmatedev `--agent codex` 経由）』、line 43 に『**⚠ 重要**: Stage 3-4 は必ず ... Codexに委譲すること。』と記載されており、『Codex』『必須』に類似する文字列が **既に存在する** ため、本 Issue の更新前から test が pass してしまう可能性がある (= 本 Issue の更新を担保しない)。`Codex 担当 Stage` という具体表現も既存記述には無いが、既存『Stage 3-4 は必ず Codexに委譲』が更新後と意味的に等価で、test がレグレッション検出の役に立たない可能性。",
+      "category": "テスト整合性",
+      "evidence": ".claude/commands/multi-stage-design-review.md:40, 43 (既存に類似文字列がある); 設計書 §7.1 line 236-242",
+      "suggested_fix": "§7.1 の test を意味的に強化する: (a) `'Codex 担当 Stage は必須' in body` のように、本 Issue 追加文言 (具体フレーズ) を完全一致で assert する。(b) もしくは 段階的厳格化を表す『WARNING』や『completion report』というキーワードと組み合わせる。(c) `'2回目イテレーション自動スキップ判定' not in body` のような **削除を assert する negative test** を追加する (これは §7.1 line 261-263 で既にあるので OK)。"
+    },
+    {
+      "id": "DR2-010",
+      "severity": "Nice to Have",
+      "title": "§3 設計判断 #1 で言及している『既存 7 個の configs/photon_*.yaml』表記の最終的な訂正が中途半端",
+      "description": "§3 設計判断 #1 line 46 は『既存 7 個の configs/photon_*.yaml (実際は 5 個: photon_600m_paper / photon_long_context / photon_small / photon_tiny / photon_tiny_recgen)』と訂正をカッコ書きで併記している。実コード `ls configs/` の結果は photon_*.yaml が確かに 5 件 (institutional_docs_photon.yaml は別シリーズ)。訂正は正しいが、読み手は『なぜ最初『7 個』と書いたのか』を一瞬考える必要があり、可読性が低い。最初から『5 個』表記にする方が単純。",
+      "category": "Stage1反映副作用",
+      "evidence": "設計書 §3 line 46 (『既存 7 個 ... 実際は 5 個』カッコ訂正); 実コード ls configs/ で photon_*.yaml = 5 件確認",
+      "suggested_fix": "§3 設計判断 #1 line 46 を『既存 5 個の configs/photon_*.yaml (photon_600m_paper / photon_long_context / photon_small / photon_tiny / photon_tiny_recgen)』に書き換える。『7 個』表記は削除する。"
+    }
+  ],
+  "must_fix_count": 2,
+  "should_fix_count": 6,
+  "nice_to_have_count": 2,
+  "summary": "Stage 2 整合性レビューで合計 10 件の finding を検出した。Must Fix 2 件は (DR2-001) `_tiny_cfg` ヘルパーが photon_mlx/tests/ 配下で 4 ファイルに重複定義されている事実を設計方針書がカバーしておらず実装フェーズで分岐判断を強いる構造、(DR2-002) §7.4 yaml load 互換テストが ModelConfig.__post_init__ 再実行経路と _validate_cross_config 起動条件を考慮しておらず副作用検証が不完全な点。Should Fix 6 件はテスト戦略の具体性 (DR2-003 件数表現の揺れ・経路別分割不足、DR2-004 _build_real_model / _stub_tokenizer の未定義、DR2-005 summary 表の列数変更明示不足、DR2-006 reviewer 検証 snippet の issue review/design review 経路分離不足、DR2-007 SNIPPET_RE の頑健性、DR2-008 実装順序での yaml 互換 test 前倒し) を扱う。Nice to Have 2 件は test の意味的強度 (DR2-009) と表記の単純化 (DR2-010)。Stage 1 の DR1-001 / DR1-006 / DR1-007 修正は概ね正しく反映されているが、4 ヘルパー重複問題 (DR2-001) と yaml 経路の細部 (DR2-002) は Stage 1 では検出されなかった整合性ギャップ。骨格設計に再構築は不要。"
+}
