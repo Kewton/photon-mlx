@@ -49,8 +49,12 @@ def main() -> None:
     print(f"        saved -> {idx_dir}/lexical.pkl")
 
     print(f"  [2/2] Embedding index ({embedding_model}) ...")
+    # #133: max_input_chars を YAML から取得 (default 2048)。
+    # bge-m3 等の長文対応モデルでは config で 8192 等に上げる。
+    max_input_chars = cfg.indexing.embedding.get("max_input_chars", 2048)
     embedding = EmbeddingIndex(
         model_id=embedding_model,
+        max_input_chars=max_input_chars,
     )
     embedding.build(
         store,

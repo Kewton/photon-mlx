@@ -114,6 +114,69 @@ class TestEmbeddingIndexBuildE5Prefix:
         assert len(encoded_text) == 9 + 2048
 
 
+class TestEmbeddingIndexMaxInputChars:
+    """#133: max_input_chars config 化 (bge-m3 等の 8192 max_length 活用)。
+
+    既存 baseline.yaml workload (default 2048) は不変。設計書 §3.1 / 判断 #3。
+    """
+
+    @patch("baseline_reporag.indexing.embedding.SentenceTransformer")
+    def test_default_max_input_chars_is_2048(self, mock_st) -> None:
+        mock_model = MagicMock()
+        mock_model.encode.return_value = np.zeros((1, 384), dtype=np.float32)
+        mock_st.return_value = mock_model
+        idx = EmbeddingIndex(model_id="sentence-transformers/all-MiniLM-L6-v2")
+        store = _make_fake_store([("c1", "", "", "a" * 3000)])
+        idx.build(store, repo_id="r", repo_commit="abc")
+        encoded_text = mock_model.encode.call_args[0][0][0]
+        assert len(encoded_text) == 2048
+
+    @patch("baseline_reporag.indexing.embedding.SentenceTransformer")
+    def test_custom_max_input_chars_extends_truncate(self, mock_st) -> None:
+        mock_model = MagicMock()
+        mock_model.encode.return_value = np.zeros((1, 1024), dtype=np.float32)
+        mock_st.return_value = mock_model
+        idx = EmbeddingIndex(model_id="BAAI/bge-m3", max_input_chars=8192)
+        store = _make_fake_store([("c1", "", "", "a" * 9000)])
+        idx.build(store, repo_id="r", repo_commit="abc")
+        encoded_text = mock_model.encode.call_args[0][0][0]
+        assert len(encoded_text) == 8192
+
+    @patch("baseline_reporag.indexing.embedding.SentenceTransformer")
+    def test_custom_max_input_chars_with_e5_prefix(self, mock_st) -> None:
+        mock_model = MagicMock()
+        mock_model.encode.return_value = np.zeros((1, 768), dtype=np.float32)
+        mock_st.return_value = mock_model
+        idx = EmbeddingIndex(
+            model_id="intfloat/multilingual-e5-base", max_input_chars=4096
+        )
+        store = _make_fake_store([("c1", "", "", "a" * 5000)])
+        idx.build(store, repo_id="r", repo_commit="abc")
+        encoded_text = mock_model.encode.call_args[0][0][0]
+        assert encoded_text.startswith("passage: ")
+        assert len(encoded_text) == 9 + 4096  # prefix + truncated body
+
+    def test_save_and_load_preserves_max_input_chars(self, tmp_path) -> None:
+        idx = EmbeddingIndex(
+            model_id="sentence-transformers/all-MiniLM-L6-v2", max_input_chars=4096
+        )
+        idx._embeddings = np.zeros((1, 384), dtype=np.float32)
+        idx._chunk_ids = ["c1"]
+        idx.save(tmp_path)
+        loaded = EmbeddingIndex.load(tmp_path)
+        assert loaded._max_input_chars == 4096
+
+    def test_load_legacy_index_defaults_max_input_chars_to_2048(self, tmp_path) -> None:
+        # Simulate legacy index without max_input_chars.txt
+        np.save(tmp_path / "embeddings.npy", np.zeros((1, 384), dtype=np.float32))
+        (tmp_path / "chunk_ids.json").write_text('["c1"]', encoding="utf-8")
+        (tmp_path / "model_id.txt").write_text(
+            "sentence-transformers/all-MiniLM-L6-v2", encoding="utf-8"
+        )
+        loaded = EmbeddingIndex.load(tmp_path)
+        assert loaded._max_input_chars == 2048
+
+
 class TestEmbeddingIndexSearchE5Prefix:
     @patch("baseline_reporag.indexing.embedding.SentenceTransformer")
     def test_search_passes_query_prefix_to_encode_for_e5(self, mock_st) -> None:

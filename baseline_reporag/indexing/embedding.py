@@ -73,12 +73,19 @@ class EmbeddingResult(NamedTuple):
     score: float
 
 
+_DEFAULT_MAX_INPUT_CHARS = 2048
+
+
 class EmbeddingIndex:
     def __init__(
         self,
         model_id: str = "sentence-transformers/all-MiniLM-L6-v2",
+        max_input_chars: int = _DEFAULT_MAX_INPUT_CHARS,
     ) -> None:
+        # max_input_chars: embedding 入力 truncate 上限。bge-m3 のような長文対応
+        # モデルでは 8192 等に上げる。chunker.max_chars (chunk size) とは別概念。
         self._model_id = model_id
+        self._max_input_chars = max_input_chars
         self._model: SentenceTransformer | None = None
         self._embeddings: np.ndarray | None = None  # shape (N, D), float32
         self._chunk_ids: list[str] = []
@@ -99,7 +106,7 @@ class EmbeddingIndex:
         self._chunk_ids = []
         for chunk in store.iter_repo(repo_id, repo_commit):
             text = f"{chunk.rel_path}\n{chunk.section_header}\n{chunk.content}"
-            texts.append(text[:2048])  # truncate to avoid OOM
+            texts.append(text[: self._max_input_chars])  # truncate to avoid OOM
             self._chunk_ids.append(chunk.chunk_id)
         texts = _e5_passage_prefix(self._model_id, texts)
         self._embeddings = self._model_().encode(
@@ -131,12 +138,23 @@ class EmbeddingIndex:
             json.dumps(self._chunk_ids), encoding="utf-8"
         )
         (dir_path / "model_id.txt").write_text(self._model_id, encoding="utf-8")
+        (dir_path / "max_input_chars.txt").write_text(
+            str(self._max_input_chars), encoding="utf-8"
+        )
 
     @classmethod
     def load(cls, dir_path: str | Path) -> EmbeddingIndex:
         dir_path = Path(dir_path)
         model_id = (dir_path / "model_id.txt").read_text(encoding="utf-8").strip()
-        idx = cls(model_id=model_id)
+        # 後方互換: legacy index (max_input_chars.txt なし) は default 2048。
+        max_input_chars_path = dir_path / "max_input_chars.txt"
+        if max_input_chars_path.exists():
+            max_input_chars = int(
+                max_input_chars_path.read_text(encoding="utf-8").strip()
+            )
+        else:
+            max_input_chars = _DEFAULT_MAX_INPUT_CHARS
+        idx = cls(model_id=model_id, max_input_chars=max_input_chars)
         idx._embeddings = np.load(dir_path / "embeddings.npy")
         idx._chunk_ids = json.loads(
             (dir_path / "chunk_ids.json").read_text(encoding="utf-8")
