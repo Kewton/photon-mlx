@@ -88,6 +88,39 @@ ls workspace/design/issue-{issue_number}-*-design-policy.md 2>/dev/null
 
 **出力ファイル**: `workspace/issues/{issue_number}/multi-stage-design-review/summary-report.md`
 
+#### 2-3. Codex stage 結果ファイル + `reviewer="codex"` 検証 (Issue #140 / S7-001 follow-up)
+
+Codex 担当 Stage 3/4 の結果ファイルが存在し `reviewer="codex"` が記録されていることを確認する。Claude による不正な上書きを検出する WARNING 機構。
+
+```bash
+# REVIEWER_VERIFICATION_SNIPPET_BEGIN (design-review)
+ISSUE="${ISSUE:-{issue_number}}"
+case "$ISSUE" in
+  ''|*[!0-9]*)
+    safe_issue=$(printf '%s' "$ISSUE" | LC_ALL=C tr -c '[:alnum:]_.@:-' '?')
+    printf 'WARNING: ISSUE=%s is not a numeric issue number; skipping reviewer verification\n' "$safe_issue"
+    ISSUE=""
+    ;;
+esac
+if [ -n "$ISSUE" ]; then
+  for stage in 3 4; do
+    f="workspace/issues/$ISSUE/multi-stage-design-review/stage${stage}-review-result.json"
+    if [ ! -f "$f" ]; then
+      printf 'WARNING: %s missing (Codex stage skipped or not yet run)\n' "$f"
+      continue
+    fi
+    reviewer=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("reviewer",""))' "$f" 2>/dev/null || echo "")
+    safe_reviewer=$(printf '%s' "$reviewer" | tr -c 'A-Za-z0-9_-' '?')
+    if [ "$reviewer" != "codex" ]; then
+      printf 'WARNING: %s reviewer=%s (expected codex)\n' "$f" "$safe_reviewer"
+    fi
+  done
+fi
+# REVIEWER_VERIFICATION_SNIPPET_END
+```
+
+判定: 結果ファイルが存在し `reviewer="codex"` であれば WARNING なし。それ以外は WARNING を出して **completion report に記録** する (raise / exit 1 はしない — 段階的厳格化の第 1 段階)。
+
 ---
 
 ### Phase 3: 作業計画立案
