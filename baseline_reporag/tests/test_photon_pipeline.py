@@ -687,6 +687,67 @@ class TestBuildPhotonDepsCheckpointLoad:
             "_build_photon_deps must raise FileNotFoundError on missing checkpoint_path"
         )
 
+    def test_build_photon_deps_does_not_import_trainer(self, tmp_path):
+        """DR1-002 / DR3-001: _build_photon_deps must not pull photon_mlx.trainer.
+
+        The trainer module imports ``mlx.optimizers`` and ``photon_mlx.loss``
+        at top level. baseline_reporag must keep its photon path free of
+        those training-time dependencies so pipeline_factory.py's lazy-MLX
+        promise still holds even on the photon branch. Regression test for
+        the boundary established by Issue #135 Phase 1 (commit ea2fa57)
+        that physically split checkpoint I/O out of trainer.
+
+        The check runs in a subprocess so that other tests in the same
+        pytest session — which legitimately import ``photon_mlx.trainer``
+        for end-to-end training tests — are not affected by sys.modules
+        manipulation.
+        """
+        import subprocess
+        import sys
+        import textwrap
+        from pathlib import Path
+
+        cfg_file = tmp_path / "photon.yaml"
+        cfg_file.write_text(_PHOTON_CFG_BASE)
+
+        repo_root = Path(__file__).resolve().parent.parent.parent
+        script = textwrap.dedent(
+            f"""
+            import sys
+            sys.path.insert(0, {str(repo_root)!r})
+
+            from baseline_reporag.config import load_config
+            from baseline_reporag.photon_pipeline import _build_photon_deps
+
+            cfg = load_config({str(cfg_file)!r})
+            _build_photon_deps(cfg)
+
+            forbidden = [
+                m for m in sys.modules
+                if m == "photon_mlx.trainer"
+                or m == "photon_mlx.loss"
+                or m.startswith("mlx.optimizers")
+            ]
+            if forbidden:
+                print("BOUNDARY_VIOLATION:" + ",".join(sorted(forbidden)))
+                sys.exit(1)
+            print("BOUNDARY_OK")
+            """
+        )
+
+        proc = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            cwd=str(repo_root),
+            timeout=60,
+        )
+
+        assert "BOUNDARY_OK" in proc.stdout, (
+            "_build_photon_deps boundary check failed.\n"
+            f"stdout: {proc.stdout}\nstderr: {proc.stderr}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Shared helpers for pipeline query tests (Issue #37+)
