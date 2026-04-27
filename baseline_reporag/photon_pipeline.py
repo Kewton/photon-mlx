@@ -10,9 +10,11 @@ Provides:
 from __future__ import annotations
 
 import logging
+import os
 import re
 import uuid
 from math import prod
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import mlx.core as mx
@@ -330,6 +332,15 @@ def _build_photon_deps(cfg: Config) -> dict[str, Any]:
     # test fixture (the same class of bug as S7-001 random-init weights).
     # Missing or unsafe tokenizer_id now raises ``ValueError`` at this
     # boundary.
+    # Issue #148 Phase A0 / DR4-002: validate model_id against the HF repo-id
+    # allowlist before any heavy construction.  model_id is untrusted yaml
+    # input; ``_validate_repo_id`` rejects URL / local-path / traversal forms.
+    # Skip validation when model_id is absent or empty (backwards compat for
+    # configs that omit the field).
+    raw_model_id = cfg.model.get("model_id", None)
+    if raw_model_id:
+        _validate_repo_id(raw_model_id, "model_id")
+
     if not tokenizer_id:
         raise ValueError(
             "cfg.tokenizer.tokenizer_id is required for provider=='photon'. "
@@ -339,6 +350,74 @@ def _build_photon_deps(cfg: Config) -> dict[str, Any]:
     tokenizer_id = _validate_tokenizer_id(tokenizer_id)
     tokenizer = _load_hf_tokenizer(tokenizer_id, photon_cfg.tokenizer.vocab_size)
     model = PhotonModel(photon_cfg)
+
+    # Issue #148 Phase A0 / DR-1: load checkpoint weights when
+    # ``cfg.model.checkpoint_path`` is set.  The allowed root is
+    # ``PHOTON_CHECKPOINT_ROOT`` (env var) or ``checkpoints/`` (default).
+    # Security invariants (§6):
+    # - root containment validated by ``_resolve_checkpoint_path``
+    # - symlink escape rejected (``resolve(strict=True)`` follows symlinks)
+    # - directory shape checked (weights.npz + state.json must exist)
+    # - on failure: RuntimeError by default (fail-fast); WARNING + continue
+    #   when ``PHOTON_ALLOW_RANDOM_INIT=1`` (unit/CI negative-path tests only —
+    #   never set in production or Phase A eval)
+    # - log messages use relative-to-root path only (never absolute path)
+    raw_ckpt_path = getattr(cfg.model, "checkpoint_path", None)
+    if raw_ckpt_path is None:
+        raw_ckpt_path = (
+            cfg.model.get("checkpoint_path", None)
+            if hasattr(cfg.model, "get")
+            else None
+        )
+    if raw_ckpt_path:
+        ckpt_path = _resolve_checkpoint_path(raw_ckpt_path)
+        # Directory shape validation (weights.npz + state.json required).
+        # CB-002 fix: use is_file() instead of exists() so that a directory
+        # named "weights.npz/" or a broken symlink does not pass the check.
+        for required_file in ("weights.npz", "state.json"):
+            if not (ckpt_path / required_file).is_file():
+                raise RuntimeError(
+                    f"checkpoint directory is missing {required_file!r}. "
+                    f"Expected a photon_mlx checkpoint directory containing "
+                    f"weights.npz and state.json."
+                )
+        # Compute root-relative path for safe logging (never log absolute path).
+        ckpt_root = Path(
+            os.environ.get("PHOTON_CHECKPOINT_ROOT", "checkpoints")
+        ).resolve()
+        try:
+            rel_ckpt = ckpt_path.relative_to(ckpt_root)
+        except ValueError:
+            rel_ckpt = ckpt_path.name
+        try:
+            _load_photon_checkpoint(model, ckpt_path)
+            _logger.info("Loaded PHOTON checkpoint from %s", rel_ckpt)
+        except Exception as exc:  # noqa: BLE001 — boundary normalization
+            exc_class = type(exc).__name__
+            allow_random_init = (
+                os.environ.get("PHOTON_ALLOW_RANDOM_INIT", "0").strip() == "1"
+            )
+            if allow_random_init:
+                _logger.warning(
+                    "checkpoint load failed (%s) — continuing with random-init weights "
+                    "because PHOTON_ALLOW_RANDOM_INIT=1. "
+                    "Do NOT use random-init for production inference.",
+                    exc_class,
+                )
+            else:
+                raise RuntimeError(
+                    f"checkpoint load failed ({exc_class}). "
+                    f"PHOTON_ALLOW_RANDOM_INIT=1 may bypass this check, but is "
+                    f"reserved for unit/CI negative-path tests — do not set it "
+                    f"for production inference or Phase A eval."
+                ) from None
+    else:
+        _logger.warning(
+            "cfg.model.checkpoint_path is not set; PhotonModel will use "
+            "random-init weights. Set checkpoint_path or PHOTON_CHECKPOINT_ROOT "
+            "for production inference."
+        )
+
     # Issue #64 / Codex CB-001: extract working memory policy once, pass it
     # into PhotonInference alongside the Issue #63 drift_level_weights below.
     working_memory_cfg = _extract_working_memory_cfg(cfg)
@@ -443,6 +522,114 @@ def _build_photon_deps(cfg: Config) -> dict[str, Any]:
         "photon_cfg": photon_cfg,
         "tokenizer": tokenizer,
     }
+
+
+# ---------------------------------------------------------------------------
+# Issue #148 Phase A0 — HF repo-id allowlist (model_id) + checkpoint helpers
+# ---------------------------------------------------------------------------
+
+# Shared pattern: HF repo-id must be ``<org>/<name>`` with ASCII
+# ``[A-Za-z0-9._-]`` only and exactly one slash.  Applies to both
+# ``tokenizer.tokenizer_id`` (existing) and ``model.model_id`` (new).
+_HF_REPO_ID_PATTERN = re.compile(r"^[A-Za-z0-9._\-]+/[A-Za-z0-9._\-]+$")
+
+
+def _validate_repo_id(value: str, key: str) -> None:
+    """Validate ``value`` against the HF repo-id allowlist for ``key``.
+
+    Accepts ``<org>/<name>`` with ASCII ``[A-Za-z0-9._-]`` and exactly one
+    slash.  Raises ``ValueError`` on unsafe input.
+
+    CB-004 fix: raw input value is never embedded in the exception message
+    to avoid leaking private slugs, token-like strings, or multi-line
+    payloads into logs / UI / CI artifacts.  Error messages follow the same
+    sanitization pattern as ``_validate_tokenizer_id``.
+
+    Rejects:
+    - URL forms (``://`` present)
+    - Absolute / tilde paths (leading ``/`` or ``~``)
+    - Path traversal (``..`` anywhere, or starts with ``../``)
+    - Multiple slashes (``org/name/extra``)
+    - No slash (``justname``)
+    - Non-ASCII / shell-metacharacter forms
+    """
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{key} must be a non-empty string")
+    if "/" not in value:
+        raise ValueError(
+            f"{key} must be a HuggingFace repo-id in '<org>/<name>' form "
+            f"(expected exactly one slash)"
+        )
+    if value.count("/") != 1:
+        raise ValueError(
+            f"{key} must contain exactly one slash (expected '<org>/<name>' form)"
+        )
+    if any(c in value for c in ("://", "\\", "\x00")):
+        raise ValueError(
+            f"{key} must not contain URL scheme or control characters "
+            f"(expected '<org>/<name>' with [A-Za-z0-9._-] only)"
+        )
+    if value.startswith(("/", "~", ".")):
+        raise ValueError(
+            f"{key} must not start with '/', '~', or '.' "
+            f"(path-like prefix not allowed; expected '<org>/<name>' form)"
+        )
+    if ".." in value:
+        raise ValueError(
+            f"{key} must not contain '..' "
+            f"(path traversal not allowed; expected '<org>/<name>' form)"
+        )
+    if not _HF_REPO_ID_PATTERN.fullmatch(value):
+        raise ValueError(
+            f"{key} has unsafe form (expected '<org>/<name>' with [A-Za-z0-9._-] only)"
+        )
+
+
+def _resolve_checkpoint_path(raw: str) -> Path:
+    """Validate root containment and symlink-escape, return resolved path.
+
+    The allowed root is ``PHOTON_CHECKPOINT_ROOT`` when set, otherwise the
+    ``checkpoints/`` directory relative to the repository root (cwd).
+
+    CB-001 fix: when ``raw`` is a relative path it is resolved against
+    ``root`` (not against cwd) so that the documented idiom
+    ``checkpoint_path: "mulmoclaude_step600"`` (relative to
+    ``PHOTON_CHECKPOINT_ROOT``) works as intended.  Absolute paths (and
+    ``~``-expanded paths) are resolved as-is so existing absolute-path
+    configs continue to work unchanged.
+
+    Raises ``RuntimeError`` if the resolved path escapes the root.
+    """
+    root = Path(os.environ.get("PHOTON_CHECKPOINT_ROOT", "checkpoints")).resolve()
+    raw_path = Path(raw).expanduser()
+    # Resolve relative paths against root (CB-001), absolute paths as-is.
+    candidate_unresolved = raw_path if raw_path.is_absolute() else root / raw_path
+    try:
+        candidate = candidate_unresolved.resolve(strict=True)
+    except (FileNotFoundError, OSError) as exc:
+        raise RuntimeError(
+            f"checkpoint_path does not exist or is inaccessible: {type(exc).__name__}"
+        ) from None
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        raise RuntimeError(
+            "checkpoint_path is outside the approved checkpoint roots. "
+            "Set PHOTON_CHECKPOINT_ROOT or place the checkpoint under "
+            "the repo 'checkpoints/' directory."
+        ) from None
+    return candidate
+
+
+def _load_photon_checkpoint(model: Any, path: Path) -> Any:
+    """Lazy wrapper around ``photon_mlx.trainer.load_checkpoint``.
+
+    The separate function makes the call site patchable in tests without
+    importing photon_mlx at module level (MLX-free import boundary).
+    """
+    from photon_mlx.trainer import load_checkpoint
+
+    return load_checkpoint(model, path)
 
 
 # Issue #139 / DR4-001 / Codex CB-001: ``tokenizer.tokenizer_id`` originates
