@@ -40,6 +40,14 @@ def main() -> None:
 
     cfg = load_config(args.config)
     repo_id = args.repo_id or cfg.repo.repo_id
+    # #154 follow-up: ``build_pipeline(cfg)`` loads the index at
+    # ``data/indexes/{cfg.repo.repo_id}``, so ``--repo-id`` must be
+    # propagated into ``cfg`` *before* the pipeline is built. Without
+    # this, the eval silently loads the YAML default index (e.g.
+    # ``fastapi_fastapi``) while ``pipeline.query(repo_id=...)`` filters
+    # for the requested repo, leaving retrieval empty. Surfaced when the
+    # #154 cross-repo filter started dropping mismatched chunks.
+    cfg.repo.repo_id = repo_id
     run_id = f"mt_eval_{repo_id}_{time.strftime('%Y%m%d_%H%M%S')}"
 
     # Stage 3 DR3-001: route via build_pipeline so PHOTON / baseline
