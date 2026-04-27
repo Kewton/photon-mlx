@@ -16,6 +16,8 @@ from typing import Any
 
 import yaml  # PyYAML — safe_load-only, see module docstring
 
+from baseline_reporag.config import validate_repo_id
+
 # Only these scalar / container types are permitted in a loaded YAML tree
 # (D4-005 reflected). Anything else — including custom Python objects
 # produced by ``!!python/object`` tags — causes ``_assert_safe_yaml`` to
@@ -29,6 +31,20 @@ ALLOWED_YAML_TYPES: tuple[type, ...] = (
     list,
     dict,
 )
+
+
+# Profile-specific YAML overrides applied when ``base_profile`` matches a
+# key. Source of truth: ``configs/<profile>.yaml`` (see CI guard
+# ``test_domain_template_matches_institutional_yaml``).
+_DOMAIN_TEMPLATES: dict[str, dict[tuple[str, ...], Any]] = {
+    "institutional_docs": {
+        ("indexing", "embedding", "model_id"): "BAAI/bge-m3",
+        ("indexing", "embedding", "batch_size"): 32,
+        ("indexing", "embedding", "max_input_chars"): 8192,
+        ("indexing", "symbol_graph", "enabled"): False,
+        ("retrieval", "reranker", "model_id"): "BAAI/bge-reranker-v2-m3",
+    },
+}
 
 
 # Issue #82 Wave 5 (W5-T1): the 5 best-practice keys we merge into a
@@ -284,4 +300,59 @@ def generate_yaml_from_wizard(
         if toggle_key in user_toggles:
             _deep_set(doc, path, user_toggles[toggle_key])
 
+    # Gated on ``base_profile == template name`` (no cross-profile override)
+    # so picking ``photon_small`` cannot accidentally pull institutional
+    # pins in and break the index cache.
+    template = _DOMAIN_TEMPLATES.get(base_profile)
+    if template is not None:
+        for path, value in template.items():
+            _deep_set(doc, path, value)
+
     return yaml.safe_dump(doc, sort_keys=False, allow_unicode=True)
+
+
+def validate_generated_repo_id(
+    generated_yaml: str, expected_repo_id: str
+) -> str | None:
+    """Verify ``generated_yaml`` carries the same ``repo.repo_id`` as the
+    Project the user selected.
+
+    ``generate_yaml_from_wizard()`` returns a YAML whose ``repo.repo_id``
+    is inherited from the chosen base profile (e.g. the one in
+    ``configs/institutional_docs.yaml``). Streamlit's Project registration
+    feeds eval jobs with its own ``--repo-id``; if the two diverge,
+    ``build_pipeline(cfg)`` loads one repo's index while the eval
+    queries another, silently producing wrong-repo results.
+
+    Returns ``None`` when the generated YAML's ``repo.repo_id`` matches
+    ``expected_repo_id`` AND both ids satisfy
+    :func:`baseline_reporag.config.validate_repo_id` (so a string-equal
+    pair like ``"../evil" == "../evil"`` cannot smuggle a traversal segment
+    into the saved YAML). Otherwise returns a human-readable error string
+    that the caller (the Streamlit UI) is expected to surface via
+    ``st.error()`` and refuse to save.
+    """
+    doc = yaml.safe_load(generated_yaml) or {}
+    if not isinstance(doc, dict):
+        return f"wizard YAML が mapping ではありません: {type(doc).__name__}"
+    repo_section = doc.get("repo")
+    if not isinstance(repo_section, dict):
+        return (
+            "wizard YAML に repo セクションがありません — "
+            "選択中の base profile を確認してください"
+        )
+    generated_repo_id = repo_section.get("repo_id")
+    if generated_repo_id != expected_repo_id:
+        return (
+            "wizard YAML の repo.repo_id が選択中の repo_id と一致しません: "
+            f"{generated_repo_id!r} != {expected_repo_id!r}"
+        )
+    # Defense-in-depth: even when the two ids string-match, reject any
+    # value that fails the canonical [A-Za-z0-9_-]+ allowlist so a
+    # traversal segment like ``../evil`` cannot reach disk via
+    # ``photon_config_path``.
+    try:
+        validate_repo_id(generated_repo_id)
+    except (TypeError, ValueError) as exc:
+        return f"wizard YAML の repo.repo_id が不正です: {exc}"
+    return None

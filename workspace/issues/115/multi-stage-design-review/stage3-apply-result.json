@@ -1,0 +1,18 @@
+{
+  "stage": 3,
+  "applied_findings": [
+    "DR3-001",
+    "DR3-002",
+    "DR3-003"
+  ],
+  "must_fix_applied": [
+    "DR3-001"
+  ],
+  "should_fix_applied": [
+    "DR3-002",
+    "DR3-003"
+  ],
+  "nice_to_have_applied": [],
+  "design_doc_updated": true,
+  "summary": "Stage 3 影響範囲レビューの Must Fix 1件 / Should Fix 2件を設計方針書に反映。DR3-001: Streamlit Project repo_id と generated YAML の repo.repo_id 不一致を保存前 validation で拒否する設計、テスト、リスク、完了条件を追加。DR3-002: _resolve_system_prompt() の実装例を追加し build_messages サンプルを helper 呼び出しに修正。DR3-003: #135/#139 が photon_pipeline.py / test_photon_pipeline.py を触る rebase 影響と単独 pytest 確認をリスク表に追記。"
+}

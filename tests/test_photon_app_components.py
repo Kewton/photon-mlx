@@ -784,6 +784,180 @@ class TestGenerateYamlFromWizard:
         assert "ignored_extra" not in loaded
 
 
+# ---------------------------------------------------------------
+# Issue #115: T-C6 拡張 — _DOMAIN_TEMPLATES merge + yaml integrity guard
+# ---------------------------------------------------------------
+
+
+class TestDomainTemplatesInstitutional:
+    """Issue #115 T-C6 拡張 + DR1-001 / DR2-002 source-of-truth guard.
+
+    1. ``_DOMAIN_TEMPLATES["institutional_docs"]`` overwrites any value
+       in the base YAML when ``base_profile == "institutional_docs"``.
+    2. The template is a no-op for other base profiles.
+    3. The template values stay in lock-step with
+       ``configs/institutional_docs.yaml`` so wizard-generated YAML is
+       equivalent to the canonical config.
+    """
+
+    def test_institutional_docs_template_merges_5_keys(self) -> None:
+        # Intentionally wrong values for the 5 institutional template keys
+        # in the base YAML; the merge must overwrite them with the source
+        # of truth from ``_DOMAIN_TEMPLATES["institutional_docs"]``.
+        base = (
+            "indexing:\n"
+            "  embedding:\n"
+            "    model_id: WRONG/embedding\n"
+            "    batch_size: 99\n"
+            "    max_input_chars: 99\n"
+            "  symbol_graph:\n"
+            "    enabled: true\n"
+            "retrieval:\n"
+            "  reranker:\n"
+            "    model_id: WRONG/reranker\n"
+        )
+        result = wizard.generate_yaml_from_wizard(
+            "institutional_docs",
+            user_toggles={},
+            base_yaml_text=base,
+        )
+        loaded = yaml.safe_load(result)
+        expected = wizard._DOMAIN_TEMPLATES["institutional_docs"]
+        assert (
+            loaded["indexing"]["embedding"]["model_id"]
+            == expected[("indexing", "embedding", "model_id")]
+        )
+        assert (
+            loaded["indexing"]["embedding"]["batch_size"]
+            == expected[("indexing", "embedding", "batch_size")]
+        )
+        assert (
+            loaded["indexing"]["embedding"]["max_input_chars"]
+            == expected[("indexing", "embedding", "max_input_chars")]
+        )
+        assert (
+            loaded["indexing"]["symbol_graph"]["enabled"]
+            == expected[("indexing", "symbol_graph", "enabled")]
+        )
+        assert (
+            loaded["retrieval"]["reranker"]["model_id"]
+            == expected[("retrieval", "reranker", "model_id")]
+        )
+
+    def test_domain_template_no_op_on_other_profiles(self) -> None:
+        # photon_small base_profile must NOT pull in the institutional
+        # template (else the embedding model and reranker would drift
+        # from the photon_small canonical config).
+        base = (
+            "indexing:\n"
+            "  embedding:\n"
+            "    model_id: photon_small/embedding\n"
+            "  symbol_graph:\n"
+            "    enabled: true\n"
+            "retrieval:\n"
+            "  reranker:\n"
+            "    model_id: photon_small/reranker\n"
+        )
+        result = wizard.generate_yaml_from_wizard(
+            "photon_small",
+            user_toggles={},
+            base_yaml_text=base,
+        )
+        loaded = yaml.safe_load(result)
+        # All three keys must remain at their base (photon_small) values.
+        assert loaded["indexing"]["embedding"]["model_id"] == "photon_small/embedding"
+        assert loaded["indexing"]["symbol_graph"]["enabled"] is True
+        assert loaded["retrieval"]["reranker"]["model_id"] == "photon_small/reranker"
+
+    def test_domain_template_matches_institutional_yaml(self) -> None:
+        """DR1-001 / DR2-002: ``_DOMAIN_TEMPLATES["institutional_docs"]``
+        must equal the corresponding values in
+        ``configs/institutional_docs.yaml`` — drift kills the
+        wizard-generated YAML's equivalence to the canonical config."""
+        cfg_path = PROJECT_ROOT / "configs" / "institutional_docs.yaml"
+        loaded = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+        template = wizard._DOMAIN_TEMPLATES["institutional_docs"]
+        for path, expected in template.items():
+            cur = loaded
+            for k in path:
+                assert isinstance(cur, dict), (
+                    f"path {'.'.join(path)} broken in institutional_docs.yaml"
+                )
+                assert k in cur, (
+                    f"path {'.'.join(path)} missing in institutional_docs.yaml"
+                )
+                cur = cur[k]
+            assert cur == expected, (
+                f"_DOMAIN_TEMPLATES drift at {'.'.join(path)}: "
+                f"yaml={cur!r} template={expected!r}"
+            )
+
+
+class TestValidateGeneratedRepoId:
+    """Issue #115 / DR3-001: ``validate_generated_repo_id`` rejects YAMLs
+    whose ``repo.repo_id`` diverges from the Project's selected ``repo_id``,
+    so the Streamlit UI cannot persist a config that would index-load one
+    repo while the eval job queries another."""
+
+    def test_matching_repo_id_returns_none(self) -> None:
+        gen = "repo:\n  repo_id: institutional_documents\n"
+        assert wizard.validate_generated_repo_id(gen, "institutional_documents") is None
+
+    def test_mismatching_repo_id_returns_error(self) -> None:
+        gen = "repo:\n  repo_id: photon-reporag\n"
+        msg = wizard.validate_generated_repo_id(gen, "institutional_documents")
+        assert msg is not None
+        # Both ids should appear in the error so the operator can see what
+        # was generated vs. what was expected.
+        assert "institutional_documents" in msg
+        assert "photon-reporag" in msg
+
+    def test_missing_repo_section_returns_error(self) -> None:
+        gen = "model: {}\n"
+        msg = wizard.validate_generated_repo_id(gen, "institutional_documents")
+        assert msg is not None
+        assert "repo" in msg
+
+    def test_non_mapping_top_level_returns_error(self) -> None:
+        gen = "- a\n- b\n"
+        msg = wizard.validate_generated_repo_id(gen, "institutional_documents")
+        assert msg is not None
+
+    def test_wizard_generated_repo_id_must_match_project_repo_id(self) -> None:
+        """End-to-end: the YAML generated for ``institutional_docs`` carries
+        ``repo_id=institutional_documents``; supplying a different Project
+        ``repo_id`` must be rejected by the validator (the Streamlit UI's
+        ``st.error()`` path)."""
+        cfg_path = PROJECT_ROOT / "configs" / "institutional_docs.yaml"
+        base_yaml = cfg_path.read_text(encoding="utf-8")
+        gen = wizard.generate_yaml_from_wizard(
+            "institutional_docs",
+            user_toggles={},
+            base_yaml_text=base_yaml,
+        )
+        # Matching repo_id (Project pointing at the right corpus).
+        assert wizard.validate_generated_repo_id(gen, "institutional_documents") is None
+        # Mismatched repo_id (Project pointing at a different corpus).
+        msg = wizard.validate_generated_repo_id(gen, "fastapi_fastapi")
+        assert msg is not None
+        assert "fastapi_fastapi" in msg
+
+    def test_traversal_repo_id_rejected_even_when_strings_match(self) -> None:
+        """Defense-in-depth: a YAML carrying ``repo_id: ../evil`` must be
+        refused even when the operator passes the same traversal string,
+        because ``photon_config_path`` would otherwise persist a value that
+        escapes the indexes/ root via ``Path`` concatenation."""
+        gen = "repo:\n  repo_id: ../evil\n"
+        msg = wizard.validate_generated_repo_id(gen, "../evil")
+        assert msg is not None
+        assert "../evil" in msg or "[A-Za-z0-9_-]" in msg
+
+    def test_shell_metacharacter_repo_id_rejected(self) -> None:
+        gen = "repo:\n  repo_id: foo;rm -rf /\n"
+        msg = wizard.validate_generated_repo_id(gen, "foo;rm -rf /")
+        assert msg is not None
+
+
 if __name__ == "__main__":  # pragma: no cover - manual run only
     import pytest as _pytest
 
