@@ -150,3 +150,60 @@ def test_generate_multi_turn_set_warns_on_doc_shortage(tmp_path: Path) -> None:
     with pytest.warns(UserWarning, match="shrunk"):
         sessions = generate_multi_turn_set(index=docs, client=client)
     assert len(sessions) == 2
+
+
+# ---------------------------------------------------------------------------
+# Issue #135 Day 3: retry must vary the seed so deterministic local LLMs
+# (mlx_lm Qwen) actually try a different sample on each attempt instead of
+# replaying the identical malformed JSON.
+# ---------------------------------------------------------------------------
+
+
+class _SeedRecordingClient:
+    """Records every ``seed`` it sees and lets us shape responses per attempt."""
+
+    name = "fake"
+    model = "fake-model"
+
+    def __init__(self, responses: list[str]) -> None:
+        self._responses = list(responses)
+        self.seeds_seen: list[int | None] = []
+
+    def generate(
+        self,
+        prompt: str,
+        *,
+        temperature: float = 0.2,
+        seed: int | None = 42,
+        response_format: str = "json_object",
+    ) -> str:
+        self.seeds_seen.append(seed)
+        if not self._responses:
+            raise AssertionError("more generate calls than canned responses")
+        return self._responses.pop(0)
+
+
+def test_generate_session_varies_seed_per_retry(tmp_path: Path) -> None:
+    """Issue #135: with mlx_lm Qwen, ``client.generate(prompt, seed=42)``
+    is deterministic — every retry replays the same broken JSON. Verify
+    that ``generate_session`` perturbs the seed on each retry attempt so
+    the LLM actually has a chance to produce different output.
+    """
+    doc = _make_doc(tmp_path)
+    # First two responses fail JSON parse; third succeeds.
+    bad = "not valid json {{}"
+    client = _SeedRecordingClient([bad, bad, _six_turn_payload(distinct=True)])
+    session = generate_session(
+        doc=doc,
+        scenario="drill_down",
+        seq=1,
+        client=client,
+        sleep_fn=lambda _s: None,
+    )
+    assert session["session_id"] == "INST-MT-001"
+    # Three calls must have used three distinct seeds — otherwise the
+    # retry is just replaying the same deterministic LLM output.
+    assert len(client.seeds_seen) == 3
+    assert len(set(client.seeds_seen)) == 3, (
+        f"retries must use distinct seeds, got {client.seeds_seen}"
+    )

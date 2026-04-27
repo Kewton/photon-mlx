@@ -105,11 +105,17 @@ def generate_question(
     difficulty: str = "medium",
     max_retries: int = MAX_RETRIES,
     sleep_fn=time.sleep,
+    base_seed: int = 42,
 ) -> dict:
     """Generate 1 eval row for ``doc`` / ``category`` using ``client``.
 
     Retries up to ``max_retries`` times on JSON parse / key-check failure.
     On exhaustion raises ``GenerationFailure`` and emits a stderr JSON line.
+
+    Issue #135 Day 3: ``QwenMLXAdapter.generate(prompt, seed=N)`` is
+    deterministic for a given prompt + seed pair, so naive retry replays
+    the identical (broken) JSON. We perturb ``seed`` by ``attempt`` so
+    each retry actually samples a different output.
     """
     document_text = _read_document(doc)
     prompt = build_prompt(
@@ -119,7 +125,7 @@ def generate_question(
     last_error: str = ""
     for attempt in range(max_retries):
         try:
-            raw = client.generate(prompt)
+            raw = client.generate(prompt, seed=base_seed + attempt)
             parsed = _parse_json_strict(raw)
             return _build_row(
                 doc=doc,

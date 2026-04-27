@@ -153,13 +153,22 @@ def generate_session(
     client: LLMClient,
     max_retries: int = MAX_RETRIES,
     sleep_fn=time.sleep,
+    base_seed: int = 42,
 ) -> dict:
-    """Generate one 6-turn session for ``doc`` using ``client``."""
+    """Generate one 6-turn session for ``doc`` using ``client``.
+
+    Issue #135 Day 3: ``QwenMLXAdapter.generate(prompt, seed=N)`` is
+    deterministic for a given prompt + seed pair — naive retry on the
+    same seed replays the identical (broken) JSON. We perturb ``seed``
+    by ``attempt`` so each retry actually samples a different output;
+    OpenAI / other clients that already vary outputs are unaffected
+    because they treat ``seed`` as a hint, not a hard determinant.
+    """
     prompt = _build_session_prompt(doc)
     last_error = ""
     for attempt in range(max_retries):
         try:
-            raw = client.generate(prompt)
+            raw = client.generate(prompt, seed=base_seed + attempt)
             parsed = _parse_session(raw)
             session = _compose_session(
                 doc=doc, scenario=scenario, seq=seq, parsed=parsed, client=client
