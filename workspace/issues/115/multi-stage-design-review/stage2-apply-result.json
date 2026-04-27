@@ -1,0 +1,10 @@
+{
+  "stage": 2,
+  "applied_findings": ["DR2-001", "DR2-002", "DR2-003", "DR2-004", "DR2-005", "DR2-006", "DR2-007", "DR2-008", "DR2-009"],
+  "must_fix_applied": ["DR2-001", "DR2-002", "DR2-003", "DR2-004"],
+  "should_fix_applied": ["DR2-005", "DR2-006", "DR2-007"],
+  "nice_to_have_applied": ["DR2-008", "DR2-009"],
+  "design_doc_updated": true,
+  "issue_body_updated": true,
+  "summary": "Stage 2 整合性レビューの Must Fix 4件 + Should Fix 3件 + Nice 2件を設計書に反映、一部 (DR2-003 / DR2-006) は Issue 本文も同期更新。DR2-001: §3-1 literal を pre-#137 確定形に整理し post-#137 はテキスト註記化。DR2-002: CI guard test 配置先を test_photon_app_components.py に確定、yaml 直接 parse 方式を明記。DR2-003: Issue 受入条件を 13→14 項目に拡張 (CI guard 追加)、§10 完了条件本文も 14 項目に修正。DR2-004: selectbox label を 'Base profile'→'Config template' に修正。DR2-005: §3-3 test 一覧に TestResolveSystemPrompt (3 tests) 追加。DR2-006: Issue body L11 の _DOMAIN_TEMPLATES 型注釈を tuple-key 形式に修正。DR2-007: 並列開発記述を pre-#137 先行 + #137 先 merge 時のみ DR1-003 ルール適用に統一。DR2-008: source of truth / pin 値 / canonical config 用語を §4 で固定。DR2-009: T-C6 拡張 test の base_yaml_text 実装スタイルを §3-3 註記に追記。"
+}

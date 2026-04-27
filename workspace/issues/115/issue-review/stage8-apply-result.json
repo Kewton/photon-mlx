@@ -1,0 +1,21 @@
+{
+  "stage": 8,
+  "iteration": 2,
+  "applied_findings": [
+    "S7-001",
+    "S7-002",
+    "S7-003"
+  ],
+  "must_fix_applied": [
+    "S7-001"
+  ],
+  "should_fix_applied": [
+    "S7-002",
+    "S7-003"
+  ],
+  "nice_to_have_applied": [],
+  "github_updated": true,
+  "issue_url": "https://github.com/Kewton/photon-mlx/issues/115",
+  "body_file": "workspace/issues/115/issue-review/stage8-issue-body.md",
+  "summary": "Stage 7 影響範囲レビュー 2回目の Must Fix 1 件 / Should Fix 2 件を Issue #115 本文へ反映。主な変更: (1) #137 merge-order guard を追加し、実装時点の configs/institutional_docs.yaml と tests/test_pipeline_factory_yaml_invariants.py の institutional pin 値を _DOMAIN_TEMPLATES の source of truth に変更、(2) #137 が先に入った場合の bge-m3 / bge-reranker-v2-m3 / batch_size=32 / max_input_chars=8192 反映条件を D-2・受入条件・関連・並列開発へ追記、(3) detect_language() の非空白文字数 0 は other とし空白のみ入力で ZeroDivisionError を避ける仕様と受入条件を追加、(4) baseline_reporag/tests/test_photon_pipeline.py を影響ファイルに追加し、PHOTON follow-up 相当の include_few_shot=False + session_summary 経路で条件付き日本語ヒントが残る受入条件を追加。レビュー履歴に Stage 7 セクションを追加し対応 finding ID を列挙。"
+}

@@ -1,0 +1,65 @@
+{
+  "reviewer": "codex",
+  "issue_number": 140,
+  "review_focus": [
+    "潜在バグ",
+    "セキュリティ脆弱性"
+  ],
+  "files_reviewed": [
+    "docs/code_review_checklist.md",
+    "tests/test_skill_descriptions.py",
+    "torch_ref/config.py",
+    "photon_mlx/inference.py",
+    "photon_mlx/tests/test_config.py",
+    "photon_mlx/tests/test_inference.py",
+    "photon_mlx/tests/test_generate.py",
+    "photon_mlx/tests/test_session.py",
+    ".claude/commands/multi-stage-design-review.md",
+    ".claude/commands/multi-stage-issue-review.md",
+    ".claude/commands/pm-auto-issue2dev.md",
+    ".claude/commands/pm-auto-design2dev.md",
+    "CLAUDE.md",
+    "workspace/design/issue-140-review-process-design-policy.md",
+    "workspace/issues/140/work-plan.md"
+  ],
+  "findings": [
+    {
+      "id": "CB-001",
+      "severity": "medium",
+      "category": "潜在バグ",
+      "file": "photon_mlx/inference.py",
+      "line": 138,
+      "title": "post-init 後に壊れた閾値が渡ると PhotonInference.__init__ が WARNING ではなく例外で落ちる",
+      "description": "ModelConfig.__post_init__ は YAML / constructor 経由の embedding_random_init_threshold を検証しているが、PhotonInference.__init__ は public API として cfg オブジェクトを受け取り、テストヘルパーと同様に呼び出し前の後続代入で threshold が変更され得る。_check_weight_initialization は属性取得と std 計算だけを try 範囲に入れており、`norm_std > threshold` は try の外にあるため、threshold が None / str / NaN 混入の非比較値に変更されていると TypeError 等が伝播する。関数 docstring は「start-up sanity check must NOT break __init__」としており、WARNING-only / silent-skip 方針と矛盾する。",
+      "suggestion": "threshold の型・finite・非負チェックを _check_weight_initialization の try 範囲内にも置くか、比較部分まで try に含めて invalid threshold は debug に exception class name のみ出して return する。fail-loud にしたい場合は docstring と設計方針を更新し、PhotonInference.__init__ の受け口でも明示的に validation する。"
+    },
+    {
+      "id": "CB-002",
+      "severity": "medium",
+      "category": "セキュリティ脆弱性",
+      "file": ".claude/commands/pm-auto-issue2dev.md",
+      "line": 80,
+      "title": "invalid ISSUE を raw に WARNING 出力しており completion report / CI log のログ注入が可能",
+      "description": "reviewer 検証 snippet は ISSUE が数値以外の場合に `echo \"WARNING: ISSUE='$ISSUE' ...\"` で raw 値を出力している。double quote 内なので command injection にはならないが、ISSUE は環境変数またはコマンド置換後の入力として扱われ、改行や制御文字を含む値で WARNING 行や completion report を偽装できる。同じパターンは .claude/commands/pm-auto-issue2dev.md の design-review snippet と .claude/commands/pm-auto-design2dev.md にも存在する。Stage 4 設計では reviewer 値のログ汚染対策まで入れているため、ISSUE 側も同じ境界として扱うべき。",
+      "suggestion": "invalid ISSUE の表示値も `printf '%s' \"$ISSUE\" | LC_ALL=C tr -c '[:alnum:]_.@:-' '?'` のように sanitize してから `printf` で出力する。tests/test_skill_descriptions.py に newline/control character を含む ISSUE のケースを追加し、出力が単一 WARNING として正規化されることを確認する。"
+    },
+    {
+      "id": "CB-003",
+      "severity": "low",
+      "category": "潜在バグ",
+      "file": "tests/test_skill_descriptions.py",
+      "line": 184,
+      "title": "reviewer snippet smoke test が bash の終了コードを検証していない",
+      "description": "test_reviewer_snippet_smoke は `subprocess.run` の returncode を assert せず、stdout/stderr 内の WARNING 有無だけを見ている。正常系 reviewer=\"codex\" では WARNING が出ないことだけを期待するため、snippet が構文エラーや予期しない bash エラーで非 0 終了しても、stderr に WARNING 文字列がなければテストが通る可能性がある。これは reviewer 検証 snippet の実行可能性を担保するという設計方針 §7.5 の目的を弱める。",
+      "suggestion": "test_reviewer_snippet_smoke と test_reviewer_snippet_rejects_invalid_issue の両方で `assert result.returncode == 0` を追加する。あわせて stderr を失敗メッセージに含め、snippet 自体の syntax/runtime error を検出できるようにする。"
+    }
+  ],
+  "summary": {
+    "critical": 0,
+    "high": 0,
+    "medium": 2,
+    "low": 1,
+    "total": 3
+  },
+  "verdict": "needs_fix"
+}

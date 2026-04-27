@@ -1,0 +1,50 @@
+{
+  "issue_number": 137,
+  "stage": 4,
+  "focus": "セキュリティ",
+  "reviewer": "codex",
+  "review_date": "2026-04-26",
+  "summary": "更新済み設計方針書、最新 Issue 本文、関連スクリプトを照合した。Python built-in の eval()/exec() 使用は対象経路に見当たらず、git subprocess も shell=False の list argv で実行されている。一方で、設計方針書の security table には tracked eval set を gitignored とする誤記、CLI repo-id/path traversal の未記載、HF model revision pin 不在、CODEOWNERS 不在との不整合があったため Should Fix とした。",
+  "findings": [
+    {
+      "id": "DR4-001",
+      "severity": "Should Fix",
+      "category": "機密データ",
+      "title": "institutional_static_eval.jsonl を gitignored/PR 非含有とする前提が誤っている",
+      "description": "設計方針書は `data/eval_sets/institutional_static_eval.jsonl` を PR に含めない gitignored 成果物として扱っていたが、実際には tracked file である。評価セットに制度文書由来の質問、期待 citation、source_document_id が含まれる場合、機密/PII 分類とレビュー経路を誤認する。",
+      "evidence": "`git ls-files data/eval_sets/institutional_static_eval.jsonl` は当該ファイルを返す。一方、設計方針書 6 章は `PR には含めない (gitignored)` と記載していた。",
+      "suggested_fix": "6 章の eval set 漏洩対策を、tracked file として PR review で機密/PII を確認する前提に修正する。本 Issue では新規 eval-set rows を追加しないことも明記する。"
+    },
+    {
+      "id": "DR4-002",
+      "severity": "Should Fix",
+      "category": "入力検証",
+      "title": "ingest_repo.py/build_indexes.py の CLI --repo-id path traversal リスクが設計に記載されていない",
+      "description": "`pipeline_factory` は `cfg.repo.repo_id` を `validate_repo_id()` で検証するが、Phase B 手順で使う `ingest_repo.py` と `build_indexes.py` は CLI `--repo-id` を index path に直接連結する。手動実験で `../` や絶対パスを渡すと想定外の index path に書き込む余地がある。",
+      "evidence": "`scripts/ingest_repo.py:51` は `Path(cfg.paths.data_root) / \"indexes\" / args.repo_id`、`scripts/build_indexes.py:39` も同様に `args.repo_id` を直接使う。`baseline_reporag/config.py:22-50` には `validate_repo_id()` が存在し、`pipeline_factory.py:112` は cfg.repo.repo_id を検証している。",
+      "suggested_fix": "6 章に CLI path traversal / 任意出力の脅威を追加し、Phase B では `institutional_documents`, `institutional_documents_V1`, `_V2`, `_V4` の allowlist のみを使うこと、`run_baseline_eval.py --eval-set/--output/--marker-file` は repo 内既定パスに限定することを明記する。恒久対策として `validate_repo_id()` の CLI 適用を follow-up 候補へ追加する。"
+    },
+    {
+      "id": "DR4-003",
+      "severity": "Should Fix",
+      "category": "サンドボックス",
+      "title": "HF model 自動 download が revision pin なしで再現性・供給網リスクを残す",
+      "description": "対象 model の発行元は BAAI/cl-nagoya/intfloat で妥当だが、現行実装は model_id のみで `SentenceTransformer` / `CrossEncoder` を初期化しており、HF Hub 側の更新で同じ model_id の実体が変わる可能性がある。署名検証までは不要でも、A/B report に取得 revision を残さないと採用判断の再現条件が欠ける。",
+      "evidence": "`baseline_reporag/indexing/embedding.py:95` は `SentenceTransformer(self._model_id)`、`baseline_reporag/retrieval/reranker.py:55` は `CrossEncoder(model_id, max_length=max_length)` で revision を渡していない。設計方針書 6 章は発行元の信頼性のみを記載していた。",
+      "suggested_fix": "6 章に、Phase B report へ各 model の HF commit/revision と取得日時を記録すること、`trust_remote_code=True` は使わないことを追記する。必要なら revision pin のコード対応は別 Issue とする。"
+    },
+    {
+      "id": "DR4-004",
+      "severity": "Should Fix",
+      "category": "権限管理",
+      "title": "invariant bypass 対策が存在しない CODEOWNERS を前提にしている",
+      "description": "設計方針書は institutional invariant 定数を None に戻す PR を CODEOWNERS で監視するとしていたが、現 worktree に CODEOWNERS は存在しない。採用 PR の実効的なガードは CI と reviewer checklist であるため、設計上の前提を修正する必要がある。",
+      "evidence": "`find . -name CODEOWNERS -o -name codeowners` は結果なし。`tests/test_pipeline_factory_yaml_invariants.py` の institutional test は定数が None の場合 skip する設計であり、None への戻しをレビューで検知する必要がある。",
+      "suggested_fix": "6 章の invariant bypass 対策を、required CI と reviewer checklist を主ガードに修正する。CODEOWNERS/branch protection は別 follow-up 候補として記載する。"
+    }
+  ],
+  "must_fix_count": 0,
+  "should_fix_count": 4,
+  "nice_to_have_count": 0,
+  "申し送り": "Stage 4 の Should Fix 4 件は設計方針書へ反映済み。危険な eval()/exec() は対象経路に見当たらず、git rev-parse は shell=False で実行されているためコマンドインジェクションの主リスクは shell ではなく path traversal/任意出力である。ソースコード修正は本依頼の範囲外のため follow-up として明記した。"
+}

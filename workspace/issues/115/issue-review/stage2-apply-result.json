@@ -1,0 +1,17 @@
+{
+  "stage": 2,
+  "iteration": 1,
+  "applied_findings": [
+    "S1-001",
+    "S1-002",
+    "S1-003",
+    "S1-004",
+    "S1-005",
+    "S1-006",
+    "S1-007",
+    "S1-008"
+  ],
+  "github_updated": true,
+  "github_url": "https://github.com/Kewton/photon-mlx/issues/115",
+  "summary": "Stage 1 レビューの全 8 件 (Must Fix 3 / Should Fix 4 / Nice to Have 1) を Issue #115 本文に反映。主な変更: (1) #114 結論誤認の削除と reranker.model_id を cross-encoder/ms-marco-MiniLM-L-6-v2 据え置き + #133 follow-up に変更、(2) 存在しない _WIZARD_BASE_PROFILES 定数を photon_app.py:1234-1238 ハードコード編集 + wizard.py 側 _DOMAIN_TEMPLATES 新設方針に修正、(3) 日本語判定アルゴリズム明文化 (codepoint 30% 閾値 / Literal['ja','en','other'])、(4) few-shot 英語据え置きで system prompt 末尾ヒント挿入方式 (方針 a)、(5) 受入条件に golden snapshot test と日英 5 件ずつのテスト追加、(6) _DOMAIN_TEMPLATES と既存 BEST_PRACTICE_KEYS の責務分離、(7) 並列開発節を D-3 独立 / D-2 reranker 据え置き先行可能に修正、(8) 制度文書ヒント文面 draft 3 行追加。末尾に「## レビュー履歴」セクションを新設し対応 finding ID 列挙。元 Issue 構造 (背景/変更内容/影響ファイル/受入条件/関連/並列開発) は維持。"
+}

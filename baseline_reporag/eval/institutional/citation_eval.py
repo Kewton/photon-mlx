@@ -11,6 +11,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Iterable, Protocol
 
+from baseline_reporag.citation import is_refusal_answer
+
 
 class Grade(str, Enum):
     CORRECT_CHUNK = "correct_chunk"
@@ -88,6 +90,11 @@ def grade_prediction(
                 return Grade.ARTICLE_LEVEL_CORRECT
 
     if pred.get("no_citation") or not cited:
+        return Grade.NO_CITATION
+    # Issue #154 Bug 2: refusal answers ("根拠が不足しています ... [C:1]") fall
+    # through here with cited != [] because the LLM appended a formal marker.
+    # They are semantic no-citations, not wrong citations — grade accordingly.
+    if is_refusal_answer(str(pred.get("answer", ""))):
         return Grade.NO_CITATION
     return Grade.WRONG_CITATION
 

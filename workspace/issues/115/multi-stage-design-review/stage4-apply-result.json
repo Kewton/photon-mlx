@@ -1,0 +1,6 @@
+{
+  "stage": 4,
+  "applied_findings": [],
+  "design_doc_updated": false,
+  "summary": "Stage 4 セキュリティレビューで Must Fix / Should Fix が 0 件のため、設計方針書への反映は不要。"
+}

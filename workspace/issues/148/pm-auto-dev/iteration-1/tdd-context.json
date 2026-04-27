@@ -1,0 +1,24 @@
+{
+  "issue_number": 148,
+  "iteration": 1,
+  "scope": "Phase A0 only (checkpoint loading implementation + LLM invariant test + yaml/docs)",
+  "design_doc_path": "workspace/design/issue-148-rebaseline-design-policy.md",
+  "work_plan_path": "workspace/issues/148/work-plan.md",
+  "reviewer_model": "claude-opus",
+  "tasks": [
+    "A0-1: Write failing tests in baseline_reporag/tests/test_photon_pipeline_checkpoint_load.py",
+    "A0-2: Implement checkpoint_path loading in baseline_reporag/photon_pipeline.py:_build_photon_deps",
+    "A0-3: Verify random-init WARNING integration",
+    "A0-4: Add LLM model_id invariant test in tests/test_pipeline_factory_yaml_invariants.py (option B)",
+    "A0-5: Update configs/institutional_docs_photon.yaml with checkpoint_path placeholder",
+    "A0-6: Update docs/deployment.md and docs/troubleshooting.md for new env vars",
+    "A0-7: Verify pytest + ruff all pass"
+  ],
+  "out_of_scope": [
+    "Phase A: actual eval execution (FastAPI MT, Institutional MT)",
+    "Phase B: new LLM evaluation",
+    "Phase C: adoption decision",
+    "Phase D: #135 hand-off"
+  ],
+  "output_path": "workspace/issues/148/pm-auto-dev/iteration-1/tdd-result.json"
+}

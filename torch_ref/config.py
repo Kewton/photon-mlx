@@ -35,6 +35,12 @@ class ModelConfig:
     tie_word_embeddings: bool = False
     dropout: float = 0.0
     bias: bool = False
+    # Issue #140 / S7-001: σ threshold for the start-up embedding-norm sanity
+    # check inside ``PhotonInference.__init__``. When ``std(token_embed.weight)``
+    # exceeds this value we emit a WARNING (random-init suspect; see Issue
+    # #135). Default 0.3 is a placeholder calibrated against random init; a
+    # follow-up Issue will re-tune once a trained checkpoint is available.
+    embedding_random_init_threshold: float = 0.3
 
     def __post_init__(self) -> None:
         if self.rope_scaling not in ROPE_SCALING_CHOICES:
@@ -52,6 +58,23 @@ class ModelConfig:
                 "set rope_scaling='ntk' to apply the scale factor.",
                 self.rope_scale_factor,
             )
+        # Issue #140 DR4-002: validate embedding_random_init_threshold.
+        # ``bool`` is rejected before ``int``/``float`` because Python's
+        # ``bool`` is an ``int`` subclass and silent True/False would mask
+        # configuration mistakes.
+        threshold = self.embedding_random_init_threshold
+        if isinstance(threshold, bool) or not isinstance(threshold, (int, float)):
+            raise ValueError(
+                "embedding_random_init_threshold must be a non-negative "
+                f"finite number, got type {type(threshold).__name__}"
+            )
+        threshold_f = float(threshold)
+        if not math.isfinite(threshold_f) or threshold_f < 0.0:
+            raise ValueError(
+                "embedding_random_init_threshold must be a non-negative "
+                f"finite number, got {threshold!r}"
+            )
+        self.embedding_random_init_threshold = threshold_f
 
     @classmethod
     def rope_scaling_from(cls, m: Any) -> tuple[str, float]:

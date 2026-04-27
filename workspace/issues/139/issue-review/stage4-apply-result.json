@@ -1,0 +1,75 @@
+{
+  "stage": 4,
+  "stage_name": "指摘事項反映（1回目 / Stage 3）",
+  "iteration": 1,
+  "applied_findings": [
+    {
+      "id": "S3-001",
+      "severity": "Must Fix",
+      "action": "Task 3 必須化対象を `model.vocab_size` → `tokenizer.vocab_size` に修正 (canonical key)。",
+      "result": "applied"
+    },
+    {
+      "id": "S3-002",
+      "severity": "Must Fix",
+      "action": "invariant test の対象を `cfg.model.provider == 'photon'` の yaml に絞り、baseline.yaml / eval.yaml を除外。",
+      "result": "applied"
+    },
+    {
+      "id": "S3-003",
+      "severity": "Must Fix",
+      "action": "境界 test サンプルを大幅修正: (1) regex を `\\b_(?:Stub|Mock|Dummy|Placeholder)\\w*` に統一、(2) path 除外を `'tests' in f.parts` (複数形 + tuple membership) に修正、(3) `__pycache__` も除外。",
+      "result": "applied"
+    },
+    {
+      "id": "S3-004",
+      "severity": "Must Fix",
+      "action": "受入条件 + 影響ファイルに既存 test migration を明示: `_StubTokenizer` import (line 521) / isinstance (line 563) 削除、`test_falls_back_to_stub_when_tokenizer_id_missing` (line 604-636) を `test_raises_when_tokenizer_id_missing` で置換。",
+      "result": "applied"
+    },
+    {
+      "id": "S3-005",
+      "severity": "Should Fix",
+      "action": "PR 戦略節に #135 との merge 順序明記: #139 → #135 (#135 が rebase)。",
+      "result": "applied"
+    },
+    {
+      "id": "S3-006",
+      "severity": "Should Fix",
+      "action": "影響ファイルに docs/troubleshooting.md を追加 (photon 起動 checklist line 149 周辺に新 failure mode 追記)。",
+      "result": "applied"
+    },
+    {
+      "id": "S3-007",
+      "severity": "Should Fix",
+      "action": "S3-003 と統合: regex 仕様を `\\b_(?:Stub|Mock|Dummy|Placeholder)\\w*` に変更。S1-004 の note を更新し意図を再記述。",
+      "result": "applied"
+    },
+    {
+      "id": "S3-008",
+      "severity": "Nice to Have",
+      "action": "スコープ節に bench/scripts/demo を対象外とする一文を追加。",
+      "result": "applied"
+    },
+    {
+      "id": "S3-009",
+      "severity": "Nice to Have",
+      "action": "影響ファイル節末尾に CI コスト < 1s の備考を追記。",
+      "result": "applied"
+    },
+    {
+      "id": "S3-010",
+      "severity": "Nice to Have",
+      "action": "影響ファイル節末尾に weekly_eval.yml は provider=mlx_lm のため runtime 影響なし、の備考を追記。",
+      "result": "applied"
+    }
+  ],
+  "must_fix_applied": 4,
+  "must_fix_deferred": 0,
+  "should_fix_applied": 3,
+  "nice_to_have_applied": 3,
+  "side_effects": [
+    "Issue #139 本文を再更新 (gh issue edit 139)"
+  ],
+  "issue_url": "https://github.com/Kewton/photon-mlx/issues/139"
+}

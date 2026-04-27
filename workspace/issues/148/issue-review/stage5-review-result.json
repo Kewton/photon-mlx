@@ -1,0 +1,46 @@
+{
+  "stage": 5,
+  "iteration": 2,
+  "focus": "通常（2回目）",
+  "reviewer": "codex",
+  "reviewed_at": "2026-04-27",
+  "summary": "Stage 1/3 の指摘は Stage 2/4 で概ね本文に反映されている。\nただし Stage 4 反映後の本文には、checkpoint load の実装責務を `photon_mlx/inference.py` に誤って結びつける反映ミスが残っている。\n現行コードでは checkpoint load API は `photon_mlx.trainer.load_checkpoint` / `load_model` 側にあり、`photon_mlx/inference.py` は random-init warning を出す診断層のみである。\nまた Phase B は新 LLM + PHOTON eval を要求する一方、Phase C/PR 方針では photon profile yaml を Qwen2.5 のまま維持し、新 LLM + PHOTON 本格 eval を Phase D 以降へ送っており、Phase 分割が矛盾している。\n受入条件には `VSZ <= <X>GB` の placeholder と、Phase C 文書更新の 6 件/7 件不一致も残る。\nMust Fix 2 件、Should Fix 2 件。本文修正が必要なため overall は Needs revision。",
+  "findings": [
+    {
+      "id": "S5-001",
+      "severity": "Must Fix",
+      "category": "反映漏れ",
+      "title": "Phase A0 が checkpoint load の実装対象を `photon_mlx/inference.py` に誤指定している",
+      "description": "Issue 本文の Phase A0 受入条件に `photon_mlx/inference.py:137 が load を実際に実行することを確認` とあるが、現行 `photon_mlx/inference.py:137` は `possibly random-init. Check model.checkpoint_path and load result` という WARNING 文言であり、checkpoint load を実行しない。`rg` でも checkpoint load 実装は `photon_mlx/trainer.py:load_checkpoint` / `load_model` にあり、`photon_mlx/inference.py:load_inference_model` という API は存在しない。Stage 3 の S3-001 を反映する過程で、診断コメントの確認が実装責務として受入条件化されており、このままだと存在しない実装対象を確認する silent bug になる。",
+      "suggested_action": "Phase A0 は `_build_photon_deps` が `model.checkpoint_path` / top-level `checkpoint_path` を読み、`photon_mlx.trainer.load_checkpoint(model, path)` を呼ぶことを受入条件にする。`photon_mlx/inference.py` は random-init warning 文言の確認・必要時修正に限定し、load 実行条件から外す。存在しない `load_inference_model` 参照も削除する。"
+    },
+    {
+      "id": "S5-002",
+      "severity": "Must Fix",
+      "category": "Phase 分割",
+      "title": "Phase B の新 LLM + PHOTON 評価要求が Phase C/D の vocab_size 方針と矛盾している",
+      "description": "Issue 本文は Phase B で `各 LLM × 2 dataset × baseline + PHOTON × 2 runs = 8 eval runs/LLM`、受入条件で `PHOTON pipeline でも各 LLM 動作確認` を要求している。一方で Phase C の `vocab_size 同期方針` と PR 運用方針では `photon profile yaml は Qwen2.5 系の vocab_size: 152064 のまま維持`、`新 LLM を PHOTON pipeline で使用するには vocab_size 整合 ... が #135 Phase 6-8 で完了していることが前提`、`本格 eval は Phase D 以降` と書かれている。つまり本 Issue 内で新 LLM + PHOTON の本格 eval をやるのか、Phase D に送るのかが同時に成立しておらず、3 LLM 比較 report の列定義も不明になる。",
+      "suggested_action": "本 Issue 範囲を明確に分ける。保守的には、Phase B は新 LLM 2 件の baseline-only eval に限定し、Qwen2.5 の true PHOTON 結果は Phase A から併記する。新 LLM + PHOTON の本格 eval は Phase D/#135 へ延期すると明記し、Phase B の run 数、受入条件、report 説明、PR 運用方針をすべて baseline-only 表記へ更新する。"
+    },
+    {
+      "id": "S5-003",
+      "severity": "Should Fix",
+      "category": "受入条件",
+      "title": "Phase B の peak memory 受入条件に `<X>GB` placeholder が残っている",
+      "description": "Phase B 受入条件に `mlx_lm.load(gemma-4-26b-a4b-4bit) で peak RSS 測定 (VSZ ≤ <X>GB を事前試算)` とあり、合格条件が placeholder のまま。実行者が何 GB 以下なら pass なのか判断できず、受入条件の検証可能性が不足している。",
+      "suggested_action": "`peak RSS が unified memory の 80% 未満` など具体的な閾値に置換する。絶対値を採るなら、対象実機の unified memory 容量を Issue に明記したうえで数値を固定する。"
+    },
+    {
+      "id": "S5-004",
+      "severity": "Should Fix",
+      "category": "整合性",
+      "title": "Phase C 文書更新の件数が影響ファイル節と受入条件で一致していない",
+      "description": "影響ファイル Phase C には `docs/deployment.md`, `docs/troubleshooting.md`, `docs/tutorial.md`, `workspace/mvp/architecture.md`, `workspace/mvp/app_guide.md`, `workspace/mvp/metrics.md`, `README.md` の 7 件が列挙されている。一方、受入条件では `文書 6 件 (docs/deployment.md, troubleshooting.md, tutorial.md, workspace/mvp/*.md, README.md)` と書かれており、件数と列挙形式が一致しない。Stage 4 反映結果では 7 件追加とされているため、本文側の受入条件が追随していない。",
+      "suggested_action": "受入条件を `文書 7 件` に修正し、影響ファイル節と同じ 7 ファイルを明示列挙する。`workspace/mvp/*.md` のような wildcard ではなく、更新対象を固定する。"
+    }
+  ],
+  "must_fix_count": 2,
+  "should_fix_count": 2,
+  "nice_to_have_count": 0,
+  "overall_assessment": "Needs revision"
+}

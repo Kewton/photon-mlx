@@ -1,0 +1,33 @@
+{
+  "issue_number": 137,
+  "stage": 8,
+  "applier": "codex",
+  "apply_date": "2026-04-26",
+  "source_review": "workspace/issues/137/issue-review/stage7-review-result.json",
+  "updated_body_file": "workspace/issues/137/issue-review/stage8-updated-body.md",
+  "issue_url": "https://github.com/Kewton/photon-mlx/issues/137",
+  "updated_issue": true,
+  "applied_findings": [
+    {
+      "id": "S7-001",
+      "severity": "Must Fix",
+      "applied": true,
+      "how": "Phase B eval 実行コマンドに `--eval-set data/eval_sets/institutional_static_eval.jsonl` を追加し、Issue の対象である institutional 116Q eval と実行コマンドを一致させた。"
+    },
+    {
+      "id": "S7-002",
+      "severity": "Should Fix",
+      "applied": true,
+      "how": "variant configs 節と Phase B 実機実行 #1 に、現行 `load_config()` は `extends` / base include を解釈しないため各 `institutional_V<N>.yaml` は `configs/institutional_docs.yaml` の full copy として成立させる必要がある旨を追記した。"
+    }
+  ],
+  "must_fix_applied_count": 1,
+  "should_fix_applied_count": 1,
+  "nice_to_have_applied_count": 0,
+  "verification": {
+    "stage7_json_valid": true,
+    "issue_edit_command": "gh issue edit 137 --body-file workspace/issues/137/issue-review/stage8-updated-body.md",
+    "post_update_issue_view_confirmed": true
+  },
+  "申し送り": "Iteration 2 の最終ステージとして、Stage 5-8 で検出された実行手順上の blockers は Issue 本文へ反映済み。実装開始前チェックとして、5 variant config が full config として load_config 可能であること、各 eval output が institutional 116Q であること、aggregator を variant ごとに個別実行していることを確認するのが望ましい。"
+}

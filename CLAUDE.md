@@ -94,6 +94,10 @@ hotfix/*  --PR--> main (緊急時のみ)
 - `pytest` で全テスト通過を維持
 - 型ヒントを推奨（`from __future__ import annotations`）
 
+### Code Review Checklist
+
+PR レビュー時に **production code path** に scaffolding 命名 (`_Stub`, `_Mock`, `_Dummy`, `_Placeholder` 等) が残っていないか確認する。詳細は [`docs/code_review_checklist.md`](docs/code_review_checklist.md) を参照 (Issue #140 / S7-001 follow-up)。
+
 ### モジュール構成
 ```
 baseline_reporag/       # Baseline RepoRAG (プロダクト線)
@@ -166,6 +170,10 @@ reports/                # ベンチマークレポート
 
 | コマンド | 説明 |
 |----------|------|
+| `/multi-stage-issue-review` | Issue記載内容の多段階レビュー（通常→影響範囲）×2回と指摘対応を自動実行（Codex 担当 Stage 5-8 必須） |
+| `/multi-stage-design-review` | 設計書の4段階レビュー（通常→整合性→影響分析→セキュリティ）と指摘対応を自動実行（Codex 担当 Stage 3-4 必須） |
+| `/pm-auto-issue2dev` | Issueレビューから実装完了まで完全自動化（Issueレビュー→設計→設計レビュー→作業計画→TDD実装） |
+| `/pm-auto-design2dev` | 設計レビューから実装完了まで完全自動化（設計→設計レビュー→作業計画→TDD実装） |
 | `/work-plan` | Issue単位の作業計画立案 |
 | `/tdd-impl` | テスト駆動開発で実装 |
 | `/pm-auto-dev` | Issue開発を完全自動化（TDD→テスト→報告） |

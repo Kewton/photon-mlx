@@ -1,0 +1,19 @@
+{
+  "stage": 4,
+  "focus": "セキュリティ",
+  "reviewer": "codex",
+  "reviewed_at": "2026-04-27",
+  "summary": "eval/exec・shell 実行・YAML injection・role spoofing・citation 互換の観点で新たな Must/Should はなし。既存 allowlist と safe_load 前提で妥当。",
+  "findings": [],
+  "must_fix_count": 0,
+  "should_fix_count": 0,
+  "nice_to_have_count": 0,
+  "good_points": [
+    "本 Issue の設計は `eval()` / `exec()` を追加せず、既存の subprocess 経路も argv list + `shell=False` を維持している",
+    "wizard の YAML 経路は `yaml.safe_load` と `_assert_safe_yaml` の既存 allowlist を前提にしており、domain template 名も固定 enum のため user supplied template injection は入らない",
+    "`_DOMAIN_TEMPLATES` の path key はコード定数の `tuple[str, ...]` で、ユーザ入力から dotted path を組み立てない",
+    "`_JP_INSTITUTIONAL_HINT` は system content に付加されるだけで、`flatten_messages_for_plain_lm()` の JSONL role-boundary 防御を変更しない",
+    "`[C:N]` citation 形式と `ABSTAIN_MARKER` は不変で、`apply_citation_postprocess()` との互換性を保っている",
+    "`detect_language()` は question のみを単一 pass で走査する設計で、history/evidence 全体を走査しないため DoS 面の追加コストは限定的"
+  ]
+}

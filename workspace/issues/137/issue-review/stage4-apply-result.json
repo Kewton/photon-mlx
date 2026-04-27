@@ -1,0 +1,25 @@
+{
+  "issue_number": 137,
+  "stage": 4,
+  "stage_name": "指摘事項反映（1回目・影響範囲）",
+  "iteration": 1,
+  "applied_date": "2026-04-26",
+  "source_review": "stage3-review-result.json",
+  "applied_findings": [
+    {"id": "S3-001", "severity": "Should Fix", "applied": true, "how": "想定 compute セクションに『リソース見積もり (Phase B 一時占有分)』サブセクションを追加し、追加ディスク (~900MB-1.2GB)、クリーンアップ手順を明示"},
+    {"id": "S3-002", "severity": "Should Fix", "applied": true, "how": "リソース見積もりサブセクションに HF model cache 追加 download 容量 (~5.8GB) と sentence-transformers >= 2.3.0 の前提を明示"},
+    {"id": "S3-003", "severity": "Should Fix", "applied": true, "how": "採用判定基準セクションに『運用波及 (V4 採用時のみ)』を追加し、bge-m3 + bge-reranker-v2-m3 で +4-5GB RAM 増、deployment.md の memory 要件更新を明記"},
+    {"id": "S3-004", "severity": "Should Fix", "applied": true, "how": "コード変更セクションに『既存 index の強制再 build (採用ありの場合の必須手順)』を追加。embeddings.npy dim 不一致による ValueError 対策と rm + build_indexes 手順を明記"},
+    {"id": "S3-005", "severity": "Should Fix", "applied": true, "how": "戦略 Option C の (1) 先行を『V0 → V3』の逐次表現に変更し、SQLite ファイル lock 競合のため逐次実行必須を明記"},
+    {"id": "S3-006", "severity": "Should Fix", "applied": true, "how": "コード変更セクションの V4 採用時 第 3 invariant test に dict-get パターンの test 関数テンプレート (cfg.indexing.embedding.get('max_input_chars')) を明記"},
+    {"id": "S3-007", "severity": "Nice to Have", "applied": true, "how": "並列開発セクションを実装事実 (device plumbing 不在、device:auto は参照されない) に基づき書き直し、CPU 強制不可・直列推奨が現実解と明記"},
+    {"id": "S3-008", "severity": "Nice to Have", "applied": true, "how": "受入条件に『docs/deployment.md の reranker/embedding 表 (line 88) と memory 要件 (line 13) を institutional default として更新』を追加"},
+    {"id": "S3-009", "severity": "Nice to Have", "applied": true, "how": "リソース見積もりサブセクションに『predictions JSONL 出力衝突回避』を追加し、--output で variant 名を含む明示パス指定を推奨。eval 実行コマンドにも --output オプションを反映"},
+    {"id": "S3-010", "severity": "Nice to Have", "applied": true, "how": "新規 PR 戦略セクションを追加し、判定 3 パターン (非採用 / V0-V3 採用 / V4 採用) ごとの PR タイトル例と commit 構成を表で明示"},
+    {"id": "S3-011", "severity": "Nice to Have", "applied": false, "reason": "CLAUDE.md / gate2_judgment_v4_final.md の更新不要を確認したのみ。Issue 本文への追記は不要 (Stage 3 申し送り通り)"}
+  ],
+  "applied_count": 10,
+  "skipped_count": 1,
+  "github_updated": true,
+  "申し送り": "1 回目イテレーション (Stage 1-4) 完了。Must Fix 合計 3 件 (Stage 1) を全反映、Should Fix 11 件 (Stage 1: 5 + Stage 3: 6) を全反映、Nice to Have 8 件中 7 件を反映 (S3-011 のみ確認のみで skip)。Stage 5-8 (Codex クロスレビュー) で更新後 Issue 本文に対する独立検証を実施する。"
+}

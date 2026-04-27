@@ -14,6 +14,7 @@ Covers:
 from __future__ import annotations
 
 import logging
+import math
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -357,3 +358,74 @@ def test_institutional_retrain_yaml_loads_with_expected_hyperparams(
         assert path.startswith("./data/training/"), (
             f"corpus path must be under ./data/training/ (DR4-002), got {path}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Issue #140 / DR4-002: embedding_random_init_threshold field
+# ---------------------------------------------------------------------------
+
+
+_PHOTON_CONFIG_DIR = Path(__file__).resolve().parents[2] / "configs"
+
+
+@pytest.mark.parametrize(
+    "yml",
+    sorted(_PHOTON_CONFIG_DIR.glob("photon_*.yaml")),
+    ids=lambda p: p.name,
+)
+def test_existing_yaml_loads_without_threshold_field(yml: Path) -> None:
+    """Issue #140: existing photon_*.yaml configs (5 files) must continue to
+    load successfully without specifying ``embedding_random_init_threshold``.
+    The default value 0.3 must be applied (DR2-008 / DR3-002).
+    """
+    cfg = load_photon_config(yml)
+    assert cfg.model.embedding_random_init_threshold == pytest.approx(0.3)
+
+
+@pytest.mark.parametrize(
+    "bad_threshold",
+    [-0.1, math.nan, math.inf, "0.3", True, False],
+    ids=["negative", "nan", "inf", "string", "bool_true", "bool_false"],
+)
+def test_model_config_rejects_invalid_embedding_threshold(
+    bad_threshold: object,
+) -> None:
+    """Issue #140 DR4-002: invalid ``embedding_random_init_threshold`` values
+    must be rejected with ``ValueError`` (or ``TypeError``) at construction.
+
+    ``bool`` (True/False) is rejected even though it is an ``int`` subclass —
+    accepting it would silently swallow configuration mistakes.
+    """
+    with pytest.raises((TypeError, ValueError)):
+        ModelConfig(embedding_random_init_threshold=bad_threshold)
+
+
+def test_model_config_accepts_zero_embedding_threshold() -> None:
+    """Boundary: 0.0 is valid (≥ 0 and finite)."""
+    cfg = ModelConfig(embedding_random_init_threshold=0.0)
+    assert cfg.embedding_random_init_threshold == 0.0
+
+
+def test_model_config_accepts_int_embedding_threshold_and_coerces_to_float() -> None:
+    """``int`` (non-bool) is accepted and coerced to ``float`` for type
+    consistency downstream."""
+    cfg = ModelConfig(embedding_random_init_threshold=2)
+    assert cfg.embedding_random_init_threshold == 2.0
+    assert isinstance(cfg.embedding_random_init_threshold, float)
+
+
+def test_load_photon_config_rejects_invalid_embedding_threshold(
+    tmp_path: Path,
+) -> None:
+    """YAML-supplied invalid ``embedding_random_init_threshold`` must propagate
+    the ``ValueError`` from ``ModelConfig.__post_init__`` through
+    ``load_photon_config``."""
+    path = _write_yaml(
+        tmp_path,
+        """
+model:
+  embedding_random_init_threshold: -0.5
+""",
+    )
+    with pytest.raises(ValueError, match="embedding_random_init_threshold"):
+        load_photon_config(path)

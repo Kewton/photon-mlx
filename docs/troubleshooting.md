@@ -56,6 +56,50 @@ Then restart the server.
 
 ---
 
+## PHOTON Checkpoint Load Failure (Issue #148)
+
+**Symptom**: `RuntimeError: checkpoint load failed (...)` when starting with `model.provider: photon`.
+
+**Causes and solutions**:
+
+| Cause | Solution |
+|-------|----------|
+| `cfg.model.checkpoint_path` not set | Add `checkpoint_path: "<name>"` under `model:` in the PHOTON yaml. For Phase A evaluation, place a valid checkpoint before starting — do not use `PHOTON_ALLOW_RANDOM_INIT=1` as a substitute (see note below). |
+| Checkpoint directory missing `weights.npz` or `state.json` | Ensure the checkpoint directory contains both files (produced by `photon_mlx.trainer.save_checkpoint`) |
+| Checkpoint path outside `PHOTON_CHECKPOINT_ROOT` | Move the checkpoint under the allowed root, or set `PHOTON_CHECKPOINT_ROOT` to the parent directory: `export PHOTON_CHECKPOINT_ROOT=/data/photon_checkpoints` |
+| Symlink escaping the allowed root | Remove the symlink and copy the checkpoint directly under `PHOTON_CHECKPOINT_ROOT` |
+| Corrupted `weights.npz` | Re-run training or restore the checkpoint from backup |
+
+**重要 (CB-003 / 設計方針書 §3 DR-1)**: `PHOTON_ALLOW_RANDOM_INIT=1` は **unit/CI の negative-path テスト専用** です。Phase A 評価や本番環境では使用しないでください。チェックポイントが手元にない場合は、checkpoint を配置するまで評価を開始しないでください (`PHOTON_ALLOW_RANDOM_INIT=1` で代替することは S7-001 random-init eval の再発を招きます)。
+
+**unit/CI negative-path test 専用** (評価・本番では使用禁止):
+
+```bash
+# 下記は unit/CI の negative-path テストでのみ使用すること。
+# Phase A 評価・本番環境では checkpoint を正しく配置して実行すること。
+export PHOTON_ALLOW_RANDOM_INIT=1
+python -m baseline_reporag.cli --config configs/institutional_docs_photon.yaml ...
+```
+
+This logs a WARNING and continues with random-init weights. The random-init model produces garbage answers and **must not** be used for Phase A evaluation or production inference.
+
+**Diagnosing path containment errors**:
+
+```bash
+# Verify PHOTON_CHECKPOINT_ROOT covers the checkpoint
+python -c "
+import os
+from pathlib import Path
+root = Path(os.environ.get('PHOTON_CHECKPOINT_ROOT', 'checkpoints')).resolve()
+ckpt = Path('path/to/ckpt').resolve()
+print('root:', root)
+print('ckpt:', ckpt)
+print('OK:', ckpt.is_relative_to(root))
+"
+```
+
+---
+
 ## PHOTON Multi-Turn Not Supported
 
 **Symptom**: Errors when attempting to use PHOTON hierarchical decoder for multi-turn conversations.
@@ -150,6 +194,14 @@ top -pid $(pgrep -f baseline_reporag)
 2. **MLX がインストールされているか**: baseline-only マシンでは `ModuleNotFoundError: mlx.core` が `build_pipeline` 内で発生し、UI は `photon_unavailable_{project_name}` フラグを立てて送信をブロックする。チャット画面上部の赤色エラーバナーを確認。
 3. **初回ターン**: drift metrics は 2 ターン目以降から値が入る仕様。最初の質問では `N/A (first turn)` は正常。
 4. **`use_photon=False` の baseline プロジェクト**: これは仕様通り `N/A (baseline_rag)`。PHOTON を試したい場合は新規プロジェクトを `use_photon=True` + PHOTON config で作成。
+5. **`tokenizer.tokenizer_id` 未設定 → `ValueError` (Issue #139)**: PHOTON pipeline 構築時に `cfg.tokenizer.tokenizer_id` が未設定だと `_build_photon_deps` が `cfg.tokenizer.tokenizer_id is required for provider=='photon'` を raise する (Issue #139 で旧 stub fallback を撤去)。yaml の `tokenizer:` ブロックに `tokenizer_id`/`vocab_size` が両方設定されていることを確認 (`configs/photon_small.yaml:147-149` 等が参考)。
+6. **tokenizer load 失敗 → `ValueError("failed to load tokenizer ...")` (Issue #139)**: `transformers.AutoTokenizer.from_pretrained` が HF Hub 障害 / gated model / 未 cache / network 不通 / `tokenizer_id` 誤り等で失敗すると `_build_photon_deps` が sanitized message を含む `ValueError` を raise する。確認項目:
+   - `huggingface-cli login` 状態 (gated model 利用時)
+   - `hf cache scan` で対象 tokenizer が cache されているか
+   - network 疎通 (`curl -I https://huggingface.co`)
+   - yaml の `tokenizer.tokenizer_id` の値が allowlist (`<org>/<name>` 形式、`[A-Za-z0-9._-]` のみ) を満たしているか
+   - `trust_remote_code=False` 固定のため、custom Python loader を要求する tokenizer は対象外
+   - **機密情報の取り扱い**: HF token / PAT / secret env var は `yaml` / Issue / Slack / log に **平文で貼らない**。認証は `huggingface-cli login` または CI runner secret で行い、private model id を public な log / PR description に書く際は redaction を検討。raw exception text の貼り付けも避ける (sanitized message のみ転載する)。
 
 ---
 

@@ -1,0 +1,125 @@
+{
+  "stage": 1,
+  "focus": "設計原則",
+  "reviewer": "claude-opus",
+  "reviewed_at": "2026-04-27",
+  "summary": "全体として設計判断 DR-1〜DR-6 の責務分離 (SRP) と Phase 分割 (A0/A/B/C/D) の論理依存は良好で、S5-001 / S5-002 / S7-001-004 の Codex クロスレビュー指摘も適切に反映されている。一方、(1) DR-1 の checkpoint load 失敗時に random-init で eval を続行する fail-soft 設計は『真の baseline 再確立』というゴールと対立し silent bug 再発の構造的リスクが残る (Must Fix)、(2) `from photon_mlx.trainer import load_checkpoint` の関数内 lazy import が DIP 観点で未整理、(3) Phase 5.2 / 10.3 の invariant test 方針 (A)/(B) が Phase C へ判断先送りされ実装可能性に曖昧性が残る、(4) DR-5 smoke test で peak RSS 制約が Gemma4 のみ非対称、(5) photon profile 保護コメントが §3.3 / §5.1 で重複定義され DRY 違反となっている。Phase 分割は OCP/LSP 観点で新 LLM 追加に開放的だが、DR-2 の `photon_rag` variant 残置による backbone 差分は report メタ欄追記で対応する設計のため、運用時に解釈ミスを誘発する Should Fix の論点として明記が必要。総じて設計の骨格は妥当だが上記の構造的リスク 1 点 (Must Fix) と運用整合性 4 点 (Should Fix) の解消で承認可能。",
+  "findings": [
+    {
+      "id": "DR1-001",
+      "severity": "Must Fix",
+      "category": "設計判断",
+      "title": "DR-1 checkpoint load 失敗時の fail-soft が Issue ゴール『真の baseline 再確立』と矛盾",
+      "description": "設計方針書 §3 設計判断 #1 の実装方針 (line 86-103) と §9 リスク表 1 行目の緩和策では、checkpoint load 失敗時に WARNING ログを出した上で **random-init weights で続行** する fail-soft 設計が採用されている (`# Model will run with random-init weights.`)。しかし本 Issue のゴールは『真の loaded checkpoint で eval する』ことであり、Phase A0 の存在意義そのものが S7-001 (random-init で eval していた silent bug) の再発防止である。WARNING ログだけでは eval runner の自動実行 (CI / batch) で誰も気づかず、eval 完了後の report で『再び random-init を測定していた』が判明する S7-001 の再発パターンになりうる。設計判断 #1 の理由欄では『必ず WARNING ログを出すことで検知可能にする』と書かれているが、これは検知ではなく『気づける可能性を残すだけ』である。",
+      "suggested_action": "fail-fast を原則とし、以下のいずれかに修正: (案 a) `checkpoint_path` が yaml に設定されている場合、load 失敗時は `RuntimeError` を raise して eval 全体を停止 (default を strict にし、明示的に `cfg.model.allow_random_init_fallback: true` を yaml に書いた場合のみ fail-soft)。(案 b) Phase A 受入条件 (§8) に『eval 起動ログに `PhotonModel: checkpoint loaded from <path>` の INFO 行が必ず出現することを report に貼付して確認』を必須化し、欠如時は eval 結果を invalid 扱いとする。設計方針書では (a) を default に推奨。"
+    },
+    {
+      "id": "DR1-002",
+      "severity": "Should Fix",
+      "category": "DIP",
+      "title": "DR-1 関数内 lazy import (`from photon_mlx.trainer import load_checkpoint`) の責務と test 設計が未整理",
+      "description": "設計判断 #1 の実装方針 (line 87-89) で `_build_photon_deps` 関数内に `from photon_mlx.trainer import load_checkpoint` を書く方針が示されているが、(1) module top-level import との比較検討が記載されていない、(2) §10.1 の unit test (line 469-498) は `mocker.patch(\"baseline_reporag.photon_pipeline.load_checkpoint\")` を期待しているため、関数内 import だと patch target が存在せず test が fail する (関数内 import の場合は `mocker.patch(\"photon_mlx.trainer.load_checkpoint\")` でなければならない)、(3) `pipeline_factory.py` の MLX-free 維持 (line 73) と `photon_pipeline.py` の MLX 依存性の境界が不明瞭。DIP 観点で『baseline_reporag/photon_pipeline.py が photon_mlx.trainer の具象に直接依存してよい』理由が暗黙のまま。",
+      "suggested_action": "(1) 設計判断 #1 に『import スタイルの選択』subsection を追加。`photon_pipeline.py` は MLX 依存層であるため module top-level import が SRP/DIP 上自然である旨を明記。(2) §10.1 の test で patch target を `baseline_reporag.photon_pipeline.load_checkpoint` (module-level import 前提) に統一、または `photon_mlx.trainer.load_checkpoint` (lazy import 前提) にどちらかを明示。(3) §3 補足として『`pipeline_factory.py` は MLX-free / `photon_pipeline.py` は MLX-aware』の境界線を明文化。"
+    },
+    {
+      "id": "DR1-003",
+      "severity": "Should Fix",
+      "category": "DRY",
+      "title": "checkpoint_path 取得の二重 lookup (`getattr(cfg.model, ...)` と `cfg.get(...)`) が型不整合",
+      "description": "設計判断 #1 の実装方針 (line 82-85): `checkpoint_path = getattr(cfg.model, \"checkpoint_path\", None) or cfg.get(\"checkpoint_path\", None)`。前者は dataclass / OmegaConf attribute lookup、後者は dict-style `.get()` であり、`cfg` の型が attribute access と key access の両方をサポートする保証は設計書内で示されていない。Issue 本文では `cfg.model.checkpoint_path` (yaml config の `model.checkpoint_path`) のみが言及されており、top-level `checkpoint_path` をサポートする要件はない。冗長な fallback は YAGNI 違反かつ silent error (片方だけ拾う) のリスクがある。",
+      "suggested_action": "`cfg.model.checkpoint_path` (yaml schema 上の正規 path) のみに統一。`getattr(cfg.model, \"checkpoint_path\", None)` を採用し top-level fallback を削除。yaml schema に `model.checkpoint_path: Optional[str]` を文書化。"
+    },
+    {
+      "id": "DR2-001",
+      "severity": "Should Fix",
+      "category": "設計判断",
+      "title": "DR-2 で photon_rag variant の Qwen2.5 残置による backbone 差分対策が『report 明記』のみで弱い",
+      "description": "設計判断 #2 (line 136, 142-144) では Phase C で `configs/baseline.yaml` を新 LLM に更新する一方、`configs/eval.yaml` の `photon_rag` variant は `configs/photon_small.yaml` (Qwen2.5) を参照し続ける。同一 benchmark 内で baseline / PHOTON の LLM backbone がズレる問題に対する対策が『report テンプレートに backbone メタ情報欄を追加』のみで、CI / weekly_eval で自動的に backbone を report に出力する仕組みはない。運用時に backbone 差分を見落とすと NC 比較を誤読するリスクがある (S7-003 の本来の懸念)。",
+      "suggested_action": "(1) `configs/eval.yaml` 内に `report.show_llm_backbone: true` フラグまたは equivalent なメタ情報出力機能を追加することを設計方針書に追記、(2) または bench/ 配下の report 生成スクリプトで variant の `model_id` を必ず出力する仕様を §10 (テスト戦略) に追加、(3) 『report テンプレートにメタ情報欄追加』だけでなく、報告書の自動生成側で backbone を明示する設計判断を追加。"
+    },
+    {
+      "id": "DR3-001",
+      "severity": "Nice to Have",
+      "category": "OCP",
+      "title": "DR-3 の Phase B baseline-only 化が 『新 LLM + PHOTON は Phase D 延期』の理由を OCP 観点で補強できる",
+      "description": "設計判断 #3 (line 152-159) は Phase B baseline-only 化の根拠として『vocab_size 不整合で `_load_hf_tokenizer` が ValueError』『invariant test 誤検知リスク』を挙げており、これは技術的に妥当。ただし OCP 観点では『PhotonModel が新 LLM の vocab に対して closed for modification』であることが Phase D で extension で対応するという拡張開放性の論理が暗黙。設計書として明示すれば、将来 LLM が増えた時の意思決定基準として再利用可能。",
+      "suggested_action": "DR-3 に補足を追加: 『PhotonModel の vocab/embedding 層は現行で Qwen2.5 vocab_size に対して closed であり、新 LLM 対応は #135 の embedding reshape (extension) を経由する。これは OCP に従い『vocab に対して closed, embedding 層拡張で open』を維持する設計判断である』。"
+    },
+    {
+      "id": "DR4-001",
+      "severity": "Should Fix",
+      "category": "実装可能性",
+      "title": "DR-4 代替 slug 選定基準『param 数が近い / 最新安定版 / mlx-community 公式 quant』が定量化されていない",
+      "description": "設計判断 #4 (line 200-203) で正式 slug 不在時の代替 slug 選定基準が示されているが、(1)『param 数が近い』の許容範囲 (±20%? ±50%?) が未定義、(2)『最新安定版』の判定基準 (HF 上の updated_at? downloads 数?) が未定義、(3) 代替を選ぶ際の判定が実施者の主観に依存する。Phase B 受入条件 (§8) では smoke test 合格のみで、代替 slug 採用時の選定根拠を記録する義務がない。",
+      "suggested_action": "DR-4 の代替 slug 選定基準を定量化: (1) param 数許容範囲を具体化 (例: 8B-10B / 24B-28B のレンジ)、(2) 『最新安定版』を『HF 上で 30 日以内に download 実績ありかつ mlx-community org の verified author が公開』のような operational 基準に置換、(3) Phase B 受入条件に『代替 slug を採用した場合は選定根拠 (downloads, updated_at, param 数差) を `reports/llm_baseline_comparison_2026q2.md` に記載』を追加。"
+    },
+    {
+      "id": "DR5-001",
+      "severity": "Should Fix",
+      "category": "実装可能性",
+      "title": "DR-5 smoke test の peak RSS 条件が Gemma4 のみ非対称",
+      "description": "設計判断 #5 (line 209-238) では Qwen3.x の合格条件は『non-empty / no tokenizer mismatch / latency <180s』のみで、Gemma4 のみ『peak RSS が unified memory の 80% 未満』が追加されている。9B モデルでも quantization と KV cache サイズによっては OOM 可能性があるため、peak RSS 制約を Gemma4 限定にする論理的根拠が弱い。また §6.5 では Gemma4 のみ Mac Studio 必須と書かれているが、Qwen3.x が 64GB マシンで動作する保証も検証されていない。",
+      "suggested_action": "smoke test 合格条件を統一: 全 LLM について『peak RSS 測定を実施し report に記録』を必須化。閾値 (80%) 自体は LLM ごとに調整可だが、測定自体は 3 LLM 共通の手順とする。または Qwen3.x については『64GB マシンでも動作可能であることを別途確認』を Phase B pre-flight subtask に追加。"
+    },
+    {
+      "id": "DRY-001",
+      "severity": "Nice to Have",
+      "category": "DRY",
+      "title": "photon profile yaml 保護コメントが §3 (DR-3) と §5.1 で重複",
+      "description": "設計方針書 line 173-176 (DR-3) と line 313-316 (§5.1) に同一の保護コメント (`# NOTE: tokenizer_id and vocab_size are intentionally kept as Qwen2.5 ...`) がそのまま記載されている。設計書としての可読性は維持されるが、運用時に片方を更新して他方が古くなる更新漏れリスクがある。",
+      "suggested_action": "片方を Single Source of Truth とし、他方は『保護コメント仕様は §5.1 を参照』のように reference 化する。または §5.1 を削除して DR-3 に集約。"
+    },
+    {
+      "id": "DRY-002",
+      "severity": "Nice to Have",
+      "category": "DRY",
+      "title": "リスク表 (§9) と §6 (セキュリティ / 運用設計) が一部の項目で重複",
+      "description": "§6.2 (cold-start での大容量 download)、§6.5 (Gemma4 MoE のメモリ要件) は §9 リスク表のリスク行と内容が大幅に重複している (例: 『server.py / cli.py 既定の baseline.yaml 切替』『Gemma4 26B MoE OOM』)。詳細粒度はそれぞれ異なるが、運用 doc としての一覧性が低下している。",
+      "suggested_action": "§6 はセキュリティ / 運用『設計上の決定事項 (対策の方針)』に絞り、§9 はリスク × 緩和策の cross-reference 表に絞る役割分担を明記。または §9 から §6 への参照リンクを追加。"
+    },
+    {
+      "id": "PHASE-001",
+      "severity": "Should Fix",
+      "category": "Phase 分割",
+      "title": "PR #1 が Phase A0 (実装) と Phase A (eval) を 1 PR にまとめる方針が責務混在",
+      "description": "設計判断 #6 (line 245-249) では PR #1 = Phase A0+A 成果物 (checkpoint loading 実装 + eval reports + yaml 設定) が 1 PR にまとめられている。これは #135 unblock を高速化する目的では合理的だが、(1) Phase A0 は code change (`photon_pipeline.py` 変更 + unit test 追加)、Phase A は data change (eval 実行 + reports 出力 + yaml `checkpoint_path` 設定) と責務が異なる、(2) Phase A0 が PR review で reject されると Phase A 完走分も再実行コストが発生、(3) §10.1 の unit test (Phase A0) と §8 の Phase A smoke test の合否判定が同一 PR review で混在する。SRP 観点で PR の責務分離が望ましい。",
+      "suggested_action": "(1) PR #1a (Phase A0: code change + unit test) と PR #1b (Phase A: yaml + eval reports) の 2 PR に分割を推奨。または (2) 1 PR を維持する場合は『Phase A0 commit / Phase A commit を分け、commit 単位で revert 可能にする』方針を §3 設計判断 #6 に明記。#135 unblock 解禁条件は『PR #1 (a+b) merge 後』と再定義。"
+    },
+    {
+      "id": "YAGNI-001",
+      "severity": "Should Fix",
+      "category": "YAGNI",
+      "title": "§5.2 / §10.3 の invariant test 方針 (A)/(B) を Phase C で決定する設計が判断先送り",
+      "description": "設計方針書 §5.2 (line 327-333) と §10.3 (line 507-513) で『LLM model_id invariant 化方針 (A) 追加 / (B) 追加しない の 2 案を Phase C 着手時に決定』とあるが、これは設計方針書として判断を deferr している。Phase C 着手者が同じレビューを再度実施する必要があり、設計方針書の役割 (実装に先立つ判断の記録) が果たせていない。設計判断としていずれかを default に決め打ちすべき。",
+      "suggested_action": "設計方針書段階で (B)『LLM model_id は invariant 化しない』を default として決定し理由を明記 (LLM 採用変更は人間判断で実施するため invariant 化は YAGNI、新 LLM 採用毎に test 更新コストが invariant 化の防御メリットを上回る)。Phase C 実施時に判断を覆す場合のみ別途記録する設計とする。"
+    },
+    {
+      "id": "SRP-001",
+      "severity": "Nice to Have",
+      "category": "SRP",
+      "title": "`_build_photon_deps` が PHOTON 依存構築 + checkpoint load + diagnostic logging を 1 関数で抱える",
+      "description": "設計判断 #1 で『`_build_photon_deps` は PHOTON 依存関係を一括構築する Single Source of Truth』と位置付け、checkpoint load もここに統合する方針 (line 71-72)。これは『PHOTON pipeline の依存構築』という単一責務として概ね妥当だが、関数の行数が更に増加する (現行 ~80 行に load + WARNING + log の追加で ~100 行強)。SRP として許容範囲だが、将来 provider 追加 (例: Phase D 以降の新 LLM + PHOTON) で更に分岐すると単一関数の複雑性が膨張する懸念。",
+      "suggested_action": "(1) 現状は §3 設計判断 #1 で OK。(2) 将来の拡張時の方針として『`_build_photon_deps` の責務が 200 行以上 / 3 つ以上の provider 分岐に達した時点で `_load_photon_checkpoint(model, cfg)` 等のヘルパー関数に抽出する』を設計方針書末尾の『将来拡張時の責務分割ポリシー』として追記すると OCP/SRP の長期維持に寄与する。"
+    },
+    {
+      "id": "ISP-001",
+      "severity": "Nice to Have",
+      "category": "ISP",
+      "title": "pipeline_factory のインターフェース粒度が DR-1 で間接的に言及されるのみ",
+      "description": "設計判断 #1 (line 73) で『`pipeline_factory.py` は MLX-free を維持するためのラッパーであり、実装詳細を持ち込まない』と明記されているが、ISP 観点で『factory が公開すべきインターフェース』『隠蔽すべき実装詳細』の境界が一文で済まされている。新 LLM 追加 (Phase B) や新 provider 追加 (Phase D) を想定すると、factory の interface 契約 (input: cfg / output: pipeline) と provider 分岐ロジックの責務分離をもう少し記述すると拡張時の guidance が強化される。",
+      "suggested_action": "§3 末尾または §4 (データフロー) に『pipeline_factory の interface 契約』subsection を追加: input contract (cfg.model.provider が `photon` / `baseline` / 将来の `mlx_lm_only` 等)、output contract (`QueryResult` を返す pipeline オブジェクト)、隠蔽する実装詳細 (MLX import / PhotonModel 構築 / checkpoint load) を箇条書きで明文化。"
+    },
+    {
+      "id": "IMPL-001",
+      "severity": "Should Fix",
+      "category": "実装可能性",
+      "title": "§5.1 photon profile yaml 5 件のうち 2 件 (`photon_tiny.yaml` / `photon_tiny_recgen.yaml`) の vocab_size / tokenizer_id が『確認要』のまま",
+      "description": "§5.1 の表 (line 304-310) で `photon_tiny.yaml` / `photon_tiny_recgen.yaml` の vocab_size と tokenizer_id が『(確認要)』と未確認のまま設計方針書に記載されている。Phase B-C 期間中の保護コメント追記対象に含めるかどうかの判断ができず、実装担当者が再度確認する必要がある。",
+      "suggested_action": "設計方針書段階で `grep -n 'vocab_size\\|tokenizer_id' configs/photon_tiny*.yaml` を実施し、2 件の値を確定。Qwen2.5 系であれば保護コメント対象に追加、そうでなければ別扱いを明記。"
+    }
+  ],
+  "must_fix_count": 1,
+  "should_fix_count": 7,
+  "nice_to_have_count": 6,
+  "overall_assessment": "Approve with comments"
+}

@@ -21,6 +21,15 @@ def _normalize(pairs: list[tuple[str, float]]) -> dict[str, float]:
     return {cid: s / max_s for cid, s in pairs}
 
 
+def _belongs_to_repo(chunk_id: str, repo_id: str) -> bool:
+    """Return True iff ``chunk_id`` was indexed under ``repo_id``.
+
+    chunk_id format is ``{repo_id}::{rel_path}::{lines}``; we use the
+    ``::`` boundary so that ``repo_id="foo"`` does not match ``foobar::``.
+    """
+    return chunk_id.startswith(f"{repo_id}::")
+
+
 def _search_one(
     query: str,
     lexical_index: LexicalIndex,
@@ -29,10 +38,21 @@ def _search_one(
     embedding_top_k: int,
     lexical_weight: float,
     embedding_weight: float,
+    repo_id: str = "",
 ) -> dict[str, RetrievalResult]:
-    """Run hybrid search for a single query; returns a chunk_id → result map."""
+    """Run hybrid search for a single query; returns a chunk_id → result map.
+
+    When ``repo_id`` is non-empty, results whose ``chunk_id`` does not begin
+    with ``{repo_id}::`` are dropped before fusion (Issue #154 Bug 1: prevents
+    cross-repo chunk leakage when an in-memory index ever contains chunks
+    from more than one repo).
+    """
     lex_raw = lexical_index.search(query, top_k=lexical_top_k)
     emb_raw = embedding_index.search(query, top_k=embedding_top_k)
+
+    if repo_id:
+        lex_raw = [r for r in lex_raw if _belongs_to_repo(r.chunk_id, repo_id)]
+        emb_raw = [r for r in emb_raw if _belongs_to_repo(r.chunk_id, repo_id)]
 
     lex_norm = _normalize([(r.chunk_id, r.score) for r in lex_raw])
     emb_norm = _normalize([(r.chunk_id, r.score) for r in emb_raw])
@@ -60,6 +80,7 @@ def hybrid_search(
     lexical_weight: float = 0.45,
     embedding_weight: float = 0.45,
     expanded_queries: list[str] | None = None,
+    repo_id: str = "",
 ) -> list[RetrievalResult]:
     """Hybrid BM25 + embedding search with optional multi-query expansion.
 
@@ -67,6 +88,9 @@ def hybrid_search(
     strings), each query is searched independently and the results are merged
     by taking the **max score** across queries for each chunk.  This broadens
     recall without penalising chunks that only match one query variant.
+
+    When *repo_id* is provided, results whose ``chunk_id`` is not prefixed
+    with ``{repo_id}::`` are dropped — see ``_search_one`` (Issue #154).
     """
     # Primary query
     merged: dict[str, RetrievalResult] = _search_one(
@@ -77,6 +101,7 @@ def hybrid_search(
         embedding_top_k,
         lexical_weight,
         embedding_weight,
+        repo_id=repo_id,
     )
 
     # Expanded queries — merge by max score
@@ -91,6 +116,7 @@ def hybrid_search(
             embedding_top_k,
             lexical_weight,
             embedding_weight,
+            repo_id=repo_id,
         )
         for cid, res in extra.items():
             if cid not in merged or res.score > merged[cid].score:
