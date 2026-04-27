@@ -29,6 +29,14 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any, Callable, NamedTuple
 
+# Allow this script to import baseline_reporag when run via the
+# ``sys.path.insert(0, "scripts")`` pattern used by the test suite.
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
+from baseline_reporag.citation import is_refusal_answer  # noqa: E402
+
 REQUIRED_FIELDS: tuple[str, ...] = (
     "eval_id",
     "category",
@@ -50,7 +58,11 @@ FailurePick = tuple[PredictionRecord, bool]
 
 
 def is_no_citation(record: PredictionRecord) -> bool:
-    return bool(record["no_citation"]) or not record["cited_chunk_ids"]
+    # Issue #154 Bug 2: a refusal answer ("根拠が不足しています ... [C:1]") is
+    # semantically no-citation even when cited_chunk_ids is non-empty.
+    if bool(record["no_citation"]) or not record["cited_chunk_ids"]:
+        return True
+    return is_refusal_answer(str(record.get("answer", "")))
 
 
 def expand_prediction_paths(args_predictions: list[str]) -> list[Path]:
