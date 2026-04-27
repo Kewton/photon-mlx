@@ -353,10 +353,19 @@ def test_institutional_retrain_yaml_loads_with_expected_hyperparams(
     mix = t.train_corpora_mix
     assert mix is not None and len(mix) == 2
     assert abs(sum(mix.values()) - 1.0) < 1e-6
-    # Both keys must point under data/training/ (DR4-002 approved root).
+    # Issue #135 Day 3: paths are absolute (per-user direction to point at
+    # this worktree for JP and the develop worktree for the existing
+    # mulmoclaude-trained EN corpus). Both must be under one of the two
+    # expected worktree roots so the DR4-002 approved-root guard in
+    # photon_mlx/data.iterate_mixed_batches can accept them.
+    expected_roots = (
+        "/Users/maenokota/share/work/github_kewton/photon-mlx-feature-issue-135-photon-retrain/",
+        "/Users/maenokota/share/work/github_kewton/photon-mlx-develop/",
+    )
     for path in mix:
-        assert path.startswith("./data/training/"), (
-            f"corpus path must be under ./data/training/ (DR4-002), got {path}"
+        assert path.startswith(expected_roots), (
+            f"corpus path must be absolute under an approved worktree root "
+            f"(DR4-002), got {path}"
         )
 
 

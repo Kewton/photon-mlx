@@ -242,9 +242,17 @@ training:
   #   #137 完了後にユーザー承認のもと走らせる。
   # - val_split=0.05: train pool の 5% を sequence-level で hold-out。train/val
   #   は同じ corpora ratio を共有する (DR1-005)。
+  # Issue #135 Day 3: per-user direction we point directly at the
+  # develop worktree's existing mulmoclaude-trained EN corpus (7188
+  # tokenized sequences from the original 600-step run) rather than
+  # symlinking or copying. The JP side is generated in this worktree by
+  # scripts/generate_institutional_training_corpus.py and lands under
+  # data/training/institutional/. Both paths are absolute on purpose so
+  # `iterate_mixed_batches`'s DR4-002 approved-root check can be
+  # satisfied without ambiguous resolution.
   train_corpora_mix:
-    "./data/training/institutional/train_jp.jsonl": 0.5
-    "./data/training/mulmoclaude/train_en.jsonl": 0.5
+    "/Users/maenokota/share/work/github_kewton/photon-mlx-feature-issue-135-photon-retrain/data/training/institutional/train_jp.jsonl": 0.5
+    "/Users/maenokota/share/work/github_kewton/photon-mlx-develop/data/processed/train_multi.jsonl": 0.5
   val_split: 0.05
 
   # Legacy single-corpus fields。train_corpora_mix が設定されているため、
