@@ -1107,6 +1107,7 @@ class PhotonRAGPipeline:
                 lexical_weight=cfg.retrieval.weights.lexical,
                 embedding_weight=cfg.retrieval.weights.embedding,
                 expanded_queries=[expansion_terms] if expansion_terms else [],
+                repo_id=repo_id,
             )
 
         # --- Reranking ---

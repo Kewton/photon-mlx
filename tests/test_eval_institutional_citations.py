@@ -93,6 +93,40 @@ def test_no_citation_branch() -> None:
     assert grade is Grade.NO_CITATION
 
 
+def test_refusal_with_citation_is_no_citation() -> None:
+    """Issue #154 Bug 2: refusal answers with formal [C:N] must grade as NO_CITATION,
+    not WRONG_CITATION (which previously over-penalised baseline).
+    """
+    lookup = _lookup({"cx": ("body unrelated to ref", "doc_b")})
+    grade = grade_prediction(
+        {
+            "answer": "根拠が不足しています。提供されたコードチャンクには情報がありません。",
+            "cited_chunk_ids": ["cx"],
+            "no_citation": False,
+        },
+        {"reference_chunk_ids": ["c1"], "source_document_id": "doc_a"},
+        lookup,
+    )
+    assert grade is Grade.NO_CITATION
+
+
+def test_refusal_does_not_override_correct_chunk() -> None:
+    """A correct citation must still grade CORRECT_CHUNK even if the answer text
+    happens to mention 根拠が不足 — the grader prioritises true matches.
+    """
+    lookup = _lookup({"c1": ("第3条 内容", "doc_a")})
+    grade = grade_prediction(
+        {
+            "answer": "根拠が不足している部分は補足できません。 [C:1]",
+            "cited_chunk_ids": ["c1"],
+            "no_citation": False,
+        },
+        {"reference_chunk_ids": ["c1"], "source_document_id": "doc_a"},
+        lookup,
+    )
+    assert grade is Grade.CORRECT_CHUNK
+
+
 def test_dict_chunk_lookup_defaults() -> None:
     lookup = _lookup({})
     assert lookup.get_chunk_text("missing") == ""

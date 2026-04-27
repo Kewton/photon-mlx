@@ -160,6 +160,25 @@ def test_compute_overall_nc_counts_both_flags() -> None:
     assert stat["nc_rate"] == pytest.approx(2 / 3 * 100)
 
 
+def test_compute_overall_counts_refusal_with_citation_as_nc() -> None:
+    """Issue #154 Bug 2: refusal answers with formal [C:N] must count as NC."""
+    records = [
+        _make_record(
+            answer="根拠が不足しています。提供されたコードチャンクには情報がありません。 [C:1]",
+            no_citation=False,
+            cited_chunk_ids=["c1"],
+        ),
+        _make_record(
+            answer="The function is in cli.py [C:1]",
+            no_citation=False,
+            cited_chunk_ids=["c1"],
+        ),
+    ]
+    stat = agg.compute_overall(records)
+    assert stat["total"] == 2
+    assert stat["nc"] == 1, "refusal with formal [C:1] should be counted as NC"
+
+
 # ----------------------------------------------------------------------
 # T3: compute_category — alphabetical sort
 # ----------------------------------------------------------------------
