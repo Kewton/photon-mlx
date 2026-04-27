@@ -155,13 +155,24 @@ model:
   provider: "photon"
   model_id: "mlx-community/Qwen2.5-Coder-14B-Instruct-4bit"
 
+  # Issue #148 Phase A0/A.1 (Gate 2 v5): PHOTON checkpoint loading.
+  # Resolved against PHOTON_CHECKPOINT_ROOT (defaults to ./checkpoints/).
+  # state.json: step=600, best_val_loss=1.6238 (mulmoclaude 600-step ckpt).
+  # Required for fail-loud loading (Issue #148 Phase A0).
+  checkpoint_path: "step_000600"
+
   # PHOTON-specific:
   # - base_embed_dim = encoder bottom embed dim (paper Table 10: 416 for 600M)
   # - hidden_size    = main model width used by enc/dec blocks and LM head
+  # - num_heads      = q/kv head count (head_dim defaults to 64)
   # Small: paper-conformal downscale (~200M)
   base_embed_dim: 256
   hidden_size: 1024
   intermediate_size: 2816
+  # Issue #148 Phase A: matches the mulmoclaude 600-step ckpt architecture
+  # (10 heads × 64 head_dim = 640-dim q/kv projections). The pipeline_factory
+  # reads ``cfg.model.num_heads`` (not ``num_attention_heads``).
+  num_heads: 10
 
 generation:
   max_new_tokens: 768
