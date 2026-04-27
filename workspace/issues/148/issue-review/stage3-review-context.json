@@ -1,0 +1,23 @@
+{
+  "issue_number": 148,
+  "issue_title": "test(eval): re-establish true baseline — fixed PHOTON pipeline + new LLM upgrade (Qwen3.5-9B / Gemma4-26B)",
+  "focus_area": "影響範囲",
+  "iteration": 1,
+  "stage": 3,
+  "stage_name": "影響範囲レビュー（1回目）",
+  "reviewer_model": "claude-opus",
+  "hypothesis_verification_path": "workspace/issues/148/issue-review/hypothesis-verification.md",
+  "stage1_result_path": "workspace/issues/148/issue-review/stage1-review-result.json",
+  "stage2_apply_result_path": "workspace/issues/148/issue-review/stage2-apply-result.json",
+  "review_focus": [
+    "影響ファイルの網羅性 (Issue 内記載漏れがないか)",
+    "既存テストへの影響 (test breakage 可能性)",
+    "API 後方互換性 (config schema, CLI 引数, public 関数 signature)",
+    "依存 Issue (#135, #137, #143) との影響伝播",
+    "実行時の波及効果 (memory, latency, GPU 占有時間)",
+    "ドキュメントへの影響 (CLAUDE.md, docs/, README)",
+    "CI/CD への影響 (test runtime 増加、ruff invariant 等)",
+    "本番運用への影響 (deployment yaml, server.py, 配布物)"
+  ],
+  "output_path": "workspace/issues/148/issue-review/stage3-review-result.json"
+}

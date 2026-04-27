@@ -1,0 +1,84 @@
+{
+  "stage": 2,
+  "iteration": 1,
+  "applier": "claude-sonnet",
+  "applied_at": "2026-04-27",
+  "applied_findings": [
+    {
+      "id": "S1-001",
+      "applied": true,
+      "summary": "Phase B 冒頭に「前提確認 (Phase B 着手前必須)」注釈ブロックを追加。各 model_id を仮置きとして明示し、huggingface-cli repo info による正式 slug 確認を受入条件前提チェックに追記。Phase B 受入条件にも slug 確認の前提チェックを追加。",
+      "edited_section": "Phase B アプローチ冒頭 / Phase B 受入条件 / リスク節"
+    },
+    {
+      "id": "S1-002",
+      "applied": true,
+      "summary": "Phase A 成果物の checkpoint_path 記述に「TBD — 担当者確認待ち (Phase A 着手前必須)」を追記。Phase A 受入条件の先頭に mulmoclaude 600-step ckpt 所在特定を前提チェックとして追加。",
+      "edited_section": "Phase A 成果物 / Phase A 受入条件"
+    },
+    {
+      "id": "S1-003",
+      "applied": true,
+      "summary": "影響ファイル Phase C の test_pipeline_factory_yaml_invariants.py 行を「既存 invariant (reranker/embedding model_id) は変更しない。新規に LLM model_id 用 invariant test を追加するか方針外とするかを Phase C 着手時に決定」に修正。Phase C 受入条件にも invariant test 方針明文化の項目を追加。",
+      "edited_section": "影響ファイル Phase C / Phase C 受入条件"
+    },
+    {
+      "id": "S1-004",
+      "applied": true,
+      "summary": "Phase B 見出しから「Phase A と並列可」を削除し「Phase A 完了後に着手」に変更。Phase B 冒頭に注意書きを追加。並列性節に「HF download のみは Phase A eval 完走待ち中に並列実行可」と具体化した例外を追記し矛盾を解消。",
+      "edited_section": "Phase B 見出し / Phase B アプローチ冒頭 / 並列性"
+    },
+    {
+      "id": "S1-005",
+      "applied": true,
+      "summary": "Phase B 受入条件の smoke test 2 件を、具体的な CLI コマンド + non-empty 応答 + tokenizer mismatch エラーなし の条件に置き換えた。",
+      "edited_section": "Phase B 受入条件"
+    },
+    {
+      "id": "S1-006",
+      "applied": true,
+      "summary": "Phase A 受入条件の delta 記載項目に、比較基準値 (Gate 2 v4 final: Static NC PHOTON 20.0% / MT NC 6.7%、#113 institutional eval: NC 11.39%) と出典ファイルを明示。",
+      "edited_section": "Phase A 受入条件"
+    },
+    {
+      "id": "S1-007",
+      "applied": true,
+      "summary": "想定 compute コスト表に「Phase B pre-flight (HF download: 新 LLM 2 件 計 ~25GB)」行を追加。合計を ~11-13h (HF download 含) に修正。",
+      "edited_section": "想定 compute コスト"
+    },
+    {
+      "id": "S1-008",
+      "applied": true,
+      "summary": "Phase A 受入条件に「#143 が未解消の場合、各 run の variance を report に併記し信頼区間を明示」を追加。リスク節に #143 未解消時の影響と緩和策を追加。関連節に #143 の補足説明を追記。",
+      "edited_section": "Phase A 受入条件 / リスク節 / 関連"
+    },
+    {
+      "id": "S1-009",
+      "applied": true,
+      "summary": "Phase D に vocab_size 取得方法 (AutoTokenizer.from_pretrained(...).vocab_size 取得 → yaml 反映) と vocab_size 不一致時の方針決定を #135 着手時と明示。本 Issue 範囲を tokenizer_id 確定までと限定。Phase D 受入条件を tokenizer_id 確定まで明示。",
+      "edited_section": "Phase D アプローチ / Phase D 受入条件"
+    },
+    {
+      "id": "S1-010",
+      "applied": true,
+      "summary": "影響ファイル Phase B の mlx_lm.py 行を「mlx-lm が新 model_id loader を提供しない場合は本 Issue 範囲外 (別 Issue 切り出し)、提供する場合のみ対応」と条件を明確化。Phase B の最初の subtask として mlx-lm loader 確認を追記。",
+      "edited_section": "Phase B アプローチ / 影響ファイル Phase B"
+    },
+    {
+      "id": "S1-011",
+      "applied": true,
+      "summary": "Issue 末尾に「PR 運用方針」節を新設。Phase A / B / C それぞれの完了時に PR を作成し develop にマージする 3 段 PR 運用を明文化。各 PR が #135 のどの段階を解禁するかを記載。Phase C 受入条件の PR 条件も 3 段 PR 運用に準拠して更新。",
+      "edited_section": "Phase C 受入条件 / PR 運用方針 (新設)"
+    },
+    {
+      "id": "S1-012",
+      "applied": true,
+      "summary": "影響ファイル Phase A の configs/institutional_docs_photon.yaml 行に「コメント lines も #148 Phase A 時点の provider 設定に合わせて更新する」を括弧注釈として追記。",
+      "edited_section": "影響ファイル Phase A"
+    }
+  ],
+  "skipped_findings": [],
+  "github_issue_updated": true,
+  "issue_url": "https://github.com/Kewton/photon-mlx/issues/148",
+  "summary": "Must Fix 4 件 (S1-001〜S1-004)、Should Fix 5 件 (S1-005〜S1-009)、Nice to Have 3 件 (S1-010〜S1-012) の全 12 件を反映した。主な変更点: Phase B 冒頭で model_id を仮置き化して HF 存在確認 checklist を受入条件に追加 (S1-001)、mulmoclaude ckpt 所在を「TBD / 担当者確認待ち」として Phase A 受入条件前提に追加 (S1-002)、影響ファイル Phase C の invariant test 記述を reranker/embedding 非変更 + LLM invariant 追加方針決定に修正 (S1-003)、Phase B 見出しの並列性記述を削除して並列性節と整合 (S1-004)。その他 smoke test 具体化・delta 参照点明示・HF download compute 追加・#143 variance 記載・vocab_size 手順・mlx_lm 条件明確化・3 段 PR 運用方針・yaml コメント更新注釈を反映。全 12 件適用完了、GitHub Issue 更新成功。"
+}

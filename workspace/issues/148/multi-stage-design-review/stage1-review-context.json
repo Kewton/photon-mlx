@@ -1,0 +1,17 @@
+{
+  "issue_number": 148,
+  "focus_area": "設計原則",
+  "stage": 1,
+  "stage_name": "通常レビュー",
+  "reviewer_model": "claude-opus",
+  "design_doc_path": "workspace/design/issue-148-rebaseline-design-policy.md",
+  "issue_body_path": "workspace/issues/148/design/latest-issue-body.md",
+  "review_focus": [
+    "SOLID 原則準拠 (SRP / OCP / LSP / ISP / DIP)",
+    "KISS / YAGNI / DRY",
+    "設計判断の妥当性とトレードオフ記述の充実",
+    "実装可能性 (具体性、曖昧さの排除)",
+    "Phase 分割の論理的妥当性"
+  ],
+  "output_path": "workspace/issues/148/multi-stage-design-review/stage1-review-result.json"
+}

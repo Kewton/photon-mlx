@@ -1,0 +1,39 @@
+{
+  "stage": 4,
+  "applier": "codex",
+  "applied_at": "2026-04-27",
+  "applied_findings": [
+    {
+      "id": "DR4-001",
+      "applied": true,
+      "summary": "checkpoint_path を repo-local checkpoints/ または PHOTON_CHECKPOINT_ROOT 配下に閉じ込める root containment 検証、symlink escape 拒否、absolute path 非表示ログ方針を設計へ追加した。"
+    },
+    {
+      "id": "DR4-002",
+      "applied": true,
+      "summary": "model.model_id / tokenizer.tokenizer_id の HF repo-id allowlist、URL / local path / traversal / control char 拒否を config 入力検証方針として追記した。"
+    },
+    {
+      "id": "DR4-003",
+      "applied": true,
+      "summary": "smoke / warm-up 自動化で shell 文字列連結を禁止し、subprocess argv list + shell=False のみ許可する方針を §6.6 に追加した。"
+    },
+    {
+      "id": "DR4-004",
+      "applied": true,
+      "summary": "private model_id / token / absolute checkpoint path の redaction と secret scan を §6.4、§8、§9、§10.4 に反映した。"
+    },
+    {
+      "id": "DR4-005",
+      "applied": true,
+      "summary": "HF artifact の revision 記録、trust_remote_code=True の範囲外化、dependency 追加時の PR 明記条件を §6.8 とリスク表に追加した。"
+    },
+    {
+      "id": "DR4-006",
+      "applied": true,
+      "summary": "rollback config の token / api_key / Authorization / local absolute path 禁止と approved slug 条件を §6.10 に独立記載した。"
+    }
+  ],
+  "design_policy_updated": true,
+  "summary": "Should Fix 5 件、Nice to Have 1 件を設計方針書に反映済み。ソースコードは変更していない。"
+}

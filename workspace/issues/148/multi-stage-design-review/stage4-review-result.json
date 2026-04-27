@@ -1,0 +1,61 @@
+{
+  "stage": 4,
+  "focus": "セキュリティ",
+  "reviewer": "codex",
+  "reviewed_at": "2026-04-27",
+  "summary": "Stage 1-3 反映後の設計方針書をセキュリティ観点でクロスレビューした。\n`yaml.safe_load` は既存実装で使われており、設計上も `eval()` / `exec()` による config 解釈の計画は見当たらなかった。\n一方で checkpoint_path は directory 形状検証だけでは path traversal / symlink escape を防げず、許可 root への閉じ込めが必要だった。\n新 LLM の `model_id` は `mlx_lm.load()` に渡るため、tokenizer_id と同等の HF repo-id allowlist が必要だった。\nPhase B の smoke / warm-up をスクリプト化する場合、slug や question の shell 連結が command injection になりうるため argv list 契約を明記した。\nbackbone 自動出力と checkpoint ログは private model_id / local absolute path を漏らす可能性があるため redaction 方針を追加した。\nHF artifact は mutable な supply chain であり、repo verification だけでなく revision 記録と trust_remote_code 禁止を設計へ追加した。",
+  "findings": [
+    {
+      "id": "DR4-001",
+      "severity": "Should Fix",
+      "category": "path traversal",
+      "title": "checkpoint_path が許可 root 外の local path / symlink escape を許容しうる",
+      "description": "Stage 3 で `weights.npz` / `state.json` の directory 形状検証は追加されたが、設計方針書 §3 の実装例は `Path(checkpoint_path).expanduser()` 相当であり、`../../../outside_ckpt` や symlink で許可 root 外へ抜ける path を禁止していなかった。悪意ある yaml で任意 local directory を checkpoint として読ませ、absolute path をログに出す攻撃シナリオが残る。",
+      "suggested_action": "`checkpoint_path` は repo-local `checkpoints/` または `PHOTON_CHECKPOINT_ROOT` 配下に限定し、`resolve(strict=True)` 後に root containment を検証する。symlink escape を拒否し、例外・ログには raw absolute path を出さない。"
+    },
+    {
+      "id": "DR4-002",
+      "severity": "Should Fix",
+      "category": "入力検証",
+      "title": "model.model_id の HF repo-id allowlist が設計上未明記",
+      "description": "設計方針書 §3 設計判断 #4 は候補 slug の手動確認を記載しているが、Phase B/C の yaml に入る `cfg.model.model_id` 自体を実行時に検証する条件がなかった。`mlx_lm.load(model_id)` に local path、URL、`..`、制御文字入り slug が渡ると、未承認 artifact の load や log injection の入口になる。",
+      "suggested_action": "`model.model_id` / `tokenizer.tokenizer_id` に共通の HF repo-id allowlist (`<org>/<name>`, ASCII `[A-Za-z0-9._-]`, slash 1 個、dot/traversal/URL/control char 禁止) を適用する設計を追加する。"
+    },
+    {
+      "id": "DR4-003",
+      "severity": "Should Fix",
+      "category": "コマンドインジェクション",
+      "title": "smoke / warm-up 自動化時の shell 連結禁止が明文化されていない",
+      "description": "§3 と §8 には `python -m baseline_reporag.cli ... --question 'test'` や `python3 -c \"... mlx_lm.load('<正式 slug に置換>') ...\"` の例がある。手順としては固定値だが、Phase B の正式 slug や question を自動化で shell 文字列へ補間すると command injection になる。",
+      "suggested_action": "自動化では `subprocess.run([...], shell=False, check=True)` の argv list のみ許可し、`os.system` / `shell=True` / f-string shell command を禁止する。`python -c` への slug 文字列補間は禁止し、検証済み値を Python 関数引数として渡す小スクリプトにする。"
+    },
+    {
+      "id": "DR4-004",
+      "severity": "Should Fix",
+      "category": "secrets",
+      "title": "backbone 自動出力と checkpoint ログが private slug / local path を漏らしうる",
+      "description": "Stage 1-3 の反映で `report.show_llm_backbone: true` と `checkpoint loaded from <path>` が必須化されたが、private HF org / R&D codename を含む `model_id` や local username を含む absolute checkpoint path を CI artifact / report / log に出す場合の redaction 方針が未定義だった。`configs/baseline_qwen25.yaml` の rollback 残置でも、誤って token や local path が入ると長期残存する。",
+      "suggested_action": "`model_id` は public slug 前提とし、private slug は public artifact で redaction する。checkpoint path は basename または許可 root からの相対 path だけをログに出す。configs/reports/docs に token / api_key / Authorization / Bearer / absolute local path が混入しない secret scan を受入条件へ追加する。"
+    },
+    {
+      "id": "DR4-005",
+      "severity": "Should Fix",
+      "category": "依存パッケージ",
+      "title": "HF model artifact の supply chain 固定条件が不足",
+      "description": "§3 設計判断 #4 は HF repo 存在確認や downloads 数を確認するが、HF repo は同じ slug でも revision が進むため、eval 再現性と supply chain の観点で mutable な artifact を読んだ時点が固定されない。また `trust_remote_code=True` を必要とする model を採用した場合の security review 条件も未定義だった。",
+      "suggested_action": "Phase B report に `repo_id`, `revision` (commit SHA), `updated_at`, `downloads`, quantization を記録する。可能なら config に revision を固定する。`trust_remote_code=True` が必要な model は本 Issue 範囲外とし、別 Issue の security review を必須化する。"
+    },
+    {
+      "id": "DR4-006",
+      "severity": "Nice to Have",
+      "category": "rollback安全性",
+      "title": "rollback config の secret-free 条件が独立したチェックとして見えにくい",
+      "description": "§6.3 は `configs/baseline_qwen25.yaml` を rollback 用に残す手順を示しているが、残置される config に token、api_key、private local path が入っていないことを確認する明示条件がなかった。rollback config は長期に repo に残るため、通常 config より漏洩が見落とされやすい。",
+      "suggested_action": "`configs/baseline_qwen25.yaml` 作成時に token / api_key / Authorization header / local absolute path がないこと、model_id が approved public slug または redaction 方針つき private slug であることを §6 に独立記載する。"
+    }
+  ],
+  "must_fix_count": 0,
+  "should_fix_count": 5,
+  "nice_to_have_count": 1,
+  "overall_assessment": "Approve with comments"
+}

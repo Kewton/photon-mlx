@@ -1,0 +1,110 @@
+{
+  "stage": 1,
+  "applier": "claude-sonnet",
+  "applied_at": "2026-04-27",
+  "applied_findings": [
+    {
+      "id": "DR1-001",
+      "severity": "Must Fix",
+      "applied": true,
+      "summary": "fail-fast を原則に変更。checkpoint_path 設定時の load 失敗は RuntimeError を raise して eval 全体を停止。fail-soft 経路は PHOTON_ALLOW_RANDOM_INIT=1 環境変数でのみ有効化 (test/CI 限定)。Phase A 受入条件にログ確認必須化も追記。",
+      "edited_section": "§3 設計判断 #1 実装方針 (fail-fast コードブロック + Phase A 受入条件)"
+    },
+    {
+      "id": "DR1-002",
+      "severity": "Should Fix",
+      "applied": true,
+      "summary": "module top-level import を採用 (lazy import を廃止)。photon_pipeline.py は MLX-aware 層として load_checkpoint を top-level で import。§10.1 の patch target を baseline_reporag.photon_pipeline.load_checkpoint に統一。pipeline_factory (MLX-free) / photon_pipeline (MLX-aware) の境界を新設した『import スタイルの選択』サブセクションとモジュール境界ブロックで明文化。",
+      "edited_section": "§3 設計判断 #1 (import スタイルの選択 + モジュール境界)"
+    },
+    {
+      "id": "DR1-003",
+      "severity": "Should Fix",
+      "applied": true,
+      "summary": "checkpoint_path 取得を getattr(cfg.model, 'checkpoint_path', None) 一本に統一。top-level fallback (cfg.get(...)) を削除。yaml schema 上の正規 path は model.checkpoint_path のみと明記。",
+      "edited_section": "§3 設計判断 #1 実装方針コードブロック"
+    },
+    {
+      "id": "DR2-001",
+      "severity": "Should Fix",
+      "applied": true,
+      "summary": "backbone 差分の自動出力方針を追記。configs/eval.yaml に report.show_llm_backbone: true フラグ追加 (Phase C) と bench/ report 生成スクリプトでの model_id 必須出力を設計方針書に追記。photon_rag variant の Qwen2.5 維持理由を OCP/vocab 整合性観点で正当化する注記ブロックを追加。",
+      "edited_section": "§3 設計判断 #2 (configs/eval.yaml の方針 — backbone 差分の自動出力 DR2-001 対応)"
+    },
+    {
+      "id": "DR4-001",
+      "severity": "Should Fix",
+      "applied": true,
+      "summary": "代替 slug 選定基準を定量化。param 数許容範囲 ±20% (Qwen3.x: 7B-11B / Gemma4: 21B-32B)、vocab 系統同一、量子化形式 4bit/8bit 限定、HF Hub 30 日以内 100 downloads 以上、代替採用時は reports/llm_baseline_comparison_2026q2.md の選定根拠欄への記載を Phase B 受入条件に追加。",
+      "edited_section": "§3 設計判断 #4 (不在時の代替策 — 代替 slug 選定基準 定量化)"
+    },
+    {
+      "id": "DR5-001",
+      "severity": "Should Fix",
+      "applied": true,
+      "summary": "peak RSS 測定を全 LLM 共通手順として統一。Qwen3.x も peak RSS 測定・report 記録を必須化。閾値 80% 適用は Gemma4 のみだが測定手順は 3 LLM 共通。Qwen3.x の 64GB マシン動作確認を Phase B pre-flight subtask に追加。",
+      "edited_section": "§3 設計判断 #5 (smoke test コードブロック + peak RSS 統一方針注記)"
+    },
+    {
+      "id": "PHASE-001",
+      "severity": "Should Fix",
+      "applied": true,
+      "summary": "PR #1 内で commit 単位を分離 (commit A0: code change / commit A: yaml + data change)。各 commit が独立して revert 可能であることを明記。#135 unblock 条件を PR #1 (commit A0+A 両方) merge 後と再定義。",
+      "edited_section": "§3 設計判断 #6 (PR 運用方針テーブル + commit 分離方針ブロック)"
+    },
+    {
+      "id": "YAGNI-001",
+      "severity": "Should Fix",
+      "applied": true,
+      "summary": "§5.2 と §10.3 の invariant test 方針を Phase C 先送りから設計方針書段階での (B) 決定に変更。理由: YAGNI (変更時のコストが防護メリットを上回る) を明記。Phase C 覆す場合の手順も記述。",
+      "edited_section": "§5.2 (LLM model_id invariant 方針テーブル + 決定理由) / §10.3 (invariant test 方針)"
+    },
+    {
+      "id": "DR3-001",
+      "severity": "Nice to Have",
+      "applied": true,
+      "summary": "DR-3 に OCP 観点補足を追加。PhotonModel は vocab_size に対して closed, embedding 層拡張で open という設計判断を明文化。Phase D 以降の LLM 追加時も同パターンで対応することを記述。",
+      "edited_section": "§3 設計判断 #3 (OCP 観点の補足 DR3-001)"
+    },
+    {
+      "id": "DRY-001",
+      "severity": "Nice to Have",
+      "applied": true,
+      "summary": "§3 DR-3 を保護コメントの Single Source of Truth とし、§5.1 は参照のみに変更。重複コードブロックを削除。",
+      "edited_section": "§5.1 (photon profile yaml 保護コメント参照化)"
+    },
+    {
+      "id": "IMPL-001",
+      "severity": "Should Fix",
+      "applied": true,
+      "summary": "photon_tiny.yaml / photon_tiny_recgen.yaml の vocab_size / tokenizer_id を実際の値に確定 (vocab_size: 32000 / tokenizer_id: meta-llama/Llama-2-7b-hf — LLaMA-2 系)。Qwen2.5 系でないため保護コメント対象外と明記。Phase D で個別評価が必要な旨を注記。",
+      "edited_section": "§5.1 photon profile yaml テーブル (photon_tiny 2 件の値確定)"
+    },
+    {
+      "id": "SRP-001",
+      "severity": "Nice to Have",
+      "applied": true,
+      "summary": "将来拡張時の _build_photon_deps 責務分割ポリシーを Future Work (FW-1) として設計方針書末尾に追記 (200 行以上 / 3 分岐以上でヘルパー関数抽出)。",
+      "edited_section": "§ Future Work FW-1"
+    },
+    {
+      "id": "ISP-001",
+      "severity": "Nice to Have",
+      "applied": true,
+      "summary": "pipeline_factory の interface 契約 (input: cfg.model.provider / output: QueryResult / 隠蔽詳細) を Future Work (FW-2) として設計方針書末尾に追記。Phase D 以降で provider 増加時に参照。",
+      "edited_section": "§ Future Work FW-2"
+    },
+    {
+      "id": "DRY-002",
+      "severity": "Nice to Have",
+      "applied": true,
+      "summary": "§6 と §9 の重複整理方針を Future Work (FW-3) として記録。現時点では可読性優先で重複許容。将来のリファクタリング時に §6 (対策方針) / §9 (cross-reference 表) の役割分担を明確化。",
+      "edited_section": "§ Future Work FW-3"
+    }
+  ],
+  "skipped_findings": [],
+  "design_policy_updated": true,
+  "design_policy_line_count_before": 535,
+  "design_policy_line_count_after": 630,
+  "summary": "Stage 1 全 14 findings を反映完了 (Must Fix 1 / Should Fix 7 / Nice to Have 6、スキップなし)。主要変更: (1) DR1-001: fail-fast 原則 (RuntimeError raise) に転換、PHOTON_ALLOW_RANDOM_INIT=1 環境変数フラグで fail-soft を test/CI 限定に制限、Phase A 受入条件にログ確認必須化を追記; (2) DR1-002: module top-level import に統一、MLX-free/MLX-aware 境界を明文化、§10.1 patch target を整合; (3) DR1-003: cfg.model.checkpoint_path 一本化、top-level fallback 削除; (4) DR2-001: backbone 差分自動出力方針追記 + photon_rag Qwen2.5 維持の詳細な正当化; (5) DR4-001: 代替 slug 選定基準を定量化 (param ±20%, vocab 系統, quant 形式, HF 実績); (6) DR5-001: peak RSS 測定を全 LLM 共通手順に統一; (7) PHASE-001: PR #1 内で commit A0/A を分離; (8) YAGNI-001: invariant test 方針を Phase C 先送りから設計方針書段階での (B) 決定に変更; (9) DR3-001/DRY-001/IMPL-001/SRP-001/ISP-001/DRY-002: OCP 補足・重複解消・yaml 値確定・Future Work 追記。"
+}

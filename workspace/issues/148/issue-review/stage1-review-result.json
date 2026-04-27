@@ -1,0 +1,111 @@
+{
+  "stage": 1,
+  "iteration": 1,
+  "focus": "通常（1回目）",
+  "reviewer": "claude-opus",
+  "reviewed_at": "2026-04-27",
+  "summary": "Issue #148 は S7-001 + #138 解消後の真の PHOTON ベースライン再確立 + LLM upgrade を扱う複合 Issue。前提 (S7-001/#138 解消) → ゴール (3 LLM × 2 dataset 比較) → Phase A-D → 受入条件の論理は概ね整合。ただし以下の問題が残存: (a) 新 LLM (Qwen3.5-9B-MLX-8bit / gemma-4-26b-a4b-4bit) の HF 上の存在が未検証 (H9 Unverifiable) かつ受入条件の前提検証 step が checklist 化されていない、(b) mulmoclaude 600-step ckpt の所在が Issue 内に記載されておらず Phase A の checkpoint_path 明示作業がブロックされうる、(c) Issue 影響ファイル節の `tests/test_pipeline_factory_yaml_invariants.py (#132 invariant)` 記述は実際は reranker model_id invariant であり LLM model_id invariant ではない (誤認の恐れ)、(d) 受入条件の「smoke test」「動作確認」が抽象的で測定指標が未定義、(e) Phase A と Phase B の依存関係に関する記述が「並列性」節と Phase B 冒頭で齟齬がある、(f) #143 (Qwen nondeterminism) との相互作用が「2 runs 平均」設計に対し未整理。Must Fix 4 件、Should Fix 5 件、Nice to Have 3 件。総合的に着手前の修正必須項目があり Needs revision。",
+  "findings": [
+    {
+      "id": "S1-001",
+      "severity": "Must Fix",
+      "category": "技術的正確性",
+      "title": "Qwen3.5-9B-MLX-8bit / gemma-4-26b-a4b-4bit の HF 存在確認が未実施・未受入条件化",
+      "description": "Issue 本文では `mlx-community/Qwen3.5-9B-MLX-8bit` および `mlx-community/gemma-4-26b-a4b-4bit` を Phase B 対象として固定しているが、hypothesis-verification.md H9 で『HF availability はコードからは確認不可 (Unverifiable)』と判定されている。リスク節に「事前 huggingface-cli download で取得確認」とあるが、Phase B 受入条件には『動作確認 (smoke test)』しか書かれておらず、リポジトリ存在検証ステップが checklist 化されていない。さらに `Qwen3.5-9B-MLX-8bit` という model_id は実在するか不明 (Qwen3 系の正式 mlx-community 命名は『Qwen3-x』系で『Qwen3.5』は非標準呼称の可能性)。同じく `gemma-4-26b-a4b-4bit` も model_id の正規 slug が要確認。",
+      "suggested_action": "Phase A 開始前の前提条件として『各 model_id を `huggingface-cli repo info <id>` で存在確認、不在時は最も近い既存 mlx-community model に切替えて Issue を更新』を Phase B 受入条件冒頭に追加。実 model_id を Issue 本文で再確認し、Qwen3 系は正式名 (例: `mlx-community/Qwen3-8B-MLX-8bit` 等) に修正、Gemma 4 MoE 系は Google の公式 release 名 (例: `mlx-community/gemma-3-27b-it-4bit` または `gemma-4-...` の正規 slug) を再記述する。"
+    },
+    {
+      "id": "S1-002",
+      "severity": "Must Fix",
+      "category": "曖昧性",
+      "title": "mulmoclaude 600-step checkpoint の所在パスが Issue に記載されていない",
+      "description": "Phase A 成果物欄に『configs/institutional_docs_photon.yaml: model.checkpoint_path に既存 mulmoclaude 600-step ckpt を明示設定』とあるが、Issue 本文・関連 Issue (#113, #135) のいずれにも当該 ckpt の保存場所 (リポ内 path / 共有 server / HF hub URL / mlx-community mirror) が示されていない。hypothesis-verification.md H5 でも『リポジトリ artifact としては未コミット (外部 checkpoint server or local path)』と Partially Confirmed。実装担当者が Phase A の最初の作業 (yaml 編集) を着手できないリスクが高い。",
+      "suggested_action": "Issue 本文 Phase A セクションに『checkpoint 所在: <絶対 path or HF URL>』を追記。所在が未確定であれば、Phase A の最初の subtask として『mulmoclaude 600-step ckpt の所在特定 (val_loss 0.4525 達成 ckpt の locator 確認)』を受入条件に追加し、責任者・参照 Issue を明示する。"
+    },
+    {
+      "id": "S1-003",
+      "severity": "Must Fix",
+      "category": "整合性",
+      "title": "影響ファイル節 `tests/test_pipeline_factory_yaml_invariants.py (#132 invariant)` の記述が実態と異なる",
+      "description": "Issue 影響ファイル Phase C 節に『tests/test_pipeline_factory_yaml_invariants.py (#132 invariant 採用 LLM に変更)』とあるが、当該テストの invariant 対象は実際には `reranker.model_id` (`GLOBAL_DEFAULT_RERANKER_MODEL_ID = 'cross-encoder/ms-marco-MiniLM-L-6-v2'`, `INSTITUTIONAL_RERANKER_MODEL_ID = 'BAAI/bge-reranker-v2-m3'`) と embedding.model_id であり、generation.model_id (LLM) は invariant 化されていない (hypothesis-verification.md H10 で確認済)。Issue の記述に従って『採用 LLM に変更』しても変更対象が存在しない。",
+      "suggested_action": "影響ファイル Phase C を以下のいずれかに修正: (a) 既存 reranker/embedding invariant は触らず、新規に `test_baseline_yaml_generation_model_id_unchanged` を追加して LLM model_id を invariant 化する、または (b) LLM 系は invariant 化方針外として該当テスト言及を削除。受入条件 Phase C にも『新 LLM model_id 用 invariant test の方針 (追加 or 不追加)』を明文化する。"
+    },
+    {
+      "id": "S1-004",
+      "severity": "Must Fix",
+      "category": "整合性",
+      "title": "Phase A/B の並列性に関する記述が Issue 内で矛盾している",
+      "description": "Phase B 冒頭に『Phase A と並列可、strategic』と書かれているが、末尾「並列性」節では『Phase B は Phase A 完了後に着手 (GPU 競合回避)』と明記されており、明確に矛盾している。実装担当者がどちらに従えばよいか不明。GPU 競合回避は Apple Silicon 単機環境で妥当な制約であり、Phase A 完了後着手が現実的だが、その場合『Phase A と並列可』の表記は誤りとなる。",
+      "suggested_action": "Phase B 冒頭の『Phase A と並列可』を削除または『Phase A 完了後に着手 (GPU 競合回避のため)』に変更し、末尾「並列性」節と一致させる。並列実行可能性が残る場合 (例: Phase A の eval 完走待ち中に Phase B の HF download だけ並列実行可) は、それを具体的に区別記述する。"
+    },
+    {
+      "id": "S1-005",
+      "severity": "Should Fix",
+      "category": "受入条件",
+      "title": "Phase B 受入条件の『smoke test』『動作確認』が抽象的で測定指標が未定義",
+      "description": "Phase B 受入条件の `Qwen 3.5-9B-8bit を baseline_rag で動作確認 (smoke test)` および `Gemma 4-26B-a4b-4bit を baseline_rag で動作確認 (smoke test)` は具体的な合格条件が未定義。レビュー観点 3 (受入条件の検証可能性) に直接抵触する。例: 1 question/1 turn で応答生成成功 + citation 出力 != null か、tokenizer.encode/decode の round-trip 一致か、vocab_size が PhotonModel の vocab_size と差分許容範囲内か、いずれを smoke test と呼ぶか不明。",
+      "suggested_action": "smoke test の合格条件を具体化: (a) `python -m baseline_reporag.cli --config configs/baseline_<llm>.yaml --repo-id fastapi_fastapi --question 'test'` が non-empty 応答を返す、(b) PHOTON pipeline でも tokenizer mismatch エラーが出ない、(c) wall-clock latency が ~X 秒以内、を受入条件に明示。"
+    },
+    {
+      "id": "S1-006",
+      "severity": "Should Fix",
+      "category": "受入条件",
+      "title": "Phase A 受入条件の delta 記載に基準値の参照点が未明示",
+      "description": "Phase A 受入条件の最後に『各 report に「修正前 (random-init) vs 修正後 (loaded checkpoint)」の delta を記載』とあるが、修正前 (random-init) の数値は Gate 2 v4 (Static NC PHOTON 20.0%, MT NC 6.7%) と #113 (Institutional NC 11.39%) を参照すべきと推察される。しかし Issue 内に明示的な参照表が無いため、レポート起票者が異なる過去レポートを根拠として混在させるリスクがある。",
+      "suggested_action": "Phase A 受入条件 (または成果物節) に『delta 比較の修正前数値: Gate 2 v4 final (Static NC PHOTON 20.0%, MT NC 6.7%) / #113 institutional eval (NC 11.39%) を参照点として固定』と追記し、ソースとして `reports/gate2_judgment_v4_final.md` および `reports/institutional_photon_mt_eval.md` を明示する。"
+    },
+    {
+      "id": "S1-007",
+      "severity": "Should Fix",
+      "category": "コスト見積もり",
+      "title": "Phase B compute 見積もりに HF model download (cache miss) 時間が考慮されていない",
+      "description": "Phase B 想定 compute は『Qwen3.5-9B-MLX-8bit ~30-45 min/dataset、gemma-4-26b-a4b-4bit ~45-60 min/dataset』で 16 runs 約 6-8h と見積もられているが、初回 download (HF cache miss) の所要時間 (9B 8bit ~9-10GB、26B 4bit ~13-15GB、合計 ~25GB) が含まれているか不明。#137 V4 build に 2.5h を要した実績 (重い embedding/reranker download 含) を踏まえると、新 LLM 2 件の cold download だけで wall-clock +0.5-1h は加算されうる。",
+      "suggested_action": "想定 compute コスト表に『Phase B pre-flight (HF download 含む)』行を追加し、`huggingface-cli download` の wall-clock を試算 (例: 100 Mbps download で ~0.5-1h)。または合計を ~10-12h から `~11-13h (HF download 含)` に修正。"
+    },
+    {
+      "id": "S1-008",
+      "severity": "Should Fix",
+      "category": "曖昧性",
+      "title": "#143 (Qwen nondeterminism) との相互作用が未整理",
+      "description": "本 Issue は『各 LLM × 2 dataset × baseline + PHOTON × 2 runs』で平均値を取るが、関連 Issue として #143 (eval reproducibility — Qwen nondeterminism) が挙げられているのみで、#143 が未解消の場合『2 runs 平均』の信頼区間がどの程度かが不明。本 Issue 着手と #143 解消の前後関係が未整理。",
+      "suggested_action": "Issue 本文「関連」節に『#143 が未解消のまま本 Issue を進める場合、各 run の variance を report に併記し、信頼区間を明示する』もしくは『#143 解消が前提条件 (blocker)』を明文化。Phase A 受入条件にも variance 記載 (例: NC ± std) を追加する。"
+    },
+    {
+      "id": "S1-009",
+      "severity": "Should Fix",
+      "category": "整合性",
+      "title": "Phase D の vocab_size 整合性チェック手順が未定義",
+      "description": "Phase D『#135 への引継ぎ』に『PhotonModel の vocab_size は採用 LLM の vocab に合わせる』とあるが、現行 `configs/institutional_docs_photon.yaml:169` は `vocab_size: 152064` (Qwen 2.5 系) で固定されており、新 LLM 採用時の vocab_size 取得・適用手順が未定義。tokenizer_id の更新 (Phase C) と PhotonModel re-init (Phase D / #135 領域) のどちらが本 Issue 範囲か曖昧。",
+      "suggested_action": "Phase D 文書に『採用 LLM の vocab_size 取得方法 (`AutoTokenizer.from_pretrained(...).vocab_size` 取得 → yaml 反映)』『vocab_size 不一致時の embedding 行列 reshape 方針 (zero-pad or 再 init)』を追記。または Phase D は #135 範囲として本 Issue では「採用 LLM の tokenizer_id を確定する」までに限定する旨を明示する。",
+      "category_note": "本 finding は Phase 分割の妥当性にも該当"
+    },
+    {
+      "id": "S1-010",
+      "severity": "Nice to Have",
+      "category": "整合性",
+      "title": "影響ファイル `baseline_reporag/generation/mlx_lm.py` の変更要否が条件付きで未確定",
+      "description": "Phase B 影響ファイル節に『baseline_reporag/generation/mlx_lm.py: 必要なら新 model_id 対応 (provider 抽象化見直し)』とある。条件付き記述のため事前に判定が必要だが、判定基準 (現行 mlx-lm が Qwen3 / Gemma4 の loader を持つか) が示されていない。",
+      "suggested_action": "Phase B の最初の subtask として『mlx-lm version <X> が Qwen3 / Gemma4 loader を提供するか確認』を追加。提供しない場合は本 Issue 範囲外として別 Issue 切り出しを推奨する旨を補足。"
+    },
+    {
+      "id": "S1-011",
+      "severity": "Nice to Have",
+      "category": "受入条件",
+      "title": "Phase C 受入条件『PR でユーザー承認後 develop マージ』が他 Phase と不釣合い",
+      "description": "Phase C のみ最後に『PR でユーザー承認後 develop マージ』が含まれるが、Phase A/B にはマージ条件記述が無い。本 Issue を 1 PR で扱うか、Phase 単位で複数 PR に分けるかが受入条件に明示されていない (hypothesis-verification.md 申し送り 9 と一致)。",
+      "suggested_action": "Issue 末尾に『運用方針: Phase A 完了で 1 PR、Phase B 完了で別 PR、Phase C 完了で最終 PR (3 段)』もしくは『1 PR 一括』のいずれかを明文化。各 PR が #135 のどの段階を解禁するか対応も整理する。"
+    },
+    {
+      "id": "S1-012",
+      "severity": "Nice to Have",
+      "category": "整合性",
+      "title": "configs/institutional_docs_photon.yaml の `provider` 既存値が `photon` でコメントと矛盾",
+      "description": "現行 `configs/institutional_docs_photon.yaml:177` は `provider: \"photon\"`、:178 で `model_id: 'mlx-community/Qwen2.5-Coder-14B-Instruct-4bit'`、上部コメント (:174-175) では『本 Issue は baseline Static NC 実測のため provider=baseline に設定』とある。コメントと実値が不整合。Issue #148 Phase A で当該 yaml を編集する際、コメントも更新しないとレビュアー混乱を招く。",
+      "suggested_action": "Phase A 影響ファイル節に『コメント (line 174-175) も #148 Phase A 時点の provider 設定に合わせて更新』を追記する。"
+    }
+  ],
+  "must_fix_count": 4,
+  "should_fix_count": 5,
+  "nice_to_have_count": 3,
+  "overall_assessment": "Needs revision"
+}

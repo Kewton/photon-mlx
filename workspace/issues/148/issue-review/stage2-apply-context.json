@@ -1,0 +1,11 @@
+{
+  "issue_number": 148,
+  "stage": 2,
+  "stage_name": "指摘事項反映（1回目 通常レビュー）",
+  "iteration": 1,
+  "applier_model": "claude-sonnet",
+  "review_result_path": "workspace/issues/148/issue-review/stage1-review-result.json",
+  "original_issue_path": "workspace/issues/148/issue-review/original-issue.json",
+  "output_path": "workspace/issues/148/issue-review/stage2-apply-result.json",
+  "instruction": "Stage 1 の Must Fix 4件 + Should Fix 5件を反映。Nice to Have 3件は反映可能なものを反映 (PR 運用方針, yaml コメント整合は反映、mlx_lm 条件は補足記載のみ)。"
+}

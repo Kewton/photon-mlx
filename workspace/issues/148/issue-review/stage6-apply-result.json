@@ -1,0 +1,31 @@
+{
+  "stage": 6,
+  "iteration": 2,
+  "applier": "codex",
+  "applied_at": "2026-04-27",
+  "applied_findings": [
+    {
+      "id": "S5-001",
+      "applied": true,
+      "summary": "Phase A0 の checkpoint load 実装責務を `_build_photon_deps` + `photon_mlx.trainer.load_checkpoint` に限定し、`photon_mlx/inference.py` は random-init warning の診断層として扱うよう本文を修正。存在しない `load_inference_model` 参照も削除した。"
+    },
+    {
+      "id": "S5-002",
+      "applied": true,
+      "summary": "Phase B を新 LLM 2 件の baseline-only eval に明確化し、新 LLM + PHOTON の本格 eval は Phase D/#135 に延期する方針へ統一。run 数、report 説明、Phase C 判定基準、受入条件、compute 表、PR 運用方針を更新した。"
+    },
+    {
+      "id": "S5-003",
+      "applied": true,
+      "summary": "Phase B の peak memory 受入条件から `<X>GB` placeholder を削除し、peak RSS が unified memory の 80% 未満に収まることを確認する条件に置換した。"
+    },
+    {
+      "id": "S5-004",
+      "applied": true,
+      "summary": "Phase C 文書更新の受入条件を `文書 7 件` に修正し、影響ファイル節と同じ 7 ファイルを明示列挙した。"
+    }
+  ],
+  "github_issue_updated": true,
+  "issue_url": "https://github.com/Kewton/photon-mlx/issues/148",
+  "summary": "Stage 5 の Must Fix 2 件、Should Fix 2 件を `workspace/issues/148/issue-review/issue-body-updated-stage6.md` に反映し、`gh issue edit 148 --body-file workspace/issues/148/issue-review/issue-body-updated-stage6.md` で GitHub Issue #148 を更新済み。"
+}
