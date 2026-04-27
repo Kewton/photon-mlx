@@ -426,6 +426,35 @@ class TestBuildMessagesSessionSummary:
 
 
 # ---------------------------------------------------------------------------
+# Issue #115: Japanese prompt hint must persist on PHOTON 2nd-turn calls
+# (where include_few_shot=False is the typical follow-up path) so the
+# institutional-doc routing rule is independent of the format-hint switch.
+# ---------------------------------------------------------------------------
+
+
+class TestBuildMessagesJapaneseFollowUp:
+    """build_messages() retains the Japanese institutional hint when called
+    in the PHOTON follow-up shape (include_few_shot=False, with a non-empty
+    session_summary). Signature must remain unchanged."""
+
+    def test_japanese_hint_preserved_with_include_few_shot_false(self):
+        from baseline_reporag.generation.prompt import build_messages
+
+        msgs = build_messages(
+            question="制度文書の第3条に関する補足説明をしてください",
+            evidence_text="[C:1] doc.md\n第3条 補足",
+            session_summary="[PHOTON] previous turn discussed 第2条",
+            include_few_shot=False,
+        )
+        # Signature is unchanged: 2 messages (system + user) come back.
+        assert len(msgs) == 2
+        assert msgs[0]["role"] == "system"
+        # DR1-006: substring assert on a stable phrase rather than
+        # importing the private constant.
+        assert "制度文書を根拠に回答する場合は" in msgs[0]["content"]
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
