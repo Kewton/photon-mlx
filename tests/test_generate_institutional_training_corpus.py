@@ -107,40 +107,69 @@ class TestSplitTrainVal:
 
 
 class _FakeLLMClient:
-    """Minimal LLMClient stand-in. Returns canned turn texts so build_sessions
-    can be exercised without hitting a real model."""
+    """Production-shape ``LLMClient`` stub.
 
-    def __init__(self, turn_texts: list[str]) -> None:
-        self.turn_texts = turn_texts
-        self.calls: list[dict] = []
+    Mirrors the signature of
+    ``baseline_reporag.eval.institutional.llm_client.LLMClient``: a single
+    ``generate(prompt) -> str`` returning a JSON object string, plus
+    ``name`` / ``model`` attributes. Returns a fixed 6-turn JSON payload
+    so ``build_sessions`` exercises the real ``multi_turn.generate_session``
+    parser path without a live model.
+    """
 
-    def generate_turns(self, *, source_md: str, scenario: str, n_turns: int, lang: str):
-        self.calls.append(
+    name = "fake"
+    model = "fake-model-v0"
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def generate(self, prompt: str, **_kwargs) -> str:
+        self.calls.append(prompt)
+        # Mirrors the schema enforced by multi_turn._parse_session: top-level
+        # ``turns`` array of length 6, each turn carrying question /
+        # reference_answer / etc. Distinct reference_chunk_ids per
+        # assert_distinct_citations.
+        return json.dumps(
             {
-                "source_md": source_md,
-                "scenario": scenario,
-                "n_turns": n_turns,
-                "lang": lang,
-            }
+                "turns": [
+                    {
+                        "question": f"Q{i + 1}",
+                        "reference_answer": f"A{i + 1}",
+                        "expected_citation_patterns": [f"第{i + 1}条"],
+                        "reference_chunk_ids": [f"c{i + 1}"],
+                        "grading_notes": "n",
+                        "tags": ["t"],
+                    }
+                    for i in range(6)
+                ]
+            },
+            ensure_ascii=False,
         )
-        return list(self.turn_texts[:n_turns])
 
 
-def _make_md(tmp_path: Path, name: str, content: str = "本文") -> Path:
-    p = tmp_path / name
-    p.write_text(content, encoding="utf-8")
-    return p
+def _make_doc_dir(root: Path, name: str, body: str | None = None) -> Path:
+    """Create a DocIndex-shaped directory: ``<root>/<name>/document.md``.
+
+    ``build_doc_index`` walks immediate subdirectories of ``root`` looking
+    for ``document.md``; this helper produces that exact layout. The body
+    must contain a Japanese article marker so the doc is flagged with
+    ``has_articles`` (``generate_multi_turn_set`` filters on this).
+    """
+    d = root / name
+    d.mkdir(parents=True, exist_ok=True)
+    text = body if body is not None else "第1条 適用範囲。\n第2条 例外但書。\n罰則。\n"
+    (d / "document.md").write_text(text, encoding="utf-8")
+    return d
 
 
 class TestBuildSessions:
     def test_yields_one_session_per_request(self, tmp_path: Path) -> None:
         from scripts.generate_institutional_training_corpus import build_sessions
 
-        # Two source markdown files in the corpus dir.
-        _make_md(tmp_path, "doc_a.md")
-        _make_md(tmp_path, "doc_b.md")
+        _make_doc_dir(tmp_path, "doc_a")
+        _make_doc_dir(tmp_path, "doc_b")
 
-        client = _FakeLLMClient(["A?", "B!", "C?"])
+        client = _FakeLLMClient()
         sessions = list(
             build_sessions(
                 corpus_dir=tmp_path,
@@ -148,15 +177,14 @@ class TestBuildSessions:
                 scenarios={"cross_reference": 1.0},
                 llm_client=client,
                 seed=42,
-                lang="ja",
-                n_turns=3,
             )
         )
 
         assert len(sessions) == 3
         assert all(s.scenario == "cross_reference" for s in sessions)
         assert all(s.lang == "ja" for s in sessions)
-        assert all(s.n_turns == 3 for s in sessions)
+        # Each session must carry exactly 6 turns (institutional eval design).
+        assert all(s.n_turns == 6 for s in sessions)
         # All session IDs unique (DR4-005 prerequisite).
         assert len({s.session_id for s in sessions}) == 3
 
@@ -164,9 +192,9 @@ class TestBuildSessions:
         from scripts.generate_institutional_training_corpus import build_sessions
 
         for i in range(5):
-            _make_md(tmp_path, f"doc_{i}.md")
+            _make_doc_dir(tmp_path, f"doc_{i}")
 
-        client = _FakeLLMClient(["q1", "q2"])
+        client = _FakeLLMClient()
         sessions = list(
             build_sessions(
                 corpus_dir=tmp_path,
@@ -174,8 +202,6 @@ class TestBuildSessions:
                 scenarios={"cross_reference": 0.5, "drill_down": 0.5},
                 llm_client=client,
                 seed=42,
-                lang="ja",
-                n_turns=2,
             )
         )
 
@@ -189,7 +215,7 @@ class TestBuildSessions:
     def test_empty_corpus_raises(self, tmp_path: Path) -> None:
         from scripts.generate_institutional_training_corpus import build_sessions
 
-        client = _FakeLLMClient(["a", "b"])
+        client = _FakeLLMClient()
         try:
             list(
                 build_sessions(
@@ -198,14 +224,72 @@ class TestBuildSessions:
                     scenarios={"cross_reference": 1.0},
                     llm_client=client,
                     seed=42,
-                    lang="ja",
-                    n_turns=2,
                 )
             )
         except ValueError as e:
-            assert "no markdown" in str(e).lower() or "empty" in str(e).lower()
+            assert "no" in str(e).lower() or "empty" in str(e).lower()
             return
         raise AssertionError("empty corpus dir must raise ValueError")
+
+    def test_calls_real_protocol_generate(self, tmp_path: Path) -> None:
+        """Production smoke: build_sessions must use the LLM client's
+        ``generate(prompt)`` method, not ``generate_turns(...)``. Issue #135
+        Day 3 caught the API mismatch — this regression test pins the fix."""
+        from scripts.generate_institutional_training_corpus import build_sessions
+
+        _make_doc_dir(tmp_path, "doc_a")
+        client = _FakeLLMClient()
+        list(
+            build_sessions(
+                corpus_dir=tmp_path,
+                n=1,
+                scenarios={"cross_reference": 1.0},
+                llm_client=client,
+                seed=42,
+            )
+        )
+        assert len(client.calls) >= 1, "build_sessions must invoke client.generate()"
+        # The prompt must contain the institutional system marker so we know
+        # the right prompt builder was used (not a stub).
+        assert any("制度文書" in p or "法令" in p for p in client.calls)
+
+
+class TestTokenizeSessions:
+    """Output schema must be ``{"tokens": [int, ...]}`` per session, matching
+    the existing ``data/processed/train_multi.jsonl`` format so the trainer's
+    ``iterate_mixed_batches`` consumes both EN and JP corpora identically."""
+
+    class _FakeTokenizer:
+        """Minimal HF tokenizer-shaped stub: ``encode(text) -> list[int]``."""
+
+        def encode(self, text, add_special_tokens=False):  # noqa: D401
+            # Map characters to deterministic small ids so tests can verify
+            # without asserting on the exact tokenization scheme.
+            return [hash(c) % 1024 for c in text]
+
+    def test_session_tokenizes_to_int_list(self, tmp_path: Path) -> None:
+        from scripts.generate_institutional_training_corpus import (
+            Session,
+            tokenize_sessions,
+        )
+
+        sessions = [
+            Session(
+                session_id="train_0001",
+                scenario="cross_reference",
+                lang="ja",
+                n_turns=2,
+                turns=["第1条 質問。", "答え。"],
+                source_md="doc_a",
+            )
+        ]
+        tokenized = list(tokenize_sessions(sessions, tokenizer=self._FakeTokenizer()))
+        assert len(tokenized) == 1
+        rec = tokenized[0]
+        assert set(rec.keys()) == {"tokens"}
+        assert isinstance(rec["tokens"], list)
+        assert all(isinstance(t, int) for t in rec["tokens"])
+        assert len(rec["tokens"]) > 0
 
 
 class TestVerifyCorpus:

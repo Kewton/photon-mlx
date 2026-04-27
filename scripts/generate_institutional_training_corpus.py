@@ -1,19 +1,24 @@
-"""Generate JP institutional training sessions for Issue #135 / Phase 2.
+"""Generate JP institutional training sessions for Issue #135 / Phase 6.
 
 The script is split into three layers (DR1-001):
 
-- ``build_sessions``: produces ``Session`` records by calling an injected
-  ``LLMClient``. It does no I/O and no metrics so unit tests can mock the
-  client and run without a network call.
+- ``build_sessions``: produces ``Session`` records by delegating to the
+  production ``baseline_reporag.eval.institutional.multi_turn`` builder.
+  It does no I/O beyond the corpus directory walk; unit tests inject a
+  fake ``LLMClient`` that returns a JSON 6-turn payload.
 - ``verify_corpus``: pure metrics + eval-leak gate (DR4-005). Returns a
   ``CorpusReport``; raises on no input.
-- ``main``: composes the two with CLI argument parsing, JSONL output, and
-  fail-fast exit codes.
+- ``tokenize_sessions``: pure converter from text turns to the ``{"tokens":
+  [...]}`` schema used by ``photon_mlx.data.iterate_mixed_batches``,
+  matching ``data/processed/train_multi.jsonl`` (the EN side of the mix).
+- ``main``: composes the layers with CLI argument parsing, JSONL output,
+  and fail-fast exit codes.
 
-Issue #135 explicitly defers the actual generation run until #137 (the
-GPU-bound multilingual reranker eval) finishes. This commit ships only
-the script + unit tests; the operator runs ``main()`` later with an
-appropriate provider once GPU is free.
+Issue #135 Day 3 (commit be91682) confirmed the production ``LLMClient``
+exposes ``generate(prompt) -> str`` (JSON object), not a custom
+``generate_turns`` API. ``build_sessions`` was refactored to use that
+contract via the existing ``multi_turn.generate_session`` helper so the
+prompt template, JSON parser, and retry behaviour stay in one place.
 """
 
 from __future__ import annotations
@@ -26,7 +31,7 @@ import random
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, Iterator, Protocol
+from typing import Any, Iterable, Iterator
 
 
 # DR4-001: cap the requested session count so a typo (e.g. --sessions 50000
@@ -78,31 +83,16 @@ class CorpusReport:
 
 
 # ---------------------------------------------------------------------------
-# LLM client protocol (mockable for tests)
+# Layer 1: build_sessions (LLM-driven via the existing multi_turn helper)
 # ---------------------------------------------------------------------------
 
 
-class LLMClient(Protocol):
-    """Duck-typed interface for the LLM provider that drafts turn text.
-
-    Production implementations route to ``baseline_reporag.eval.institutional.llm_client``
-    helpers; ``build_sessions`` only depends on the ``generate_turns`` shape so
-    tests can inject a stub.
-    """
-
-    def generate_turns(
-        self,
-        *,
-        source_md: str,
-        scenario: str,
-        n_turns: int,
-        lang: str,
-    ) -> list[str]: ...
-
-
-# ---------------------------------------------------------------------------
-# Layer 1: build_sessions (LLM-driven)
-# ---------------------------------------------------------------------------
+# The institutional eval ships 6-turn sessions (definition / scope /
+# article_lookup / penalty / exception / overview). The training corpus
+# follows the same shape so the trainer sees a consistent turn budget
+# across train and eval. ``multi_turn._parse_session`` enforces this
+# count; we keep the constant here for visibility.
+N_TURNS_PER_SESSION = 6
 
 
 def _allocate_scenarios(n: int, scenarios: dict[str, float]) -> list[str]:
@@ -120,57 +110,119 @@ def _allocate_scenarios(n: int, scenarios: dict[str, float]) -> list[str]:
     return out[:n]
 
 
+def _session_text_turns(session_dict: dict) -> list[str]:
+    """Flatten a ``multi_turn`` session into one text per turn (Q + A)."""
+    out: list[str] = []
+    for turn in session_dict.get("turns", []):
+        question = str(turn.get("question", "")).strip()
+        answer = str(turn.get("reference_answer", "")).strip()
+        if question or answer:
+            out.append(f"Q: {question}\nA: {answer}")
+    return out
+
+
 def build_sessions(
     *,
     corpus_dir: Path,
     n: int,
     scenarios: dict[str, float],
-    llm_client: LLMClient,
+    llm_client: Any,
     seed: int = 42,
-    lang: str = "ja",
-    n_turns: int = 4,
 ) -> Iterator[Session]:
-    """Yield ``n`` ``Session`` records by calling ``llm_client.generate_turns``.
+    """Yield ``n`` ``Session`` records via ``multi_turn.generate_session``.
 
-    Markdown files are picked from ``corpus_dir`` round-robin by an RNG
-    seeded with ``seed`` so the output is reproducible across runs. The
-    function performs no I/O beyond listing the corpus dir — JSONL output
-    happens in ``main``.
+    Each requested session draws a (scenario, doc) pair, then delegates
+    to ``baseline_reporag.eval.institutional.multi_turn.generate_session``
+    which handles prompt construction (``_SESSION_SYSTEM`` + per-turn
+    template), JSON parsing with extraction-on-fence, and bounded retry.
+    Documents are taken from ``build_doc_index(corpus_dir)`` so this
+    function works on the institutional ``<doc>/document.md`` layout.
     """
-    md_files = sorted(p for p in Path(corpus_dir).glob("*.md"))
-    if not md_files:
+    # Lazy import: the institutional module pulls in the production
+    # generator package. Tests rely on the fake LLMClient we inject;
+    # the only real dependency is ``multi_turn.generate_session``.
+    from baseline_reporag.eval.institutional.corpus import build_doc_index
+    from baseline_reporag.eval.institutional.generator import GenerationFailure
+    from baseline_reporag.eval.institutional.multi_turn import generate_session
+
+    docs = build_doc_index(Path(corpus_dir))
+    docs = [d for d in docs if d.has_articles]
+    if not docs:
         raise ValueError(
-            f"no markdown files found in corpus_dir={corpus_dir!r} — Issue #135 "
-            "expects institutional_documents/*.md"
+            f"no articles found in corpus_dir={corpus_dir!r} — Issue #135 "
+            "expects institutional_documents/<doc>/document.md with article markers"
         )
 
     scenario_list = _allocate_scenarios(n, scenarios)
     rng = random.Random(seed)
     rng.shuffle(scenario_list)
+    # Independent RNG for doc choice so the scenario ordering and the
+    # doc rotation can drift independently across reruns.
+    doc_rng = random.Random(seed ^ 0x9E37_79B9)
 
-    for i, scenario in enumerate(scenario_list):
-        source = md_files[i % len(md_files)]
-        turns = llm_client.generate_turns(
-            source_md=source.name,
-            scenario=scenario,
-            n_turns=n_turns,
-            lang=lang,
-        )
-        if not turns:
-            _logger.warning(
-                "LLM returned no turns for scenario=%s source=%s; skipping",
-                scenario,
-                source.name,
+    yielded = 0
+    seq = 1
+    for scenario in scenario_list:
+        doc = doc_rng.choice(docs)
+        try:
+            session_dict = generate_session(
+                doc=doc,
+                scenario=scenario,
+                seq=seq,
+                client=llm_client,
             )
+        except GenerationFailure as exc:
+            _logger.warning(
+                "generate_session failed for doc=%s scenario=%s: %s",
+                doc.doc_id,
+                scenario,
+                exc,
+            )
+            seq += 1
             continue
+
+        text_turns = _session_text_turns(session_dict)
+        if not text_turns:
+            seq += 1
+            continue
+
         yield Session(
-            session_id=f"train_{i:06d}",
+            session_id=f"train_{yielded + 1:06d}",
             scenario=scenario,
-            lang=lang,
-            n_turns=len(turns),
-            turns=turns,
-            source_md=source.name,
+            lang="ja",
+            n_turns=len(text_turns),
+            turns=text_turns,
+            source_md=doc.doc_id,
         )
+        yielded += 1
+        seq += 1
+
+
+# ---------------------------------------------------------------------------
+# Layer 1.5: tokenize_sessions (text → {"tokens": [int, ...]})
+# ---------------------------------------------------------------------------
+
+
+def tokenize_sessions(
+    sessions: Iterable[Session],
+    *,
+    tokenizer: Any,
+) -> Iterator[dict[str, list[int]]]:
+    """Convert each ``Session`` to ``{"tokens": [int, ...]}`` for the trainer.
+
+    Output schema matches ``data/processed/train_multi.jsonl`` (the EN side
+    of the JP/EN mix) and the ``photon_mlx.data.load_jsonl`` reader. Turns
+    inside a session are joined with newlines so the model sees the full
+    multi-turn conversation as one packed sequence — the same way
+    ``train_multi.jsonl`` packs its multi-doc sequences end-to-end.
+    """
+    for session in sessions:
+        text = "\n\n".join(session.turns)
+        ids = tokenizer.encode(text, add_special_tokens=False)
+        if not ids:
+            _logger.warning("empty token list for session %s", session.session_id)
+            continue
+        yield {"tokens": [int(t) for t in ids]}
 
 
 # ---------------------------------------------------------------------------
@@ -239,13 +291,22 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     parser.add_argument("--corpus-dir", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument("--eval-set", required=True, type=Path)
+    parser.add_argument(
+        "--eval-set",
+        required=False,
+        type=Path,
+        default=Path("data/eval_sets/institutional_multi_turn_eval.jsonl"),
+    )
     parser.add_argument("--sessions", type=int, default=2000)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--val-ratio", type=float, default=0.05)
-    parser.add_argument("--lang", default="ja")
-    parser.add_argument("--n-turns", type=int, default=4)
     parser.add_argument("--provider", default="qwen")
+    parser.add_argument(
+        "--tokenizer-id",
+        default="mlx-community/Qwen2.5-Coder-14B-Instruct-4bit",
+        help="HF tokenizer id used to convert text → token ids (matches the "
+        "trainer's tokenizer config in institutional_docs_photon_retrain.yaml).",
+    )
     return parser.parse_args(argv)
 
 
@@ -372,54 +433,45 @@ def write_atomic(path: Path, content: str, *, mode: int = 0o600) -> None:
             tmp.unlink()
 
 
-def _serialise_session(s: Session) -> str:
-    return json.dumps(
-        {
-            "session_id": s.session_id,
-            "scenario": s.scenario,
-            "lang": s.lang,
-            "n_turns": s.n_turns,
-            "turns": s.turns,
-            "source_md": s.source_md,
-        },
-        ensure_ascii=False,
-    )
-
-
 def main(argv: list[str] | None = None) -> int:  # pragma: no cover - LLM gated
-    """Compose build_sessions → verify_corpus → write JSONL.
+    """Compose build_sessions → verify_corpus → tokenize → write JSONL.
 
-    Not covered by unit tests because invoking it requires a real
-    ``LLMClient`` (the JP institutional corpus is large enough that a
-    full mock run isn't representative). Issue #135 explicitly defers
-    the production run until #137 finishes — this entry point is here
-    so the operator has something to execute later, not so CI runs it.
+    Not covered by unit tests because invoking it requires a live
+    ``LLMClient`` (qwen mlx_lm or openai) and a real HF tokenizer; the
+    JP institutional corpus is large enough that a full mock run isn't
+    representative. The CLI helpers (``parse_validated_args``,
+    ``write_atomic``) and the layer functions (``build_sessions``,
+    ``verify_corpus``, ``tokenize_sessions``) all carry direct unit
+    tests.
     """
     args = parse_validated_args(argv)
 
-    # Build the LLM client lazily. The import is intentionally deferred so
-    # the module stays importable for unit tests on machines without the
-    # baseline_reporag eval providers installed.
+    # Lazy imports: ``select_llm_client`` pulls mlx_lm / openai depending
+    # on the requested provider; ``AutoTokenizer`` pulls transformers.
+    # Keep the module importable for unit tests on machines without those.
     from baseline_reporag.eval.institutional.llm_client import select_llm_client
+    from transformers import AutoTokenizer
 
     client = select_llm_client(args.provider)
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.tokenizer_id, trust_remote_code=False
+    )
 
+    # Scenarios mirror ``multi_turn.SESSION_PATTERNS`` (drill_down /
+    # cross_reference / real_scenario) — these are the only values
+    # ``generate_session`` understands. Weights here are the training-time
+    # mix, distinct from the eval-side counts.
     sessions = list(
         build_sessions(
             corpus_dir=args.corpus_dir,
             n=args.sessions,
             scenarios={
-                "cross_reference": 0.20,
-                "drill_down": 0.20,
-                "define": 0.15,
-                "quantity": 0.15,
-                "comparison": 0.15,
-                "conclusion": 0.15,
+                "drill_down": 0.50,
+                "cross_reference": 0.30,
+                "real_scenario": 0.20,
             },
             llm_client=client,
             seed=args.seed,
-            lang=args.lang,
-            n_turns=args.n_turns,
         )
     )
 
@@ -433,12 +485,21 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - LLM gated
         return 1
 
     train, val = split_train_val(sessions, val_ratio=args.val_ratio, seed=args.seed)
-    train_text = "".join(_serialise_session(s) + "\n" for s in train)
-    val_text = "".join(_serialise_session(s) + "\n" for s in val)
+
+    train_records = list(tokenize_sessions(train, tokenizer=tokenizer))
+    val_records = list(tokenize_sessions(val, tokenizer=tokenizer))
+
+    train_text = "".join(
+        json.dumps(r, ensure_ascii=False) + "\n" for r in train_records
+    )
+    val_text = "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in val_records)
 
     write_atomic(args.output, train_text)
     val_path = args.output.with_name(args.output.stem + "_val.jsonl")
     write_atomic(val_path, val_text)
+
+    total_tokens_train = sum(len(r["tokens"]) for r in train_records)
+    total_tokens_val = sum(len(r["tokens"]) for r in val_records)
 
     metadata_path = args.output.with_suffix(args.output.suffix + ".metadata.json")
     write_atomic(
@@ -450,8 +511,13 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - LLM gated
                 "eval_overlap": report.eval_overlap,
                 "jp_sequence_ratio": report.jp_sequence_ratio,
                 "scenario_distribution": report.scenario_distribution,
-                "train_size": len(train),
-                "val_size": len(val),
+                "train_size": len(train_records),
+                "val_size": len(val_records),
+                "total_tokens_train": total_tokens_train,
+                "total_tokens_val": total_tokens_val,
+                "tokenizer_id": args.tokenizer_id,
+                "provider": args.provider,
+                "seed": args.seed,
             },
             indent=2,
             ensure_ascii=False,
