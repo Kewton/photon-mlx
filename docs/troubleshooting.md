@@ -56,6 +56,50 @@ Then restart the server.
 
 ---
 
+## PHOTON Checkpoint Load Failure (Issue #148)
+
+**Symptom**: `RuntimeError: checkpoint load failed (...)` when starting with `model.provider: photon`.
+
+**Causes and solutions**:
+
+| Cause | Solution |
+|-------|----------|
+| `cfg.model.checkpoint_path` not set | Add `checkpoint_path: "<name>"` under `model:` in the PHOTON yaml. For Phase A evaluation, place a valid checkpoint before starting — do not use `PHOTON_ALLOW_RANDOM_INIT=1` as a substitute (see note below). |
+| Checkpoint directory missing `weights.npz` or `state.json` | Ensure the checkpoint directory contains both files (produced by `photon_mlx.trainer.save_checkpoint`) |
+| Checkpoint path outside `PHOTON_CHECKPOINT_ROOT` | Move the checkpoint under the allowed root, or set `PHOTON_CHECKPOINT_ROOT` to the parent directory: `export PHOTON_CHECKPOINT_ROOT=/data/photon_checkpoints` |
+| Symlink escaping the allowed root | Remove the symlink and copy the checkpoint directly under `PHOTON_CHECKPOINT_ROOT` |
+| Corrupted `weights.npz` | Re-run training or restore the checkpoint from backup |
+
+**重要 (CB-003 / 設計方針書 §3 DR-1)**: `PHOTON_ALLOW_RANDOM_INIT=1` は **unit/CI の negative-path テスト専用** です。Phase A 評価や本番環境では使用しないでください。チェックポイントが手元にない場合は、checkpoint を配置するまで評価を開始しないでください (`PHOTON_ALLOW_RANDOM_INIT=1` で代替することは S7-001 random-init eval の再発を招きます)。
+
+**unit/CI negative-path test 専用** (評価・本番では使用禁止):
+
+```bash
+# 下記は unit/CI の negative-path テストでのみ使用すること。
+# Phase A 評価・本番環境では checkpoint を正しく配置して実行すること。
+export PHOTON_ALLOW_RANDOM_INIT=1
+python -m baseline_reporag.cli --config configs/institutional_docs_photon.yaml ...
+```
+
+This logs a WARNING and continues with random-init weights. The random-init model produces garbage answers and **must not** be used for Phase A evaluation or production inference.
+
+**Diagnosing path containment errors**:
+
+```bash
+# Verify PHOTON_CHECKPOINT_ROOT covers the checkpoint
+python -c "
+import os
+from pathlib import Path
+root = Path(os.environ.get('PHOTON_CHECKPOINT_ROOT', 'checkpoints')).resolve()
+ckpt = Path('path/to/ckpt').resolve()
+print('root:', root)
+print('ckpt:', ckpt)
+print('OK:', ckpt.is_relative_to(root))
+"
+```
+
+---
+
 ## PHOTON Multi-Turn Not Supported
 
 **Symptom**: Errors when attempting to use PHOTON hierarchical decoder for multi-turn conversations.

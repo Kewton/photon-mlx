@@ -177,6 +177,19 @@ model:
   provider: "photon"
   model_id: "mlx-community/Qwen2.5-Coder-14B-Instruct-4bit"
 
+  # Issue #148 Phase A0: PHOTON checkpoint loading.
+  # Phase A 実行時に以下のいずれかの方法でチェックポイントを指定する:
+  #   (a) この checkpoint_path を実際の mulmoclaude 600-step ckpt の絶対パスに書き換える
+  #   (b) 環境変数 PHOTON_CHECKPOINT_ROOT に親ディレクトリを設定し、相対パスを使用する
+  # 例: checkpoint_path: "mulmoclaude_step600"  # PHOTON_CHECKPOINT_ROOT 配下の相対パス
+  #
+  # 重要 (CB-003 / 設計方針書 §3 DR-1):
+  #   Phase A 評価では checkpoint が必須です。checkpoint を配置せずに評価を開始しないでください。
+  #   checkpoint が手元にない場合は checkpoint の配置が完了するまで評価を開始しないこと。
+  #   PHOTON_ALLOW_RANDOM_INIT=1 は unit/CI の negative-path テスト専用であり、
+  #   Phase A 評価で使用することは S7-001 random-init eval の再発を招くため禁止します。
+  # checkpoint_path: ""  # TBD: Phase A 実行時に PHOTON_CHECKPOINT_ROOT 配下パスに置換
+
   # PHOTON-specific: 本 Issue baseline では参照されないが、#113 切替時のため継承値を保持。
   base_embed_dim: 256
   hidden_size: 1024

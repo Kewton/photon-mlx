@@ -151,6 +151,36 @@ Or use a simple cron job:
 
 ---
 
+## PHOTON Environment Variables (Issue #148)
+
+When running the PHOTON provider (`model.provider: photon`), the following
+environment variables control checkpoint loading behaviour.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PHOTON_CHECKPOINT_ROOT` | `checkpoints/` (repo-relative) | Root directory under which `cfg.model.checkpoint_path` must reside. Set to an absolute path when checkpoints live outside the repository. Example: `export PHOTON_CHECKPOINT_ROOT=/data/photon_checkpoints` |
+| `PHOTON_ALLOW_RANDOM_INIT` | `0` (fail-fast) | Set to `1` to continue with random-init weights when checkpoint loading fails. A WARNING is logged. **Restricted to unit/CI negative-path tests only.** Do **not** set this in Phase A evaluation or production — the random-init model produces garbage answers and reproduces the S7-001 defect. For Phase A eval, place a valid checkpoint before starting. |
+
+### PHOTON checkpoint setup
+
+1. Place the checkpoint directory (containing `weights.npz` and `state.json`) under the allowed root:
+   ```bash
+   export PHOTON_CHECKPOINT_ROOT=/data/photon_checkpoints
+   mkdir -p /data/photon_checkpoints/mulmoclaude_step600
+   cp weights.npz state.json /data/photon_checkpoints/mulmoclaude_step600/
+   ```
+
+2. Set `model.checkpoint_path` in the PHOTON YAML config:
+   ```yaml
+   model:
+     checkpoint_path: "mulmoclaude_step600"  # relative to PHOTON_CHECKPOINT_ROOT
+   ```
+
+3. The checkpoint path must remain within `PHOTON_CHECKPOINT_ROOT`. Symlinks
+   that escape the root are rejected with a `RuntimeError`.
+
+---
+
 ## Daemon Setup (launchd)
 
 To run the server as a macOS daemon, create a launchd plist file.
