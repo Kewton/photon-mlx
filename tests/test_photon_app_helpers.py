@@ -272,3 +272,187 @@ class TestRunQueryUsesBuildPipeline:
         assert "no_citation" in metadata
         assert "drift_metrics" in metadata
         assert "turn_id" in metadata
+
+
+# ---------------------------------------------------------------
+# Issue #115 CB-001: _run_query honours wizard-generated photon_config_path
+# ---------------------------------------------------------------
+
+
+class TestResolveActiveConfigPath:
+    """`photon_config_path` MUST take priority over `config_path` (mirrors
+    the resolution rule already enforced by ``_launch_eval_job``)."""
+
+    def test_returns_photon_config_when_set(self, tmp_path: Path) -> None:
+        proj = _make_proj(tmp_path)
+        proj.photon_config_path = str(tmp_path / "wizard.yaml")
+        assert photon_app._resolve_active_config_path(proj) == proj.photon_config_path
+
+    def test_falls_back_to_config_path_when_photon_blank(self, tmp_path: Path) -> None:
+        proj = _make_proj(tmp_path)
+        proj.photon_config_path = ""
+        assert photon_app._resolve_active_config_path(proj) == proj.config_path
+
+
+class TestPipelineCacheKey:
+    """Cache key MUST embed the resolved config path so a swap invalidates
+    any previously-built pipeline for the same project."""
+
+    def test_key_includes_project_name_and_path(self) -> None:
+        key = photon_app._pipeline_cache_key("demo", "/tmp/cfg.yaml")
+        assert "demo" in key
+        assert "/tmp/cfg.yaml" in key
+        assert key.startswith("pipeline_")
+
+    def test_distinct_paths_yield_distinct_keys(self) -> None:
+        a = photon_app._pipeline_cache_key("demo", "/tmp/baseline.yaml")
+        b = photon_app._pipeline_cache_key("demo", "/tmp/photon.yaml")
+        assert a != b
+
+
+class TestRunQueryUsesPhotonConfigPath:
+    """CB-001 regression: when the wizard has emitted a PHOTON YAML, the
+    chat path (``_run_query``) MUST load THAT YAML — not the bare
+    ``proj.config_path`` — so domain templates / best-practice merges
+    actually take effect."""
+
+    def test_run_query_loads_photon_config_path_when_set(self, tmp_path: Path) -> None:
+        proj = _make_proj(tmp_path)
+        wizard_yaml = tmp_path / "photon.wizard.yaml"
+        wizard_yaml.write_text("model:\n  provider: photon\n")
+        proj.photon_config_path = str(wizard_yaml)
+
+        result = SimpleNamespace(
+            answer="hello",
+            session_id="s1",
+            turn_id=1,
+            cited_chunk_ids=[],
+            wrong_citation_indices=[],
+            no_citation=True,
+            latency=SimpleNamespace(total_ms=42.0),
+            memory=SimpleNamespace(),
+            drift_metrics=None,
+        )
+        fake_pipeline = MagicMock()
+        fake_pipeline.query.return_value = result
+        fake_cfg = SimpleNamespace(model=SimpleNamespace(provider="photon"))
+        fake_session_state = _FakeSessionState()
+
+        with (
+            patch.object(
+                photon_app, "load_config", create=True, return_value=fake_cfg
+            ) as mock_load,
+            patch.object(
+                photon_app,
+                "build_pipeline",
+                create=True,
+                return_value=fake_pipeline,
+            ),
+            patch.object(photon_app.st, "session_state", fake_session_state),
+        ):
+            photon_app._run_query(proj, "q?", "sess")
+
+        mock_load.assert_called_once_with(str(wizard_yaml))
+        # And the pipeline must be cached under a key that embeds the wizard
+        # path — not the bare config_path — so a future swap re-builds it.
+        expected_key = photon_app._pipeline_cache_key(proj.name, str(wizard_yaml))
+        assert expected_key in fake_session_state
+
+    def test_run_query_falls_back_to_config_path_when_photon_blank(
+        self, tmp_path: Path
+    ) -> None:
+        proj = _make_proj(tmp_path)
+        proj.photon_config_path = ""
+
+        result = SimpleNamespace(
+            answer="ok",
+            session_id="s1",
+            turn_id=1,
+            cited_chunk_ids=[],
+            wrong_citation_indices=[],
+            no_citation=True,
+            latency=SimpleNamespace(total_ms=1.0),
+            memory=SimpleNamespace(),
+            drift_metrics=None,
+        )
+        fake_pipeline = MagicMock()
+        fake_pipeline.query.return_value = result
+        fake_cfg = SimpleNamespace(model=SimpleNamespace(provider="baseline"))
+        fake_session_state = _FakeSessionState()
+
+        with (
+            patch.object(
+                photon_app, "load_config", create=True, return_value=fake_cfg
+            ) as mock_load,
+            patch.object(
+                photon_app,
+                "build_pipeline",
+                create=True,
+                return_value=fake_pipeline,
+            ),
+            patch.object(photon_app.st, "session_state", fake_session_state),
+        ):
+            photon_app._run_query(proj, "q?", "sess")
+
+        mock_load.assert_called_once_with(proj.config_path)
+
+    def test_run_query_cache_invalidates_when_config_path_changes(
+        self, tmp_path: Path
+    ) -> None:
+        """Swapping ``photon_config_path`` MUST trigger a fresh ``build_pipeline``
+        — even though ``proj.name`` stays the same — because the cache key
+        embeds the resolved path."""
+        proj = _make_proj(tmp_path)
+        first_yaml = tmp_path / "first.yaml"
+        first_yaml.write_text("model:\n  provider: baseline\n")
+        proj.photon_config_path = str(first_yaml)
+
+        result = SimpleNamespace(
+            answer="ok",
+            session_id="s1",
+            turn_id=1,
+            cited_chunk_ids=[],
+            wrong_citation_indices=[],
+            no_citation=True,
+            latency=SimpleNamespace(total_ms=1.0),
+            memory=SimpleNamespace(),
+            drift_metrics=None,
+        )
+        fake_pipeline = MagicMock()
+        fake_pipeline.query.return_value = result
+        fake_cfg = SimpleNamespace(model=SimpleNamespace(provider="baseline"))
+        fake_session_state = _FakeSessionState()
+
+        with (
+            patch.object(photon_app, "load_config", create=True, return_value=fake_cfg),
+            patch.object(
+                photon_app,
+                "build_pipeline",
+                create=True,
+                return_value=fake_pipeline,
+            ) as mock_build,
+            patch.object(photon_app.st, "session_state", fake_session_state),
+        ):
+            photon_app._run_query(proj, "q?", "sess")
+            first_key = photon_app._pipeline_cache_key(proj.name, str(first_yaml))
+            assert first_key in fake_session_state
+            # Same path → cache hit, build_pipeline not called again.
+            photon_app._run_query(proj, "q?", "sess")
+            assert mock_build.call_count == 1
+
+            # Swap to a different wizard-generated YAML → new cache key →
+            # build_pipeline called again.
+            second_yaml = tmp_path / "second.yaml"
+            second_yaml.write_text("model:\n  provider: photon\n")
+            proj.photon_config_path = str(second_yaml)
+            photon_app._run_query(proj, "q?", "sess")
+            assert mock_build.call_count == 2
+
+            # CB-002: the stale cache entry under the previous path MUST
+            # have been evicted so the previous pipeline (which would
+            # otherwise pin MLX weights in memory) becomes collectable.
+            second_key = photon_app._pipeline_cache_key(proj.name, str(second_yaml))
+            assert second_key in fake_session_state
+            assert first_key not in fake_session_state, (
+                "stale pipeline cache for the previous config path was not evicted"
+            )
