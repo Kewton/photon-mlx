@@ -85,6 +85,16 @@ def main() -> None:
         help="Override log root (falls back to PHOTON_LOG_DIR env var then "
         "YAML paths.log_root).",
     )
+    parser.add_argument(
+        "--approved-roots",
+        nargs="+",
+        default=None,
+        help="Issue #135: explicit allow-list of directories the mixed-corpus "
+        "loader (iterate_mixed_batches) may read from. Required when "
+        "training.train_corpora_mix uses absolute paths outside "
+        "data/training/ + data/processed/ (DR4-002 default). Multiple paths "
+        "may be passed; relative paths resolve against cwd.",
+    )
     args = parser.parse_args()
 
     cfg = load_photon_config(args.config)
@@ -106,11 +116,18 @@ def main() -> None:
         allowed_root=LOG_ROOT,
     )
 
+    approved_roots = (
+        [Path(r) for r in args.approved_roots]
+        if args.approved_roots
+        else None
+    )
+
     train(
         cfg=cfg,
         checkpoint_dir=checkpoint_dir,
         log_dir=log_dir,
         resume_from=args.resume or None,
+        approved_roots=approved_roots,
     )
 
 

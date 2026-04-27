@@ -246,13 +246,20 @@ training:
   # develop worktree's existing mulmoclaude-trained EN corpus (7188
   # tokenized sequences from the original 600-step run) rather than
   # symlinking or copying. The JP side is generated in this worktree by
-  # scripts/generate_institutional_training_corpus.py and lands under
+  # scripts/tokenize_institutional_corpus.py (raw markdown tokenized,
+  # not LLM Q&A — Day 4 pivot) and lands under
   # data/training/institutional/. Both paths are absolute on purpose so
   # `iterate_mixed_batches`'s DR4-002 approved-root check can be
   # satisfied without ambiguous resolution.
+  #
+  # Day 4 mix ratio (JP:0.7 / EN:0.3): JP corpus has ~36K packed seqs
+  # vs EN ~7K, so 50/50 leaves JP under-exposed (~4 reps/seq vs EN ~22
+  # reps/seq). Bumping JP to 0.7 gives JP ~6 reps/seq for stronger
+  # institutional-domain learning while EN still gets ~14 reps/seq
+  # which preserves the original 600-step training signal.
   train_corpora_mix:
-    "/Users/maenokota/share/work/github_kewton/photon-mlx-feature-issue-135-photon-retrain/data/training/institutional/train_jp.jsonl": 0.5
-    "/Users/maenokota/share/work/github_kewton/photon-mlx-develop/data/processed/train_multi.jsonl": 0.5
+    "/Users/maenokota/share/work/github_kewton/photon-mlx-feature-issue-135-photon-retrain/data/training/institutional/train_jp.jsonl": 0.7
+    "/Users/maenokota/share/work/github_kewton/photon-mlx-develop/data/processed/train_multi.jsonl": 0.3
   val_split: 0.05
 
   # Legacy single-corpus fields。train_corpora_mix が設定されているため、
@@ -276,16 +283,19 @@ training:
   weight_decay: 0.1
   max_grad_norm: 1.0
 
-  # S5-002 反映: 累計 step 採用。既存 mulmoclaude 600 step に 10K 追加するなら
-  # max_steps=10600。Day 5 採用判定で 10K/15K/20K 候補から決定。
-  max_steps: 10600
-  eval_every_steps: 1000  # 1K step 毎に英語コード eval (forgetting 早期検出)
-  save_every_steps: 1000  # 1K step 毎の中間 checkpoint。eval 後に削除可
+  # Day 4 段階的検証アプローチ (S5-002 累計 step):
+  # 既存 mulmoclaude 600 step → 累計 3000 = 追加 2400 step (~6-8h GPU)。
+  # 中間 eval で Turn 5-6 NC < 6% を確認後、必要なら resume_from で
+  # max_steps=10000 に拡張 (追加 7000 step = 16h GPU)。
+  # 全 25-33h を一度にコミットせず段階投資。
+  max_steps: 3000
+  eval_every_steps: 500   # 500 step 毎に英語コード eval (forgetting 早期検出)
+  save_every_steps: 500   # 500 step 毎の checkpoint = 1000/1500/2000/2500/3000 を保存
   log_every_steps: 20
 
   early_stopping:
     enabled: true
-    # forgetting 5pp 超で停止 (workspace/issues/135/work-plan.md Phase 6)。
+    # patience=3: val_loss が 3 回連続非改善 (= 1500 step) で停止。
     patience: 3
     min_delta: 0.001
     restore_best: true

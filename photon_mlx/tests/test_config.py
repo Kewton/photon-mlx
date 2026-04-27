@@ -343,9 +343,13 @@ def test_institutional_retrain_yaml_loads_with_expected_hyperparams(
     assert t.learning_rate == 3.0e-5
     assert t.min_learning_rate == 3.0e-6
     assert t.warmup_ratio == 0.0
-    # DR1-005 / S5-002 reflected.
+    # DR1-005 reflected.
     assert t.val_split == 0.05
-    assert t.max_steps >= 10000  # 10K-20K range; concrete value is per-run
+    # Day 4: 段階的検証. max_steps=3000 (累計, 既存 600 + 追加 2400) で
+    # 中間 eval して必要なら resume_from で延長.
+    assert t.max_steps == 3000
+    assert t.eval_every_steps == 500
+    assert t.save_every_steps == 500
     # S5-004 reflected: micro_batch * grad_accum = effective batch 32.
     assert t.micro_batch_size == 2
     assert t.gradient_accumulation_steps == 16
@@ -353,6 +357,12 @@ def test_institutional_retrain_yaml_loads_with_expected_hyperparams(
     mix = t.train_corpora_mix
     assert mix is not None and len(mix) == 2
     assert abs(sum(mix.values()) - 1.0) < 1e-6
+    # Day 4 mix ratio: JP:0.7 / EN:0.3 for stronger institutional-domain
+    # learning while preserving the EN 600-step base.
+    jp_path = next(p for p in mix if "institutional/train_jp" in p)
+    en_path = next(p for p in mix if "mulmoclaude" in p or "train_multi" in p)
+    assert mix[jp_path] == 0.7
+    assert mix[en_path] == 0.3
     # Issue #135 Day 3: paths are absolute (per-user direction to point at
     # this worktree for JP and the develop worktree for the existing
     # mulmoclaude-trained EN corpus). Both must be under one of the two
