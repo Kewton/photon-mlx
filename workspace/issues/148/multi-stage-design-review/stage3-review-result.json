@@ -1,0 +1,45 @@
+{
+  "stage": 3,
+  "focus": "影響範囲",
+  "reviewer": "codex",
+  "reviewed_at": "2026-04-27",
+  "summary": "Stage 1/2 反映後の設計方針書を、影響範囲と silent bug の観点でクロスレビューした。\n最大リスクは Phase A0 の checkpoint_path 仕様が photon_mlx.trainer.load_checkpoint の実 API と一致していなかった点である。\nload 失敗時 fail-fast 方針は記載済みだったが、データフローと unit test 例が WARNING 継続のままで矛盾していた。\nPhase C の backbone 自動出力は bench/ 配下という抽象指定に留まり、実影響ファイルと regression test が不足していた。\nPhase B smoke test の peak RSS 計測は macOS/Linux の ru_maxrss 単位差により、環境によって誤った GB 値になる可能性があった。\nいずれも設計方針書の追記・修正で反映可能な範囲であり、ソースコードは変更していない。",
+  "findings": [
+    {
+      "id": "DR3-001",
+      "severity": "Must Fix",
+      "category": "silent bug",
+      "title": "checkpoint_path の形式が load_checkpoint API と不一致",
+      "description": "設計方針書 §4 は `model.checkpoint_path: \"/path/to/mulmoclaude_600step.safetensors\"` と例示していたが、実装側 `photon_mlx.trainer.load_checkpoint(model, path)` は `path / \"weights.npz\"` と `path / \"state.json\"` を読む directory API である。`.safetensors` 単体や HF URL をそのまま渡すと Phase A0 が fail するか、実装者が独自 resolver を暗黙に追加して設計範囲が膨らむ。",
+      "suggested_action": "`model.checkpoint_path` を `weights.npz` と `state.json` を含む local checkpoint directory に限定する。`load_checkpoint` 前に directory 形状を検証し、不正な場合は `RuntimeError` で fail-fast する。HF URL / safetensors 変換は本 Issue 範囲外または別タスクとして明記する。"
+    },
+    {
+      "id": "DR3-002",
+      "severity": "Must Fix",
+      "category": "テスト範囲",
+      "title": "fail-fast 方針とデータフロー・unit test 例が矛盾",
+      "description": "§3 では `checkpoint_path` 設定時の load 失敗を `RuntimeError` とする方針が記載されている一方、§4 の処理フローは `失敗: _logger.warning(\"checkpoint load failed ... random-init weights\")`、§10.1 は `test_build_photon_deps_warns_on_load_failure` として WARNING 継続を期待していた。このままだと Stage 1/2 で潰した silent random-init eval の再発をテストが許容する。",
+      "suggested_action": "§4 の失敗分岐を `RuntimeError` に更新し、unit test 例を `test_build_photon_deps_raises_on_load_failure_by_default` に変更する。`PHOTON_ALLOW_RANDOM_INIT=1` の例外経路は別 test として明示する。"
+    },
+    {
+      "id": "DR3-003",
+      "severity": "Should Fix",
+      "category": "波及効果",
+      "title": "backbone 自動出力の影響ファイルが抽象的で regression test が不足",
+      "description": "§3 と §7 は `bench/ 配下の report 生成スクリプト` と記載していたが、現行の eval runner は `bench/run_all.py` であり、対応する test は `bench/tests/test_run_all.py` である。抽象指定のままだと `configs/eval.yaml` の `report.show_llm_backbone` が追加されても実際の report / CI artifact に出力されない可能性が残る。",
+      "suggested_action": "影響範囲に `bench/run_all.py` と `bench/tests/test_run_all.py` を明記し、variant ごとの `model_id` 出力と regression test を Phase C の成果物に含める。"
+    },
+    {
+      "id": "DR3-004",
+      "severity": "Should Fix",
+      "category": "テスト範囲",
+      "title": "peak RSS 計測が ru_maxrss の OS 別単位差を考慮していない",
+      "description": "§3 設計判断 #5 の smoke test 例は `resource.getrusage(...).ru_maxrss / (1024**3)` で GB 換算していた。macOS は bytes、Linux は KiB を返すため、Mac Studio 前提では正しい一方、CI や Linux 実行環境では値が 1/1024 になり、Gemma4 26B MoE の memory pressure 判定を過小評価する。",
+      "suggested_action": "`sys.platform == \"darwin\"` の場合は bytes として `1024**3`、それ以外は KiB として `1024**2` で割る helper を設計に明記する。"
+    }
+  ],
+  "must_fix_count": 2,
+  "should_fix_count": 2,
+  "nice_to_have_count": 0,
+  "overall_assessment": "Needs revision"
+}

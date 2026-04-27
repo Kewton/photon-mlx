@@ -1,0 +1,36 @@
+{
+  "stage": 8,
+  "iteration": 2,
+  "applier": "codex",
+  "applied_at": "2026-04-27",
+  "applied_findings": [
+    {
+      "id": "S7-001",
+      "applied": true,
+      "summary": "ブロック対象とゴールを修正し、#135 Phase 6-8 の unblock 条件は Issue 全体完了ではなく Phase A0+A 完了であること、Phase B-C は LLM 戦略判断の追加作業であることを明記した。"
+    },
+    {
+      "id": "S7-002",
+      "applied": true,
+      "summary": "Phase B 候補表の `provider` 列を `family label` に変更し、新規 baseline yaml 4 件は `model.provider: \"mlx_lm\"` を維持して `model.model_id` のみ正式 slug に差し替える受入条件を追加した。"
+    },
+    {
+      "id": "S7-003",
+      "applied": true,
+      "summary": "Phase C 影響ファイルに `configs/eval.yaml` を追加し、baseline variants の silent migration と PHOTON variants との LLM backbone 差分を明示する受入条件・リスクを追加した。"
+    },
+    {
+      "id": "S7-004",
+      "applied": true,
+      "summary": "Phase C 影響ファイルと受入条件に `baseline_reporag/server.py` / `baseline_reporag/cli.py` の既定 `configs/baseline.yaml` 利用者としての cold-start / HF cache warm-up / rollback 確認を追加した。"
+    },
+    {
+      "id": "S7-005",
+      "applied": true,
+      "summary": "Phase A の成果物・受入条件に、無効化済み PHOTON Drift metrics / Safe RecGen trigger 発火率を再測定するか follow-up / out-of-scope として明記する項目を追加した。"
+    }
+  ],
+  "github_issue_updated": true,
+  "issue_url": "https://github.com/Kewton/photon-mlx/issues/148",
+  "summary": "Stage 7 の Must Fix 1 件、Should Fix 4 件を `workspace/issues/148/issue-review/issue-body-updated-stage8.md` に反映し、`gh issue edit 148 --body-file workspace/issues/148/issue-review/issue-body-updated-stage8.md` で GitHub Issue #148 を更新済み。"
+}

@@ -1,0 +1,17 @@
+{
+  "issue_number": 148,
+  "focus_area": "整合性",
+  "stage": 2,
+  "stage_name": "整合性レビュー",
+  "reviewer_model": "claude-opus",
+  "design_doc_path": "workspace/design/issue-148-rebaseline-design-policy.md",
+  "issue_body_path": "workspace/issues/148/design/latest-issue-body.md",
+  "review_focus": [
+    "Issue 本文と設計方針書の整合性",
+    "設計方針書と実装ファイル (pipeline_factory.py, photon_pipeline.py, trainer.py, inference.py) の整合性",
+    "設計方針書内の自己整合性 (Phase A0/A/B/C/D の前提・成果物の連続性)",
+    "既存 invariant test との整合性",
+    "Phase 1 (Issue review) 反映内容との整合性"
+  ],
+  "output_path": "workspace/issues/148/multi-stage-design-review/stage2-review-result.json"
+}

@@ -1,0 +1,10 @@
+{
+  "issue_number": 148,
+  "stage": 4,
+  "stage_name": "指摘事項反映（1回目 影響範囲レビュー）",
+  "iteration": 1,
+  "applier_model": "claude-sonnet",
+  "review_result_path": "workspace/issues/148/issue-review/stage3-review-result.json",
+  "output_path": "workspace/issues/148/issue-review/stage4-apply-result.json",
+  "instruction": "Stage 3 の Must Fix 4件 + Should Fix 5件を反映。Nice to Have 4件は実装難度低いものを反映。"
+}

@@ -1,0 +1,54 @@
+{
+  "stage": 7,
+  "iteration": 2,
+  "focus": "影響範囲（2回目）",
+  "reviewer": "codex",
+  "reviewed_at": "2026-04-27",
+  "summary": "Stage 3 の影響範囲 findings は Stage 4 と Stage 6 で概ね本文に反映されている。\nStage 6 で Phase B が baseline-only に再定義されたことで、新 LLM + PHOTON の本格 eval は Phase D/#135 へ送られる形になった。\nこの変更自体は vocab_size 不整合リスクを避ける方針として妥当だが、#135 の unblock 条件と Issue 全体ゴールの表現がまだ古いままだった。\nまた Phase B の候補表に `provider` として `qwen3.5` / `gemma4` が残っており、YAML の `model.provider` と誤読される silent misconfiguration リスクがある。\n`configs/baseline.yaml` 変更の波及は weekly_eval.yml だけでなく `configs/eval.yaml`、server.py、cli.py の既定利用者にも及ぶ。\n背景で無効化した PHOTON Drift metrics / Safe RecGen trigger 発火率の再測定または follow-up 化も未整理だった。\nMust Fix 1 件、Should Fix 4 件。Issue 本文更新が必要なため overall は Needs revision。",
+  "findings": [
+    {
+      "id": "S7-001",
+      "severity": "Must Fix",
+      "category": "依存 Issue",
+      "title": "#135 Phase 6-8 の unblock 条件が Phase B baseline-only 化後の実態とずれている",
+      "description": "Stage 6 で Phase B は新 LLM 2 件の baseline-only eval になり、新 LLM + PHOTON の本格 eval は Phase D/#135 範囲へ延期された。一方、Issue 冒頭のブロック対象は `本 Issue 解消が #135 GPU 着手前の必須前提`、ゴールは `3 つの LLM × 2 つの代表 eval set で真の PHOTON ベースラインを再確立` のままで、PR 運用方針の `Phase A0+A 完了 ... #135 Phase 6-8 着手解禁` と矛盾する。依存 Issue #135 側から見ると、Phase A0+A 完了で unblock なのか、Phase B-C まで含む Issue 全体完了が必要なのか判定できない。",
+      "suggested_action": "ブロック対象とゴールを更新し、#135 GPU 着手の unblock 条件は Phase A0+A 完了であると明記する。Phase B-C は LLM 戦略判断の追加作業で、#135 再学習開始をブロックし続けないことを関連節・PR 運用方針と揃える。"
+    },
+    {
+      "id": "S7-002",
+      "severity": "Should Fix",
+      "category": "silent bug",
+      "title": "Phase B 候補表の `provider` が YAML の `model.provider` と誤読される",
+      "description": "Issue 本文の Phase B 候補表には `provider` 列として `qwen3.5` / `gemma4` がある。しかし現行コードの `pipeline_factory.build_pipeline()` は `cfg.model.provider == \"photon\"` だけを特別扱いし、それ以外は baseline path に流す。新規 `configs/baseline_qwen35.yaml` などで `model.provider: \"qwen3.5\"` と書いても動作はしてしまうが、`provider` の意味論が壊れ、既存コメント `mlx_lm | transformers | mock` と不整合になる。これは実装時に見逃されやすい silent misconfiguration である。",
+      "suggested_action": "表の `provider` 列を `family label` など説明用に改名し、新規 baseline yaml 4 件は `model.provider: \"mlx_lm\"` を維持して `model.model_id` のみ正式 slug に差し替える、と Phase B 受入条件に追加する。"
+    },
+    {
+      "id": "S7-003",
+      "severity": "Should Fix",
+      "category": "CI/CD",
+      "title": "`configs/eval.yaml` の baseline variants も `configs/baseline.yaml` 変更で silent migration する",
+      "description": "Stage 3/4 では `.github/workflows/weekly_eval.yml` の silent migration は反映済みだが、`configs/eval.yaml` の `baseline_rag` / `baseline_rag_summary_memory` variant も `config_path: \"./configs/baseline.yaml\"` を参照している。Phase C で baseline.yaml を新 LLM に更新すると benchmark runner の baseline variants も新 LLM に移行する一方、`photon_rag` は `configs/photon_small.yaml` の Qwen2.5 PHOTON のまま残り、同一 benchmark 内で baseline と PHOTON の LLM backbone がズレる。これは report の比較解釈に影響する。",
+      "suggested_action": "Phase C 影響ファイルに `configs/eval.yaml` を追加する。受入条件で、baseline variants を採用 LLM へ移行するのか、Qwen2.5 固定 legacy config を参照させるのかを明文化し、report に LLM backbone 差分が出るようにする。"
+    },
+    {
+      "id": "S7-004",
+      "severity": "Should Fix",
+      "category": "本番運用",
+      "title": "server.py / cli.py の既定 `configs/baseline.yaml` 利用者への本番影響が未整理",
+      "description": "`baseline_reporag/server.py` と `baseline_reporag/cli.py` は `--config` 既定値として `configs/baseline.yaml` を読む。Phase C で baseline.yaml の model_id を新 LLM に更新すると、server/CLI の既定 LLM も silent migration し、初回 query 時の `mlx_lm.load()` で大容量 download、OOM、起動遅延が発生しうる。Stage 3 の weekly_eval 対応だけでは本番運用の cold-start / rollback / cache warm-up がカバーされない。",
+      "suggested_action": "Phase C 影響ファイルまたは受入条件に `baseline_reporag/server.py` / `baseline_reporag/cli.py` の既定 config 利用者としての確認を追加する。採用 LLM での server/CLI cold-start smoke、HF cache warm-up、rollback 用 config (`configs/baseline_qwen25.yaml` 等) の有無を docs/deployment.md または docs/troubleshooting.md に記載する。"
+    },
+    {
+      "id": "S7-005",
+      "severity": "Should Fix",
+      "category": "ドキュメント",
+      "title": "無効化済み PHOTON Drift / Safe RecGen 指標の再測定または follow-up が未定義",
+      "description": "Issue 背景では `PHOTON Drift metrics の数値` と `Safe RecGen trigger 発火率` を無効化済みとしているが、Phase A の成果物と受入条件は NC / latency report が中心で、これらの指標を再測定するのか、今回 out-of-scope として別 Issue に送るのかが書かれていない。旧指標が invalid のまま残る場合、後続 Issue が再び無効な数値を参照するリスクがある。",
+      "suggested_action": "Phase A reports の受入条件に、PHOTON Drift metrics / Safe RecGen trigger 発火率について再測定結果または explicit out-of-scope / follow-up 番号を記載する項目を追加する。"
+    }
+  ],
+  "must_fix_count": 1,
+  "should_fix_count": 4,
+  "nice_to_have_count": 0,
+  "overall_assessment": "Needs revision"
+}

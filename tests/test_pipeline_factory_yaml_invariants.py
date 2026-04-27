@@ -31,6 +31,12 @@ CONFIGS_DIR = Path(__file__).resolve().parent.parent / "configs"
 
 GLOBAL_DEFAULT_RERANKER_MODEL_ID = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
+# Issue #148 Phase A0: pin the LLM model_id used for generation in the global
+# default profile.  Phase C (adoption LLM evaluation) will update this constant
+# in the same commit that swaps the yaml field so the change is intentional and
+# visible in code review.
+GLOBAL_DEFAULT_GENERATION_MODEL_ID = "mlx-community/Qwen2.5-Coder-14B-Instruct-4bit"
+
 # Issue #137 Phase B: 5-variant A/B で V4 (bge-m3 + bge-reranker-v2-m3, 8192 chars)
 # 採用 (NC -6.90pt vs V0 12.93%、reports/institutional_retrieval_ab.md 参照)。
 # 定数を実値に置換することで skipif 条件 (is None) が False になり test が自動活性化する。
@@ -129,6 +135,21 @@ def _is_photon_profile_yaml(path: Path, cfg) -> bool:
     if model_section is None:
         return False
     return getattr(model_section, "provider", None) == "photon"
+
+
+def test_baseline_yaml_generation_model_id_pinned() -> None:
+    """``configs/baseline.yaml`` model.model_id must remain the global default LLM.
+
+    Issue #148 Phase A0: pin the generation LLM to prevent silent swap.
+    Phase C (adoption LLM evaluation) updates both the YAML and this assertion
+    in the same commit so the change is intentional and traceable.
+
+    ``cfg.model.model_id`` is the field that ``pipeline_factory`` passes to
+    the generation back-end (mlx_lm / transformers). ``configs/baseline.yaml``
+    does not have a separate ``generation.model_id`` field.
+    """
+    cfg = load_config(CONFIGS_DIR / "baseline.yaml")
+    assert cfg.model.model_id == GLOBAL_DEFAULT_GENERATION_MODEL_ID
 
 
 def test_photon_yaml_has_required_tokenizer_fields() -> None:
