@@ -1,0 +1,75 @@
+{
+  "stage": 2,
+  "stage_name": "整合性レビュー",
+  "focus": "整合性",
+  "reviewer": "claude-opus (inline)",
+  "findings": [
+    {
+      "id": "DR2-001",
+      "severity": "Should Fix",
+      "category": "コード整合",
+      "title": "design-policy.md `before` サンプルが実コードと食い違う (`warnings.warn` vs `_logger.warning`)",
+      "description": "design-policy.md §5 Task 1-A の『変更前』サンプルは `warnings.warn(f\"failed: {e}\")` / `warnings.warn(\"_StubTokenizer (test/dev only)\")` を示すが、実コード `baseline_reporag/photon_pipeline.py:339-343` は `_logger.warning(...)` を使用 (warnings module ではなく logging module)。サンプルが実態と異なるため、実装者が `warnings.warn` の削除を探すと該当箇所が見つからない。",
+      "evidence": "design-policy.md (§5 Task 1-A の `before` snippet); baseline_reporag/photon_pipeline.py:339-343 (`_logger.warning(...)` で fallback warning を出力)",
+      "suggested_fix": "design-policy.md §5 Task 1-A の『変更前』サンプルを実コードに整合させる: `warnings.warn` を `_logger.warning` に修正、現行の (a) `tokenizer_section = cfg.get(\"tokenizer\")` 経由のアクセス、(b) `_load_hf_tokenizer(tokenizer_id, photon_cfg.tokenizer.vocab_size)` 呼び出し、(c) `_logger.warning(\"config.tokenizer.tokenizer_id is unset; falling back to _StubTokenizer ...\")` の構造を反映する。"
+    },
+    {
+      "id": "DR2-002",
+      "severity": "Should Fix",
+      "category": "コード整合",
+      "title": "design-policy.md `after` サンプルの `cfg.tokenizer.tokenizer_id` アクセスが、現コードの安全アクセス (None-safe) を反映していない",
+      "description": "design-policy.md §5 Task 1-A の『変更後』サンプルは `tokenizer_id = getattr(cfg.tokenizer, \"tokenizer_id\", \"\") or \"\"` だが、実コード (L301-306) は `tokenizer_section = cfg.get(\"tokenizer\")` で None チェックを先に挟む形。`cfg.tokenizer` が直接 attribute access できると仮定すると、`tokenizer:` block を持たない config (e.g. test fixture) で AttributeError が出る。",
+      "evidence": "design-policy.md §5 Task 1-A `after` snippet; baseline_reporag/photon_pipeline.py:301-306 (tokenizer_section None ガード)",
+      "suggested_fix": "design-policy.md §5 Task 1-A の『変更後』サンプルを以下に修正: `tokenizer_section = cfg.get(\"tokenizer\")` で先に取得、`tokenizer_id = getattr(tokenizer_section, \"tokenizer_id\", None) if tokenizer_section is not None else None`、`if not tokenizer_id: raise ValueError(\"cfg.tokenizer.tokenizer_id is required for provider=='photon'. Set the `tokenizer:` block with a valid tokenizer_id in the yaml config.\")`。エラーメッセージも『tokenizer 節そのものが無い』ケースを示唆する文面に拡張。"
+    },
+    {
+      "id": "DR2-003",
+      "severity": "Should Fix",
+      "category": "コード整合",
+      "title": "`_load_hf_tokenizer` 呼び出しサンプルが `trust_remote_code=False` 引数を欠落",
+      "description": "design-policy.md §5 Task 1-A `after` サンプルは `tokenizer = AutoTokenizer.from_pretrained(tokenizer_id)` だが、実コード (L493) は `AutoTokenizer.from_pretrained(tokenizer_id, trust_remote_code=False)` を渡している (Issue #138 由来のセキュリティ強化)。design 反映時にこの引数を落とすと既存の behavior 契約が崩れ、既存 test (`mock_from_pretrained.assert_called_once_with(\"fake-org/fake-tokenizer\", trust_remote_code=False)` at line 558) が失敗する。",
+      "evidence": "baseline_reporag/photon_pipeline.py:493; baseline_reporag/tests/test_photon_pipeline.py:557-559 (assert_called_once_with の引数チェック); design-policy.md `after` snippet",
+      "suggested_fix": "design-policy.md §5 Task 1-A `after` snippet 内の `AutoTokenizer.from_pretrained` 呼び出しに `trust_remote_code=False` を追加。実装では `_load_hf_tokenizer` 内 (L493) の現状を維持し、`_build_photon_deps` 側は `_load_hf_tokenizer` 経由でのみ呼ぶことを明記。"
+    },
+    {
+      "id": "DR2-004",
+      "severity": "Should Fix",
+      "category": "test 整合",
+      "title": "design-policy.md §5 Task 1-B 行番号と現コードの対応関係を再確認する記載が不足",
+      "description": "design-policy.md §5 Task 1-B (DR1-005 反映後) は L521 / L563 / L604-636 / L611 / L636 を migration 対象として明記しているが、これらは作成時 (2026-04-26) のスナップショット。実装者は `git pull` 後、行番号がずれている可能性を考慮して再 grep する必要がある。design doc にこの注記が無い。",
+      "evidence": "design-policy.md §5 Task 1-B 全体; 一般的な行番号 drift",
+      "suggested_fix": "design-policy.md §5 Task 1-B 末尾に『実装着手時に `grep -n _StubTokenizer baseline_reporag/tests/test_photon_pipeline.py` を再実行し、行番号 drift があれば本 design doc の参照行番号を更新する』旨を 1 行追加。"
+    },
+    {
+      "id": "DR2-005",
+      "severity": "Should Fix",
+      "category": "test 整合",
+      "title": "新設 test `test_raises_when_tokenizer_id_missing` の cfg fixture 仕様が design doc に欠落",
+      "description": "design-policy.md §5 Task 1-B の新設 test サンプルは `cfg = make_minimal_photon_cfg(tokenizer_id=\"\")` を呼ぶが、`make_minimal_photon_cfg` は本 repo に存在せず、現行 test (`test_falls_back_to_stub_when_tokenizer_id_missing`, L604-636) は yaml 文字列を tmp_path に書いて `load_config()` で読む方式。design の擬似コードを literal にコピーすると test が動かない。",
+      "evidence": "design-policy.md §5 Task 1-B (新設 test サンプル); baseline_reporag/tests/test_photon_pipeline.py:604-636 (現行の同型 test の cfg 構築方法 = yaml 文字列 + load_config)",
+      "suggested_fix": "design-policy.md §5 Task 1-B の新設 test サンプルを既存スタイル (yaml 文字列 + tmp_path + `load_config(str(cfg_file))`) に合わせる。`make_minimal_photon_cfg` は擬似名であり既存の yaml fixture 形式に従う、と注記。"
+    },
+    {
+      "id": "DR2-006",
+      "severity": "Nice to Have",
+      "category": "整合性",
+      "title": "design-policy.md §2 ASCII 図の `_build_photon_deps` 内訳が、実コードの責務 (`_logger.warning` ブランチ) を簡略化",
+      "description": "design-policy.md §2 アーキテクチャ図は 『現状は warning + _StubTokenizer fallback 経路が残存』と外側に注記しているが、内側の box には「`cfg.tokenizer.tokenizer_id` → `AutoTokenizer.from_pretrained`」のみ。実コードは fallback 経路 (`else: _logger.warning(...) + _get_stub_tokenizer(...)`) を含む。図にもう一筆 fallback ブランチを描くと現状把握が読み手に伝わりやすい。",
+      "evidence": "design-policy.md §2 ASCII 図 内側; baseline_reporag/photon_pipeline.py:335-343 (if/else 分岐)",
+      "suggested_fix": "図の中の `_build_photon_deps` box に `else 分岐 → _StubTokenizer fallback (本 Issue で削除)` を追加。または図を本 Issue 後の状態 (fallback 削除済) で描き直し、§2 の前文で『本 Issue 後の構造』と注記。"
+    },
+    {
+      "id": "DR2-007",
+      "severity": "Nice to Have",
+      "category": "整合性",
+      "title": "Issue 本文の最新版と design-policy.md の相互参照が暗黙的",
+      "description": "design-policy.md §12 関連資料は Issue 本文の path を `workspace/issues/139/issue-review/updated-issue-body.md` と書いているが、`gh issue view 139 --json body --jq .body` (= GitHub 上の最新本文) との同期検証手順が無い。設計フェーズ完了時点で両者が drift していれば後続の作業計画 / TDD で混乱する。",
+      "evidence": "design-policy.md §12 関連資料",
+      "suggested_fix": "§12 末尾に『実装着手前に `diff <(gh issue view 139 --json body --jq .body) workspace/issues/139/issue-review/updated-issue-body.md` を 1 回実行し、差分が末尾改行のみであることを確認する』 1 行を追加。"
+    }
+  ],
+  "must_fix_count": 0,
+  "should_fix_count": 5,
+  "nice_to_have_count": 2,
+  "overall_assessment": "design doc は意図と方針については整合しているが、実装サンプルコード (§5 Task 1-A の before/after) が実 main コードと細部で食い違う (logging method / None-safe アクセス / `trust_remote_code` 引数)。実装者が design サンプルをそのまま貼ると既存 test が失敗するレベルで具体的なため Should Fix 5 件。Must Fix なし。"
+}

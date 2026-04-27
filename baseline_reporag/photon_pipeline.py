@@ -10,6 +10,7 @@ Provides:
 from __future__ import annotations
 
 import logging
+import re
 import uuid
 from math import prod
 from typing import TYPE_CHECKING, Any
@@ -323,24 +324,20 @@ def _build_photon_deps(cfg: Config) -> dict[str, Any]:
     # prefill in PhotonRAGPipeline and chunk scoring in prune_evidence) share
     # the same instance (Issue #58).
     #
-    # Issue #138 fix: when ``tokenizer.tokenizer_id`` is set we MUST load the
-    # matching HuggingFace tokenizer so training and inference encode text the
-    # same way. The previous unconditional ``_StubTokenizer`` (UTF-8
-    # byte-mod-vocab encoding) silently diverged from the real Qwen subword
-    # vocabulary used by ``scripts/generate_training_corpus.py``, which would
-    # have made any re-trained PHOTON checkpoint return garbage at inference
-    # time. ``_StubTokenizer`` is retained only as a fallback for legacy
-    # test fixtures that omit the ``tokenizer:`` block (and is not reachable
-    # from production photon configs).
-    if tokenizer_id:
-        tokenizer = _load_hf_tokenizer(tokenizer_id, photon_cfg.tokenizer.vocab_size)
-    else:
-        _logger.warning(
-            "config.tokenizer.tokenizer_id is unset; falling back to "
-            "_StubTokenizer (test/dev only — production photon configs "
-            "must set tokenizer_id, Issue #138)."
+    # Issue #139: tokenizer_id is now required for provider=='photon'. The
+    # legacy byte-mod stub-tokenizer fallback was deleted to remove a
+    # structural path where production code could silently fall back onto a
+    # test fixture (the same class of bug as S7-001 random-init weights).
+    # Missing or unsafe tokenizer_id now raises ``ValueError`` at this
+    # boundary.
+    if not tokenizer_id:
+        raise ValueError(
+            "cfg.tokenizer.tokenizer_id is required for provider=='photon'. "
+            "Set the `tokenizer:` block with a valid tokenizer_id "
+            "(e.g. 'mlx-community/Qwen2.5-Coder-14B-Instruct-4bit') in the yaml config."
         )
-        tokenizer = _get_stub_tokenizer(photon_cfg.tokenizer.vocab_size)
+    tokenizer_id = _validate_tokenizer_id(tokenizer_id)
+    tokenizer = _load_hf_tokenizer(tokenizer_id, photon_cfg.tokenizer.vocab_size)
     model = PhotonModel(photon_cfg)
     # Issue #64 / Codex CB-001: extract working memory policy once, pass it
     # into PhotonInference alongside the Issue #63 drift_level_weights below.
@@ -448,39 +445,105 @@ def _build_photon_deps(cfg: Config) -> dict[str, Any]:
     }
 
 
-class _StubTokenizer:
-    """Minimal tokenizer for PHOTON prefill (encode/decode via utf-8 byte ids)."""
-
-    def __init__(self, vocab_size: int) -> None:
-        self.vocab_size = vocab_size
-        self.pad_token_id = 0
-
-    def encode(self, text: str) -> list[int]:
-        return [b % self.vocab_size for b in text.encode("utf-8")]
-
-    def decode(self, ids: list[int]) -> str:
-        return bytes(i % 256 for i in ids).decode("utf-8", errors="replace")
+# Issue #139 / DR4-001 / Codex CB-001: ``tokenizer.tokenizer_id`` originates
+# from yaml input and is treated as untrusted. ``transformers.AutoTokenizer
+# .from_pretrained`` accepts both Hugging Face repo ids AND local filesystem
+# paths, so naive regex allowlists let through values like ``../model``,
+# ``org/..``, ``.cache/model`` that the HF loader could resolve as paths.
+# We validate against the HF repo-id form (``<org>/<name>``) and additionally
+# reject components that look path-like.
+_TOKENIZER_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
+_TOKENIZER_ID_MAX_TOTAL_LEN = 200
+_TOKENIZER_ID_MAX_COMPONENT_LEN = 96
 
 
-def _get_stub_tokenizer(vocab_size: int) -> _StubTokenizer:
-    return _StubTokenizer(vocab_size)
+def _validate_tokenizer_id(tokenizer_id: str) -> str:
+    """Validate ``tokenizer_id`` against the HF repo-id allowlist.
+
+    Returns the input unchanged on success. Raises ``ValueError`` with a
+    sanitized message on failure (the raw input is never embedded directly
+    in log/error output — see ``_display_tokenizer_id``).
+
+    Hardening (Codex CB-001):
+
+    - regex allowlist ``^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$``
+    - total length cap (200) and per-component length cap (96)
+    - rejects any component equal to ``.`` / ``..`` (would be path-like)
+    - rejects components beginning with ``.`` (hides as hidden-file path)
+    - rejects components containing ``..`` substring (path traversal)
+    - rejects leading ``/``, ``.``, ``~`` overall (path-like prefix)
+    """
+    if not isinstance(tokenizer_id, str) or not tokenizer_id:
+        raise ValueError("cfg.tokenizer.tokenizer_id must be a non-empty string")
+    if len(tokenizer_id) > _TOKENIZER_ID_MAX_TOTAL_LEN:
+        raise ValueError(
+            "cfg.tokenizer.tokenizer_id exceeds maximum length "
+            f"({_TOKENIZER_ID_MAX_TOTAL_LEN} chars)"
+        )
+    if tokenizer_id[0] in {"/", ".", "~"}:
+        raise ValueError(
+            "cfg.tokenizer.tokenizer_id must not start with '/', '.', or '~' "
+            "(path-like prefix)"
+        )
+    if not _TOKENIZER_ID_PATTERN.fullmatch(tokenizer_id):
+        raise ValueError(
+            "cfg.tokenizer.tokenizer_id has unsafe form "
+            "(expected '<org>/<name>' with [A-Za-z0-9._-] only)"
+        )
+    # _PATTERN guarantees exactly one '/' (no leading/trailing) so split is safe.
+    org, name = tokenizer_id.split("/", 1)
+    for component in (org, name):
+        if len(component) > _TOKENIZER_ID_MAX_COMPONENT_LEN:
+            raise ValueError(
+                "cfg.tokenizer.tokenizer_id component exceeds maximum length "
+                f"({_TOKENIZER_ID_MAX_COMPONENT_LEN} chars)"
+            )
+        if component in {".", ".."}:
+            raise ValueError(
+                "cfg.tokenizer.tokenizer_id components must not be '.' or '..' "
+                "(path traversal)"
+            )
+        if component.startswith("."):
+            raise ValueError(
+                "cfg.tokenizer.tokenizer_id components must not start with '.' "
+                "(hidden-file path-like form)"
+            )
+        if ".." in component:
+            raise ValueError(
+                "cfg.tokenizer.tokenizer_id components must not contain '..' "
+                "(path traversal)"
+            )
+    return tokenizer_id
+
+
+def _display_tokenizer_id(tokenizer_id: str) -> str:
+    """Sanitized representation for log / error messages.
+
+    Uses ``repr()`` so control characters (newline, etc.) are escape-printed,
+    preventing log injection if an unsafe value somehow reaches an error path.
+    """
+    return repr(tokenizer_id)
 
 
 def _load_hf_tokenizer(tokenizer_id: str, expected_vocab_size: int) -> Any:
     """Load the HuggingFace ``AutoTokenizer`` matched to ``tokenizer_id``.
 
     Issue #138: training (``scripts/generate_training_corpus.py``) loads a
-    real Qwen subword tokenizer, but inference previously used the
-    byte-mod ``_StubTokenizer``. A re-trained PHOTON checkpoint would then
-    receive garbage token streams at inference. This helper is the single
-    production code path that builds the inference-side tokenizer, and it
-    enforces:
+    real Qwen subword tokenizer; inference must use the same tokenizer or
+    PHOTON checkpoints return garbage at inference time. This helper is the
+    single production code path that builds the inference-side tokenizer.
 
-    - vocab_size parity between the loaded tokenizer and ``photon_cfg``,
-      so the embedding matrix and tokenizer agree on row count;
-    - a non-None ``pad_token_id`` so ``tokenize_evidence_pack`` can
-      chunk-align via padding without raising ``TypeError`` on tokenizers
-      that ship without a pad token (Qwen / GPT-style families).
+    Issue #139 / DR4-001 / DR4-002 hardening:
+
+    - ``tokenizer_id`` must already be validated (callers in
+      ``_build_photon_deps`` invoke ``_validate_tokenizer_id`` first).
+    - ``trust_remote_code=False`` is fixed; do not relax it.
+    - ``transformers.AutoTokenizer.from_pretrained`` failures (network /
+      gated model / unknown id / cache miss) are normalized to
+      ``ValueError`` so callers and ``docs/troubleshooting.md`` see a
+      single failure mode. ``ImportError`` (transformers not installed)
+      and ``ValueError`` from vocab-size mismatch (Issue #138 invariant)
+      are preserved unchanged.
     """
     try:
         from transformers import AutoTokenizer
@@ -490,7 +553,31 @@ def _load_hf_tokenizer(tokenizer_id: str, expected_vocab_size: int) -> Any:
             "Install it via `pip install transformers`."
         ) from exc
 
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_id, trust_remote_code=False)
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_id, trust_remote_code=False)
+    except Exception as exc:  # noqa: BLE001 — Issue #139 boundary normalization
+        # Hugging Face surfaces a wide family of exceptions here (OSError,
+        # huggingface_hub.errors.HfHubHTTPError, RepositoryNotFoundError,
+        # GatedRepoError, etc.) whose import paths drift across releases.
+        # Normalize to ValueError at this boundary. We log the original
+        # exception class + sanitized id at warning level so operators have
+        # diagnostic breadcrumbs in private logs, then re-raise with
+        # ``from None`` so the public traceback / __cause__ chain does NOT
+        # carry the raw HF exception text (Codex CB-002): HF messages may
+        # contain private paths, private model ids, or environment-specific
+        # details that should not leak via Streamlit error banners /
+        # operator log paste / Slack notifications.
+        exc_class_name = type(exc).__name__
+        _logger.warning(
+            "PHOTON tokenizer load failed: id=%s exc_class=%s",
+            _display_tokenizer_id(tokenizer_id),
+            exc_class_name,
+        )
+        raise ValueError(
+            f"failed to load tokenizer {_display_tokenizer_id(tokenizer_id)}: "
+            f"{exc_class_name}"
+        ) from None
+
     actual_vocab_size = getattr(tokenizer, "vocab_size", None)
     if actual_vocab_size is not None and actual_vocab_size != expected_vocab_size:
         raise ValueError(

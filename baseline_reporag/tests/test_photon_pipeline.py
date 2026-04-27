@@ -8,6 +8,36 @@ import pytest
 
 from baseline_reporag.generation.evidence_pack import build_evidence_pack
 
+# Issue #139 / Task 2.5: stub _load_hf_tokenizer for tests that don't exercise
+# real HuggingFace loader behavior. Tests that test loader behavior (real
+# tokenizer success path, vocab-size mismatch, load failure normalization,
+# unsafe-id rejection) opt out via @pytest.mark.real_hf_loader.
+#
+# All affected fixtures must include a `tokenizer:` block with at minimum
+# `tokenizer_id: "fake-org/fake-tokenizer"` — _build_photon_deps now raises
+# ValueError when tokenizer_id is missing or unsafe (Issue #139 fail-fast
+# replaces the legacy _StubTokenizer fallback).
+_MINIMAL_TOKENIZER_BLOCK = 'tokenizer:\n  tokenizer_id: "fake-org/fake-tokenizer"\n'
+
+
+@pytest.fixture(autouse=True)
+def _stub_hf_loader(request, monkeypatch):
+    if "real_hf_loader" in request.keywords:
+        return
+
+    def _fake(tokenizer_id, expected_vocab_size):
+        fake = MagicMock()
+        fake.vocab_size = expected_vocab_size
+        fake.pad_token_id = 0
+        fake.encode.return_value = [1, 2, 3]
+        return fake
+
+    monkeypatch.setattr(
+        "baseline_reporag.photon_pipeline._load_hf_tokenizer",
+        _fake,
+    )
+
+
 # ---------------------------------------------------------------------------
 # TDD Cycle 1: Config._config_path and build_pipeline factory
 # ---------------------------------------------------------------------------
@@ -455,6 +485,8 @@ class TestBuildPhotonDeps:
             "  intermediate_size: 256\n"
             "  num_heads: 4\n"
             "  vocab_size: 1000\n"
+            "tokenizer:\n"
+            '  tokenizer_id: "fake-org/fake-tokenizer"\n'
             "hierarchy:\n"
             "  levels: 2\n"
             "  chunk_sizes: [4, 4]\n"
@@ -489,6 +521,8 @@ class TestBuildPhotonDeps:
             "  intermediate_size: 256\n"
             "  num_heads: 4\n"
             "  vocab_size: 1000\n"
+            "tokenizer:\n"
+            '  tokenizer_id: "fake-org/fake-tokenizer"\n'
             "hierarchy:\n"
             "  levels: 2\n"
             "  chunk_sizes: [4, 4]\n"
@@ -508,19 +542,22 @@ class TestBuildPhotonDeps:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.real_hf_loader
 class TestBuildPhotonDepsRealTokenizer:
     """``_build_photon_deps`` must load the real HuggingFace tokenizer when
-    ``cfg.tokenizer.tokenizer_id`` is set, instead of the byte-mod
-    ``_StubTokenizer`` (which caused the training/inference mismatch
-    documented in Issue #138).
+    ``cfg.tokenizer.tokenizer_id`` is set. Issue #138 introduced the real
+    HF loader path; Issue #139 made it the only path (the legacy
+    ``_StubTokenizer`` fallback was deleted) and added validation +
+    exception normalization at the ``_build_photon_deps`` boundary.
+
+    Tests in this class exercise the real ``_load_hf_tokenizer`` and
+    therefore opt out of the module-level autouse stub via the
+    ``real_hf_loader`` marker.
     """
 
     def test_loads_real_tokenizer_when_tokenizer_id_set(self, tmp_path):
         from baseline_reporag.config import load_config
-        from baseline_reporag.photon_pipeline import (
-            _StubTokenizer,
-            _build_photon_deps,
-        )
+        from baseline_reporag.photon_pipeline import _build_photon_deps
 
         cfg_file = tmp_path / "photon.yaml"
         cfg_file.write_text(
@@ -560,7 +597,6 @@ class TestBuildPhotonDepsRealTokenizer:
             "fake-org/fake-tokenizer", trust_remote_code=False
         )
         assert deps["tokenizer"] is fake_tokenizer
-        assert not isinstance(deps["tokenizer"], _StubTokenizer)
         assert deps["photon_cfg"].tokenizer.vocab_size == 152064
 
     def test_vocab_size_mismatch_raises(self, tmp_path):
@@ -601,16 +637,11 @@ class TestBuildPhotonDepsRealTokenizer:
             with pytest.raises(ValueError, match="vocab_size"):
                 _build_photon_deps(cfg)
 
-    def test_falls_back_to_stub_when_tokenizer_id_missing(self, tmp_path):
-        """Test/dev configs without ``tokenizer.tokenizer_id`` keep the stub
-        path so the existing 17 unit tests remain hermetic (no network).
-        Production configs always set ``tokenizer_id`` and therefore never
-        reach this branch (Issue #138)."""
+    def test_raises_when_tokenizer_id_missing(self, tmp_path):
+        """Issue #139: ``_build_photon_deps`` must raise ``ValueError`` when
+        ``cfg.tokenizer.tokenizer_id`` is unset (no more silent stub fallback)."""
         from baseline_reporag.config import load_config
-        from baseline_reporag.photon_pipeline import (
-            _StubTokenizer,
-            _build_photon_deps,
-        )
+        from baseline_reporag.photon_pipeline import _build_photon_deps
 
         cfg_file = tmp_path / "photon.yaml"
         cfg_file.write_text(
@@ -632,8 +663,119 @@ class TestBuildPhotonDepsRealTokenizer:
             "  safe_recgen_enabled: false\n"
         )
         cfg = load_config(str(cfg_file))
-        deps = _build_photon_deps(cfg)
-        assert isinstance(deps["tokenizer"], _StubTokenizer)
+        with pytest.raises(ValueError, match="tokenizer_id is required"):
+            _build_photon_deps(cfg)
+
+    def test_raises_when_tokenizer_load_fails(self, tmp_path):
+        """Issue #139 / S5-002: ``AutoTokenizer.from_pretrained`` failures
+        (HF Hub down, gated model, unknown id) are normalized to
+        ``ValueError`` at the ``_build_photon_deps`` boundary, with the
+        sanitized tokenizer_id included for operator diagnosis."""
+        from baseline_reporag.config import load_config
+        from baseline_reporag.photon_pipeline import _build_photon_deps
+
+        cfg_file = tmp_path / "photon.yaml"
+        cfg_file.write_text(
+            "model:\n"
+            "  provider: photon\n"
+            "  architecture: photon_decoder\n"
+            "  base_embed_dim: 64\n"
+            "  hidden_size: 128\n"
+            "  intermediate_size: 256\n"
+            "  num_heads: 4\n"
+            "hierarchy:\n"
+            "  levels: 2\n"
+            "  chunk_sizes: [4, 4]\n"
+            "  encoder_layers_per_level: [2, 2]\n"
+            "  decoder_layers_per_level: [2, 2]\n"
+            "tokenizer:\n"
+            '  tokenizer_id: "fake-org/non-existent-tokenizer"\n'
+            "  vocab_size: 152064\n"
+            "inference:\n"
+            "  hierarchical_prefill: true\n"
+            "  safe_recgen_enabled: false\n"
+        )
+        cfg = load_config(str(cfg_file))
+
+        def _boom(*args, **kwargs):
+            raise OSError("HF Hub unreachable")
+
+        with patch(
+            "transformers.AutoTokenizer.from_pretrained",
+            side_effect=_boom,
+        ):
+            with pytest.raises(
+                ValueError,
+                match=r"failed to load tokenizer 'fake-org/non-existent-tokenizer'",
+            ):
+                _build_photon_deps(cfg)
+
+    @pytest.mark.parametrize(
+        "unsafe_id",
+        [
+            "",  # empty
+            "no-slash",  # missing '/'
+            "http://evil.example/etc/passwd",  # URL form
+            "../../etc/passwd",  # path traversal
+            "a\\b/c",  # backslash
+            "a/b\nc",  # newline (log injection)
+            "/abs/path",  # leading slash
+            "a/b/c",  # extra slash
+            # Codex CB-001: HF AutoTokenizer.from_pretrained accepts paths,
+            # so dot-only / leading-dot / traversal-segment forms must also
+            # be rejected by component-level validation, not just regex shape.
+            "../model",  # parent-dir component
+            "org/..",  # parent-dir as second component
+            "./model",  # current-dir leading
+            ".cache/model",  # leading dot (hidden-file path-like)
+            "org/.cache",  # second component leading dot
+            "..a/b",  # leading double-dot
+            "a/..b",  # trailing component leading double-dot
+            "~/model",  # home-relative
+            "a" * 250 + "/b",  # exceeds total-length cap
+        ],
+    )
+    def test_rejects_unsafe_tokenizer_id(self, tmp_path, unsafe_id):
+        """Issue #139 / DR4-001: yaml-supplied tokenizer_id is untrusted
+        input. ``_build_photon_deps`` must reject any value that does not
+        match the HF repo-id allowlist (``<org>/<name>`` with
+        ``[A-Za-z0-9._-]`` only) before it reaches AutoTokenizer or any
+        log/error message."""
+        from baseline_reporag.config import load_config
+        from baseline_reporag.photon_pipeline import _build_photon_deps
+
+        cfg_file = tmp_path / "photon.yaml"
+        # Dump as yaml-safe via direct yaml string with the unsafe id quoted.
+        # Some unsafe values would break naive yaml interpolation; we use a
+        # block scalar style to keep the value literal.
+        import yaml as _yaml
+
+        cfg_dict = {
+            "model": {
+                "provider": "photon",
+                "architecture": "photon_decoder",
+                "base_embed_dim": 64,
+                "hidden_size": 128,
+                "intermediate_size": 256,
+                "num_heads": 4,
+                "vocab_size": 1000,
+            },
+            "hierarchy": {
+                "levels": 2,
+                "chunk_sizes": [4, 4],
+                "encoder_layers_per_level": [2, 2],
+                "decoder_layers_per_level": [2, 2],
+            },
+            "tokenizer": {"tokenizer_id": unsafe_id},
+            "inference": {
+                "hierarchical_prefill": True,
+                "safe_recgen_enabled": False,
+            },
+        }
+        cfg_file.write_text(_yaml.safe_dump(cfg_dict))
+        cfg = load_config(str(cfg_file))
+        with pytest.raises(ValueError):
+            _build_photon_deps(cfg)
 
     def test_institutional_docs_photon_uses_tokenizer_section_vocab(self, tmp_path):
         """``cfg.tokenizer.vocab_size`` (152064) must drive PhotonModel sizing,
@@ -1914,6 +2056,8 @@ class TestBuildPhotonDepsWiresRopeScaling:
             "  rope_theta: 10000000.0\n"
             "  rope_scaling: ntk\n"
             "  rope_scale_factor: 4.0\n"
+            "tokenizer:\n"
+            '  tokenizer_id: "fake-org/fake-tokenizer"\n'
             "hierarchy:\n"
             "  levels: 2\n"
             "  chunk_sizes: [4, 4]\n"
@@ -1946,6 +2090,8 @@ class TestBuildPhotonDepsWiresRopeScaling:
             "  intermediate_size: 256\n"
             "  num_heads: 4\n"
             "  vocab_size: 1000\n"
+            "tokenizer:\n"
+            '  tokenizer_id: "fake-org/fake-tokenizer"\n'
             "hierarchy:\n"
             "  levels: 2\n"
             "  chunk_sizes: [4, 4]\n"
@@ -1996,6 +2142,8 @@ class TestBuildPhotonDepsIssue63SafeRecGen:
             "  num_heads: 2\n"
             "  head_dim: 16\n"
             "  vocab_size: 256\n"
+            "tokenizer:\n"
+            '  tokenizer_id: "fake-org/fake-tokenizer"\n'
             "hierarchy:\n"
             "  levels: 2\n"
             "  chunk_sizes: [4, 4]\n"
@@ -2027,6 +2175,8 @@ class TestBuildPhotonDepsIssue63SafeRecGen:
             "  num_heads: 2\n"
             "  head_dim: 16\n"
             "  vocab_size: 256\n"
+            "tokenizer:\n"
+            '  tokenizer_id: "fake-org/fake-tokenizer"\n'
             "hierarchy:\n"
             "  levels: 2\n"
             "  chunk_sizes: [4, 4]\n"
@@ -2066,6 +2216,8 @@ class TestBuildPhotonDepsIssue63SafeRecGen:
             "  num_heads: 2\n"
             "  head_dim: 16\n"
             "  vocab_size: 256\n"
+            "tokenizer:\n"
+            '  tokenizer_id: "fake-org/fake-tokenizer"\n'
             "hierarchy:\n"
             "  levels: 2\n"
             "  chunk_sizes: [4, 4]\n"
@@ -2097,6 +2249,8 @@ class TestBuildPhotonDepsIssue63SafeRecGen:
             "  num_heads: 2\n"
             "  head_dim: 16\n"
             "  vocab_size: 256\n"
+            "tokenizer:\n"
+            '  tokenizer_id: "fake-org/fake-tokenizer"\n'
             "hierarchy:\n"
             "  levels: 2\n"
             "  chunk_sizes: [4, 4]\n"
@@ -2854,6 +3008,8 @@ class TestBuildPhotonDepsWorkingMemory:
             "  intermediate_size: 256\n"
             "  num_heads: 4\n"
             "  vocab_size: 1000\n"
+            "tokenizer:\n"
+            '  tokenizer_id: "fake-org/fake-tokenizer"\n'
             "hierarchy:\n"
             "  levels: 2\n"
             "  chunk_sizes: [4, 4]\n"
@@ -2891,6 +3047,8 @@ class TestBuildPhotonDepsWorkingMemory:
             "  intermediate_size: 256\n"
             "  num_heads: 4\n"
             "  vocab_size: 1000\n"
+            "tokenizer:\n"
+            '  tokenizer_id: "fake-org/fake-tokenizer"\n'
             "hierarchy:\n"
             "  levels: 2\n"
             "  chunk_sizes: [4, 4]\n"
@@ -3151,6 +3309,8 @@ class TestWorkingMemoryConfigAggregationYamlPropagation:
             "  intermediate_size: 256\n"
             "  num_heads: 4\n"
             "  vocab_size: 1000\n"
+            "tokenizer:\n"
+            '  tokenizer_id: "fake-org/fake-tokenizer"\n'
             "hierarchy:\n"
             "  levels: 2\n"
             "  chunk_sizes: [4, 4]\n"
@@ -3190,6 +3350,8 @@ class TestWorkingMemoryConfigAggregationYamlPropagation:
             "  intermediate_size: 256\n"
             "  num_heads: 4\n"
             "  vocab_size: 1000\n"
+            "tokenizer:\n"
+            '  tokenizer_id: "fake-org/fake-tokenizer"\n'
             "hierarchy:\n"
             "  levels: 2\n"
             "  chunk_sizes: [4, 4]\n"
@@ -3235,6 +3397,8 @@ class TestWorkingMemoryConfigAggregationYamlPropagation:
             "  intermediate_size: 256\n"
             "  num_heads: 4\n"
             "  vocab_size: 1000\n"
+            "tokenizer:\n"
+            '  tokenizer_id: "fake-org/fake-tokenizer"\n'
             "hierarchy:\n"
             "  levels: 2\n"
             "  chunk_sizes: [4, 4]\n"
@@ -3304,6 +3468,8 @@ class TestWorkingMemoryConfigAggregationYamlPropagation:
             "  intermediate_size: 256\n"
             "  num_heads: 4\n"
             "  vocab_size: 1000\n"
+            "tokenizer:\n"
+            '  tokenizer_id: "fake-org/fake-tokenizer"\n'
             "hierarchy:\n"
             "  levels: 2\n"
             "  chunk_sizes: [4, 4]\n"
@@ -3364,6 +3530,7 @@ class TestWorkingMemoryConfigAggregationYamlPropagation:
                 "encoder_layers_per_level": [2, 2],
                 "decoder_layers_per_level": [2, 2],
             },
+            "tokenizer": {"tokenizer_id": "fake-org/fake-tokenizer"},
             "inference": {
                 "hierarchical_prefill": True,
                 "safe_recgen_enabled": False,
@@ -3435,6 +3602,8 @@ class TestWorkingMemoryConfigAggregationYamlPropagation:
             "  intermediate_size: 256\n"
             "  num_heads: 4\n"
             "  vocab_size: 1000\n"
+            "tokenizer:\n"
+            '  tokenizer_id: "fake-org/fake-tokenizer"\n'
             "hierarchy:\n"
             "  levels: 2\n"
             "  chunk_sizes: [4, 4]\n"
@@ -4287,6 +4456,8 @@ class TestWorkingMemoryConfigPastTurnPinningYamlPropagation:
             "  intermediate_size: 256\n"
             "  num_heads: 4\n"
             "  vocab_size: 1000\n"
+            "tokenizer:\n"
+            '  tokenizer_id: "fake-org/fake-tokenizer"\n'
             "hierarchy:\n"
             "  levels: 2\n"
             "  chunk_sizes: [4, 4]\n"
@@ -4336,6 +4507,7 @@ class TestWorkingMemoryConfigPastTurnPinningYamlPropagation:
                 "encoder_layers_per_level": [2, 2],
                 "decoder_layers_per_level": [2, 2],
             },
+            "tokenizer": {"tokenizer_id": "fake-org/fake-tokenizer"},
             "inference": {
                 "hierarchical_prefill": True,
                 "safe_recgen_enabled": False,
