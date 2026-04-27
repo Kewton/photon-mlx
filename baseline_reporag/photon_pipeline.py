@@ -766,12 +766,26 @@ def _load_hf_tokenizer(tokenizer_id: str, expected_vocab_size: int) -> Any:
         ) from None
 
     actual_vocab_size = getattr(tokenizer, "vocab_size", None)
-    if actual_vocab_size is not None and actual_vocab_size != expected_vocab_size:
-        raise ValueError(
-            "tokenizer vocab_size mismatch (Issue #138): "
-            f"tokenizer={actual_vocab_size} cfg={expected_vocab_size}. "
-            "Update cfg.tokenizer.vocab_size to match the loaded tokenizer."
-        )
+    if actual_vocab_size is not None:
+        # Issue #138 / #148 Phase A: allow vocab padding (e.g. Qwen2.5-Coder
+        # tokenizer has 151643 tokens, trained model embeddings are padded to
+        # 152064 = next multiple of 64 for tensor-core efficiency). Reject only
+        # when the cfg vocab is *smaller* than the tokenizer (would index OOB).
+        if actual_vocab_size > expected_vocab_size:
+            raise ValueError(
+                "tokenizer vocab_size mismatch (Issue #138): "
+                f"tokenizer={actual_vocab_size} cfg={expected_vocab_size}. "
+                "cfg.tokenizer.vocab_size must be >= tokenizer.vocab_size."
+            )
+        if actual_vocab_size < expected_vocab_size:
+            _logger.info(
+                "tokenizer vocab_size (%d) < cfg.tokenizer.vocab_size (%d) — "
+                "treating as padded vocab; rows %d..%d are unreachable",
+                actual_vocab_size,
+                expected_vocab_size,
+                actual_vocab_size,
+                expected_vocab_size - 1,
+            )
     if getattr(tokenizer, "pad_token_id", None) is None:
         eos_id = getattr(tokenizer, "eos_token_id", None)
         if eos_id is not None:
