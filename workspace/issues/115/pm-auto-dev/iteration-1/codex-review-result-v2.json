@@ -1,0 +1,26 @@
+{
+  "reviewer": "codex",
+  "issue_number": 115,
+  "review_round": 2,
+  "cb001_resolved": true,
+  "new_findings": [
+    {
+      "id": "CB-002",
+      "severity": "medium",
+      "category": "潜在バグ",
+      "file": "app/photon_app.py",
+      "line": 1615,
+      "title": "同一 photon.yaml を上書きした場合に pipeline cache が stale のまま残る",
+      "description": "今回の修正で _run_query() は photon_config_path を優先して読み、config_path が変わる場合は cache key も変わるため CB-001 は解消されている。一方、Project 登録 wizard は同じ project name に対して常に projects/<name>/photon.yaml へ書き込むため、既存セッションで一度 pipeline を構築した後に同じ path の YAML 内容だけを更新すると _pipeline_cache_key(project_name, config_path) は変わらず、古い pipeline が再利用される。wizard 設定変更直後の chat が古い embedding/retrieval/prompt 関連 config で動く可能性がある。",
+      "suggestion": "Project 保存時に該当 project の pipeline cache を削除する、または cache key に設定ファイルの mtime / content hash を含める。少なくとも同一 photon_config_path の内容更新後に build_pipeline が再実行される regression test を追加する。"
+    }
+  ],
+  "summary": {
+    "critical": 0,
+    "high": 0,
+    "medium": 1,
+    "low": 0,
+    "total": 1
+  },
+  "verdict": "pass"
+}

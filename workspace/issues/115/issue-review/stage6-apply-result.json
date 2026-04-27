@@ -1,0 +1,23 @@
+{
+  "stage": 6,
+  "iteration": 2,
+  "applied_findings": [
+    "S5-001",
+    "S5-002",
+    "S5-003",
+    "S5-004"
+  ],
+  "must_fix_applied": [
+    "S5-001"
+  ],
+  "should_fix_applied": [
+    "S5-002",
+    "S5-003",
+    "S5-004"
+  ],
+  "nice_to_have_applied": [],
+  "github_updated": true,
+  "issue_url": "https://github.com/Kewton/photon-mlx/issues/115",
+  "body_file": "workspace/issues/115/issue-review/stage6-issue-body.md",
+  "summary": "Stage 5 通常レビュー 2回目の Must Fix 1 件 / Should Fix 3 件を Issue #115 本文へ反映。主な変更: (1) 共通 build_messages() への制度文書ヒントを条件付き文面へ修正し、通常 code repo の日本語質問へ条文引用を強制しない受入条件を追加、(2) T-C6 を base_yaml_text の意図的な乖離値から _DOMAIN_TEMPLATES の上書きを検証する要件へ修正、(3) baseline_reporag/tests/test_prompt.py の既存 test class 数を現行 3 class に修正、(4) detect_language() の en 判定閾値を ASCII 英字比率 50% 以上として明記。レビュー履歴に Stage 5 セクションを追加し対応 finding ID を列挙。"
+}
