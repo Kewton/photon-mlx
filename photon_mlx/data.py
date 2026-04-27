@@ -144,10 +144,22 @@ def _load_validated_jsonl(
     *,
     vocab_size: int,
     context_length: int,
+    max_tokens_per_line: int | None = None,
 ) -> list[list[int]]:
-    """DR4-002: load JSONL with per-line size cap and integer-token validation."""
+    """DR4-002: load JSONL with per-line size cap and integer-token validation.
+
+    The legacy ``mulmoclaude/train_multi.jsonl`` corpus contains lines up
+    to ~40K tokens (its docs were never re-chunked to context_length).
+    Issue #135 Day 4 raised the default cap from ``context_length × 4``
+    to ``context_length × 64`` so the existing EN side loads cleanly;
+    the underlying DoS guard is the 2 MiB per-line byte cap, which holds
+    regardless of token-count tuning. Callers can still pass an explicit
+    ``max_tokens_per_line`` when they know their corpus is short.
+    """
     docs: list[list[int]] = []
-    max_tokens = context_length * 4
+    cap = (
+        max_tokens_per_line if max_tokens_per_line is not None else context_length * 64
+    )
     with path.open("rb") as fh:
         for raw in fh:
             if len(raw) > _MAX_LINE_BYTES:
@@ -165,10 +177,9 @@ def _load_validated_jsonl(
                 raise ValueError(
                     f"'tokens' must be a non-empty list, got {type(tokens).__name__}"
                 )
-            if len(tokens) > max_tokens:
+            if len(tokens) > cap:
                 raise ValueError(
-                    f"'tokens' length {len(tokens)} exceeds context_length*4 "
-                    f"({max_tokens}) in {path}"
+                    f"'tokens' length {len(tokens)} exceeds cap {cap} in {path}"
                 )
             for tok in tokens:
                 # JSON has no int/float distinction — reject anything that
