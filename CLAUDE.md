@@ -157,11 +157,18 @@ reports/                # ベンチマークレポート
 
 ## プロダクトライン
 
-- **プロダクトライン**: baseline_rag (Gate 2 v2 判定: No-Go → PHOTON 凍結)
-- **現在のメトリクス** (Gate 2 v4, 出典: `reports/gate2_judgment_v4_final.md`):
-  - Static no-citation: baseline 21.7% / PHOTON 20.0%
-  - MT no-citation: 6.7%
-  - Retrieval noise: 0%
+- **プロダクトライン**: baseline_rag + PHOTON institutional retrain (#135 採用済)
+- **現在のメトリクス** (Gate 2 v6 = #135 Phase 8 採用、出典: `reports/institutional_photon_mt_eval_v2_3k.md`):
+  - **採用 PHOTON checkpoint**: `photon_institutional_retrain_20260428/step_003000` (val_loss=0.4777)
+  - **Turn 5-6 no-citation rate (refusal-aware)**: **0.00%** (MVP < 6% / 理想 < 3% を共に達成)
+  - **Follow-up latency p50**: 12,092 ms (-37.7% vs baseline 19,426 ms)
+  - **Val_loss**: 0.4777 (-70.6% vs mulmoclaude 600-step 1.6238、perplexity 5.07 → 1.61)
+  - 訓練データ: institutional_documents 4,228 docs + mulmoclaude train_multi (JP:0.7/EN:0.3)
+  - エビデンス: `reports/institutional_photon_mt_eval_v2_3k_bug_check.md` (refusal-aware 検証)
+  - 計測 bug: `scripts/run_multi_turn_eval.py` の `is_refusal` 出力欠落は Issue #156 で別途対応
+- **過去メトリクス参考**:
+  - Gate 2 v4 (#113 / mulmoclaude 600-step): Turn 5-6 NC 10.83%, follow-up p50 10,707 ms
+  - Gate 2 v5 (#148 Phase A): institutional baseline 7.78% NC、PHOTON random-init bug 修正
 - **運用ドキュメント**: `docs/deployment.md`, `docs/troubleshooting.md`
 
 ---

@@ -187,7 +187,18 @@ model:
   provider: "photon"
   model_id: "mlx-community/Qwen2.5-Coder-14B-Instruct-4bit"
 
+  # Issue #135 Day 5: 再学習成果物 (累計 step 3000、val_loss 0.4777、
+  # JP corpus 0.7 / EN 0.3 mix で 2400 step 追加学習)。
+  # PHOTON_CHECKPOINT_ROOT=$(pwd)/checkpoints の前提で resolve される。
+  # checkpoint_path 解決後の実体: <root>/photon_institutional_retrain_20260428/step_003000/
+  checkpoint_path: "photon_institutional_retrain_20260428/step_003000"
+
   # PHOTON-specific: 本 Issue baseline では参照されないが、#113 切替時のため継承値を保持。
+  # Issue #148 Phase A.2: num_heads matches mulmoclaude 600-step ckpt (10 × 64 = 640).
+  # 学習時は ModelConfig.num_attention_heads default=10 を使ったが、
+  # _build_photon_deps の cfg.model.get("num_heads", 4) で eval 時 4 にズレるため
+  # yaml で 10 を明示する必要あり。
+  num_heads: 10
   base_embed_dim: 256
   hidden_size: 1024
   intermediate_size: 2816
