@@ -64,15 +64,31 @@ make ask CONFIG=configs/local.small.yaml REPO_ID=<repo> Q="..."
 
 ## 2. baseline と PHOTON を比較したい
 
-### Cookbook 2-1: 同じ質問で 2 condition 比較 (CLI レベル)
+### Cookbook 2-1: 同じ質問で 2 condition 比較 (1 コマンド)
+
+`scripts/compare_baseline_photon.py` を使うと baseline と PHOTON を 1 質問で並べて比較できる:
 
 ```bash
-# baseline
-make ask CONFIG=configs/baseline.yaml REPO_ID=fastapi_fastapi Q="認証処理の入口は？"
-
-# PHOTON
 export PHOTON_CHECKPOINT_ROOT=/path/to/checkpoints
-make ask CONFIG=configs/photon_small.yaml REPO_ID=fastapi_fastapi Q="認証処理の入口は？"
+make compare REPO_ID=fastapi_fastapi Q="認証処理の入口は？"
+```
+
+出力: 各 variant の answer / latency / memory / citation を side-by-side で表示し、最後に
+delta (latency 差分 + パーセント) を要約。
+
+JSON 形式で取り出したい場合:
+```bash
+python scripts/compare_baseline_photon.py --repo-id fastapi_fastapi --question "..." --json
+```
+
+### Cookbook 2-1b: CLI から PHOTON だけ叩きたい
+
+`--use-photon` ショートカットで `configs/photon_small.yaml` を自動選択:
+
+```bash
+make ask-photon REPO_ID=fastapi_fastapi Q="..."
+# 等価:
+# python -m baseline_reporag.cli --use-photon --repo-id fastapi_fastapi --question "..."
 ```
 
 ### Cookbook 2-2: bench で N 件まとめて比較

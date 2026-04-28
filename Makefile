@@ -27,8 +27,9 @@ PYTEST ?= $(PYTHON) -m pytest
 # default ターゲットは help
 .DEFAULT_GOAL := help
 
-.PHONY: help setup ingest indexes graph prepare serve ask cli demo demo-list \
-        eval eval-baseline eval-photon check lint fmt fmt-check test test-fast clean
+.PHONY: help setup ingest indexes graph prepare serve ask ask-photon cli compare \
+        demo demo-list eval eval-baseline eval-photon \
+        check lint fmt fmt-check test test-fast clean
 
 help: ## 全 target を一覧表示
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -77,6 +78,14 @@ ask: ## CLI から 1 問 (Q="..." で質問を渡す)
 	$(PYTHON) -m baseline_reporag.cli --config $(CONFIG) --repo-id $(REPO_ID) --question "$(Q)"
 
 cli: ask ## ask の alias
+
+ask-photon: ## CLI from PHOTON pipeline (--use-photon shortcut)
+	@if [ -z "$(Q)" ]; then echo 'ERROR: Q="質問" を渡してください'; exit 1; fi
+	$(PYTHON) -m baseline_reporag.cli --use-photon --repo-id $(REPO_ID) --question "$(Q)"
+
+compare: ## baseline と PHOTON を 1 質問で並列比較 (Q="..." 必須)
+	@if [ -z "$(Q)" ]; then echo 'ERROR: Q="質問" を渡してください'; exit 1; fi
+	$(PYTHON) scripts/compare_baseline_photon.py --repo-id $(REPO_ID) --question "$(Q)"
 
 # ---------------------------------------------------------------------------
 # Demo scenarios
