@@ -1,0 +1,23 @@
+{
+  "stage": 1,
+  "issue_number": "143",
+  "applied_findings": [
+    "DR1-001",
+    "DR1-002",
+    "DR1-003",
+    "DR1-004",
+    "DR1-005",
+    "DR1-006",
+    "DR1-007",
+    "DR1-008",
+    "DR1-009",
+    "DR1-010",
+    "DR1-011",
+    "DR1-012",
+    "DR1-013"
+  ],
+  "skipped_findings": [],
+  "applied_count": 13,
+  "design_doc_updated": true,
+  "summary": "Stage 1 通常レビュー (設計原則) の 13 findings (Must Fix 3 / Should Fix 7 / Nice to Have 3) を全て設計方針書 workspace/design/issue-143-eval-reproducibility-design-policy.md に反映。主要変更: (1) ADR-11 'seed 注入の重複ロジック' を新設し QwenMLXAdapter / Generator の重複を層分離方針 (B 採択) として明文化 (DR1-001)。(2) ADR-2 末尾に helper SRP 緩和方針 (内部 _validate_run_block 分離) と 例外設計 (TypeError/ValueError 分離) と scripts boilerplate 受容方針 (with_eval_seed 棄却) を追記 (DR1-002 / DR1-008 / DR1-010)。(3) ADR-1 末尾に multi-call seed 戦略 (Qwen fallback 3 箇所 L1030/L1043/L1394 各回 mx.random.seed リセット = 同 token sequence intentional) を追加 (DR1-003)。(4) ADR-1 に C 単独 vs B+C 比較表を追加し B+C 維持を将来性 (#110 系 Protocol) で正当化 (DR1-004)。(5) ADR-6 末尾に aggregator 拡張性段落を追加し if-else + compute_per_run_stats(records, group_field) 共通 helper を方針化 (DR1-005)。(6) ADR-5 / §5 を 3 fields → 2 fields (run_index, run_seed) に絞り run_id は計算で復元 (DR1-006)。(7) §3 / ADR-1 に最終 signature を完全形 (positional 互換 + seed keyword-only) で記載 + Code Review Checklist 追加項目を Task 5 に明記 (DR1-007)。(8) §3.2 cfg.run.* 命名規則段落を新設 (DR1-009)。(9) ADR-9 末尾に YAGNI トレードオフを追記し含める判断を正当化 (DR1-011)。(10) §3 表に EvalJob 行追加 + ADR-8 末尾に YAGNI 注記 (DR1-012)。(11) §9 末尾に Step 5-6 境界の後方互換動作 + 統合選択肢を注釈 (DR1-013)。(12) §7 test cases を独立 8 case に粒度詳細化 (DR1-002 / DR1-008)。"
+}

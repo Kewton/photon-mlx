@@ -1,0 +1,66 @@
+{
+  "reviewer": "codex",
+  "issue_number": 143,
+  "review_focus": [
+    "潜在バグ",
+    "セキュリティ脆弱性"
+  ],
+  "files_reviewed": [
+    "baseline_reporag/eval/run_config.py",
+    "baseline_reporag/tests/test_run_config.py",
+    "evals/tests/test_eval_determinism.py",
+    "tests/test_run_stress_eval.py",
+    "baseline_reporag/generation/generator.py",
+    "baseline_reporag/pipeline.py",
+    "baseline_reporag/photon_pipeline.py",
+    "baseline_reporag/tests/test_pipeline_integration.py",
+    "baseline_reporag/tests/test_photon_pipeline.py",
+    "scripts/run_baseline_eval.py",
+    "scripts/run_multi_turn_eval.py",
+    "scripts/retrieval_grid_search.py",
+    "scripts/run_stress_eval.py",
+    "scripts/compare_generators.py",
+    "tests/test_compare_generators.py",
+    "tests/test_retrieval_grid_search_smoke.py"
+  ],
+  "findings": [
+    {
+      "id": "CB-001",
+      "severity": "high",
+      "category": "潜在バグ",
+      "file": "scripts/run_baseline_eval.py",
+      "line": 31,
+      "title": "static eval runner に --runs と run_index/run_seed 出力が未実装",
+      "description": "設計方針書と work-plan は Task 3/5 で `--runs N` (`1 <= N <= 20`) と predictions JSONL の `run_index` / `run_seed` 出力を要求しているが、現在の `run_baseline_eval.py` は parser に `--runs` を持たず、1 回だけ質問ループを実行し、predictions に run metadata も出していない。このままだと 10-run noise floor や per-run mean/std 集計が実行不能で、Issue #143 の主要受入条件を満たせない。",
+      "suggestion": "`--runs` を bounded validator (`1 <= runs <= 20`) で追加し、外側で `for run_index in range(args.runs)` を回す。各 prediction に `run_index` と `run_seed` を追加し、`run_seed` は `resolve_eval_seed(cfg)` の戻り値を記録する。"
+    },
+    {
+      "id": "CB-002",
+      "severity": "high",
+      "category": "潜在バグ",
+      "file": "scripts/run_multi_turn_eval.py",
+      "line": 32,
+      "title": "multi-turn eval runner に --runs と run_index/run_seed 出力が未実装",
+      "description": "`run_multi_turn_eval.py` も static runner と同様に `--runs` がなく、pred dict に `run_index` / `run_seed` が含まれていない。設計では multi-turn JSONL も static と同じ run metadata を持ち、aggregator の `record_type=multi_turn` で per-run 集計する前提なので、このままでは multi-turn 側だけ pooled/single-run のまま残る。",
+      "suggestion": "`run_baseline_eval.py` と同じ bounded `--runs` 実装を追加し、session/turn の内側 pred に `run_index` と `run_seed` を必ず出力する。summary 側も run ごとの情報が落ちないように per-run summary を追加する。"
+    },
+    {
+      "id": "CB-003",
+      "severity": "medium",
+      "category": "潜在バグ",
+      "file": "baseline_reporag/eval/run_config.py",
+      "line": 117,
+      "title": "deterministic=False でも seed を先に検証してしまう",
+      "description": "work-plan は `deterministic=False` のとき seed 値を無視して `None` を返す契約だが、実装は `_validate_run_block()` で seed を厳密検証してから `if not deterministic` を判定している。そのため `run.deterministic: false` と `run.seed: null` や古い文字列値が同居すると、本来 nondeterministic mode として許容できる設定でも TypeError で起動不能になる。",
+      "suggestion": "`deterministic` の型検証を先に行い、`False` なら seed の型/範囲検証をスキップして `None` を返す。あわせて `deterministic=False` + malformed/null seed のテストを追加し、fail-fast 方針が deterministic=True の seed にだけ適用されることを固定する。"
+    }
+  ],
+  "summary": {
+    "critical": 0,
+    "high": 2,
+    "medium": 1,
+    "low": 0,
+    "total": 3
+  },
+  "verdict": "needs_fix"
+}
