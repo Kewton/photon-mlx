@@ -421,3 +421,81 @@ class TestGraphNoneTypeCompatibility:
         )
         result = pipeline.query("test question", session_id="s1")
         assert result.answer.endswith("[C:1].")
+
+
+# ---------------------------------------------------------------------------
+# Issue #143: seed propagation from pipeline.query into Generator.generate.
+#
+# Contract (work-plan §Step 2.2 / DR3-002):
+# - ``RepoRAGPipeline.query(seed=None)`` (default) MUST call the generator
+#   with the same single-positional-arg shape as before so the existing
+#   17+ MagicMock tests in this file (``mock_gen.generate.return_value =
+#   ...``) keep passing without TypeError on extra kwargs.
+# - ``RepoRAGPipeline.query(seed=42)`` MUST call ``generator.generate``
+#   with ``seed=42`` keyword propagated.
+# ---------------------------------------------------------------------------
+
+
+@patch(
+    "baseline_reporag.pipeline.expand_with_graph",
+    side_effect=_mock_expand_with_graph,
+)
+@patch(
+    "baseline_reporag.pipeline.hybrid_search",
+    side_effect=_mock_hybrid_search,
+)
+class TestSeedPropagation:
+    """RepoRAGPipeline.query forwards the seed kwarg to Generator.generate."""
+
+    def test_query_without_seed_uses_legacy_call_shape(
+        self,
+        mock_search: MagicMock,
+        mock_expand: MagicMock,
+    ) -> None:
+        """``seed=None`` (default) -> generator.generate called WITHOUT seed kwarg.
+
+        Backwards-compat invariant for the 17+ existing MagicMock tests.
+        """
+        mock_gen = MagicMock()
+        mock_gen.generate.return_value = "Answer with [C:1]."
+        pipeline = _build_test_pipeline(generator=mock_gen)
+        pipeline.query("test question", session_id="s1")
+        call = mock_gen.generate.call_args
+        assert "seed" not in call.kwargs, (
+            f"seed kwarg leaked into legacy path: {call.kwargs}"
+        )
+
+    def test_query_with_seed_propagates_to_generator(
+        self,
+        mock_search: MagicMock,
+        mock_expand: MagicMock,
+    ) -> None:
+        """``seed=42`` -> generator.generate(messages, seed=42)."""
+        mock_gen = MagicMock()
+        mock_gen.generate.return_value = "Answer with [C:1]."
+        pipeline = _build_test_pipeline(generator=mock_gen)
+        pipeline.query("test question", session_id="s1", seed=42)
+        call = mock_gen.generate.call_args
+        assert call.kwargs.get("seed") == 42, (
+            f"seed=42 did not propagate; kwargs={call.kwargs}"
+        )
+
+    def test_query_with_seed_zero_propagates(
+        self,
+        mock_search: MagicMock,
+        mock_expand: MagicMock,
+    ) -> None:
+        """``seed=0`` MUST propagate (DR3-002: ``if seed:`` is a silent bug).
+
+        Falsy-but-valid seed: ``if seed:`` would silently drop the call,
+        leaving the eval nondeterministic. The implementation must use
+        ``if seed is not None:``.
+        """
+        mock_gen = MagicMock()
+        mock_gen.generate.return_value = "Answer with [C:1]."
+        pipeline = _build_test_pipeline(generator=mock_gen)
+        pipeline.query("test question", session_id="s1", seed=0)
+        call = mock_gen.generate.call_args
+        assert call.kwargs.get("seed") == 0, (
+            f"seed=0 silently dropped; kwargs={call.kwargs}"
+        )

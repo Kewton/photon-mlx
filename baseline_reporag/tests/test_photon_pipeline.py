@@ -2752,10 +2752,17 @@ def _run_generation_branch_query(
     photon_answer="PHOTON generated [C:1]",
     photon_side_effect=None,
     qwen_answer="Qwen answer [C:1]",
+    seed=None,
 ):
     """Drive PhotonRAGPipeline.query end-to-end with mocked retrieval.
 
     Returns ``(result, baseline_deps, photon_deps, log_payload)``.
+
+    Issue #143: ``seed`` (keyword-only, default ``None``) is forwarded
+    into ``pipeline.query`` so seed-propagation tests can assert that
+    every Qwen-call site (Qwen-only path + 2 fallback paths) receives
+    the seed kwarg.  ``seed=None`` keeps the legacy call shape so
+    pre-#143 tests in this module keep working unchanged.
     """
     from baseline_reporag.ingestion.chunker import Chunk
 
@@ -2804,7 +2811,12 @@ def _run_generation_branch_query(
             return_value=expanded_ids,
         ),
     ):
-        result = pipeline.query("question?", session_id="s1", repo_id="test-repo")
+        if seed is not None:
+            result = pipeline.query(
+                "question?", session_id="s1", repo_id="test-repo", seed=seed
+            )
+        else:
+            result = pipeline.query("question?", session_id="s1", repo_id="test-repo")
 
     log_call = baseline_deps["logger"].log_turn.call_args
     log_payload = log_call.args[0] if log_call.args else log_call.kwargs["entry"]
@@ -4652,3 +4664,103 @@ class TestPhotonPipelineGraphNoneCompatibility:
             )
 
         assert result.answer == "Answer [C:1]"
+
+
+# ---------------------------------------------------------------------------
+# Issue #143: seed propagation through PhotonRAGPipeline.
+#
+# Three Qwen call sites in ``photon_pipeline.py`` need to forward ``seed``:
+# - L1030: Qwen fallback after ``_TokenizerEncodeFailure / ValueError /
+#   RuntimeError`` from PHOTON
+# - L1043: Qwen fallback after empty PHOTON output
+# - L1394: Qwen-only path when ``photon_generation_enabled=False``
+#
+# Backwards compat: ``query(seed=None)`` (default) MUST keep the legacy
+# call shape (no ``seed`` kwarg leaking through) so the 17+ existing
+# MagicMock fallback / Qwen-only tests in this file keep passing.
+# ---------------------------------------------------------------------------
+
+
+class TestPhotonPipelineSeedPropagation:
+    """PhotonRAGPipeline.query forwards ``seed`` into every Qwen call path."""
+
+    def test_qwen_only_path_default_seed_none_uses_legacy_shape(self):
+        """Default seed=None: Qwen-only path keeps legacy single-positional shape.
+
+        Backwards-compat invariant: existing MagicMock tests that did
+        ``mock_gen.generate.return_value = ...`` and never expected a
+        ``seed`` kwarg keep passing.
+        """
+        cfg = _make_photon_gen_cfg(photon_generation_enabled=False)
+        result, baseline_deps, photon_deps, _ = _run_generation_branch_query(cfg)
+        gen_calls = baseline_deps["generator"].generate.call_args_list
+        assert gen_calls, "Qwen generator must have been called once"
+        # No ``seed`` kwarg should have leaked into legacy callers.
+        for call in gen_calls:
+            assert "seed" not in call.kwargs, (
+                f"seed kwarg leaked into legacy Qwen-only path: {call.kwargs}"
+            )
+        assert result.answer == "Qwen answer [C:1]"
+
+    def test_qwen_only_path_propagates_seed(self):
+        """Qwen-only path (photon_generation_enabled=False) forwards seed=42."""
+        cfg = _make_photon_gen_cfg(photon_generation_enabled=False)
+        _, baseline_deps, _, _ = _run_generation_branch_query(cfg, seed=42)
+        gen_calls = baseline_deps["generator"].generate.call_args_list
+        assert gen_calls, "Qwen generator must have been called once"
+        # All Qwen-only calls must propagate seed=42.
+        for call in gen_calls:
+            assert call.kwargs.get("seed") == 42, (
+                f"seed=42 did not reach Qwen-only path; kwargs={call.kwargs}"
+            )
+
+    def test_qwen_fallback_after_value_error_propagates_seed(self):
+        """PHOTON ValueError → Qwen fallback (L1030) MUST forward seed=42."""
+        cfg = _make_photon_gen_cfg(photon_generation_enabled=True)
+        _, baseline_deps, _, _ = _run_generation_branch_query(
+            cfg,
+            photon_side_effect=ValueError("length guard"),
+            seed=42,
+        )
+        gen_calls = baseline_deps["generator"].generate.call_args_list
+        assert gen_calls, "Qwen fallback must have been called"
+        for call in gen_calls:
+            assert call.kwargs.get("seed") == 42, (
+                f"seed=42 did not reach exception-fallback Qwen path; "
+                f"kwargs={call.kwargs}"
+            )
+
+    def test_qwen_fallback_after_empty_photon_propagates_seed(self):
+        """PHOTON empty output → Qwen fallback (L1043) MUST forward seed=42."""
+        cfg = _make_photon_gen_cfg(photon_generation_enabled=True)
+        _, baseline_deps, _, _ = _run_generation_branch_query(
+            cfg,
+            photon_answer="   ",
+            seed=42,
+        )
+        gen_calls = baseline_deps["generator"].generate.call_args_list
+        assert gen_calls, "Qwen fallback must have been called for empty PHOTON output"
+        for call in gen_calls:
+            assert call.kwargs.get("seed") == 42, (
+                f"seed=42 did not reach empty-output fallback Qwen path; "
+                f"kwargs={call.kwargs}"
+            )
+
+    def test_qwen_fallback_seed_zero_propagates(self):
+        """seed=0 must propagate through the fallback path (DR3-002).
+
+        ``if seed:`` would silently drop 0, leaving the eval
+        nondeterministic. The implementation must use
+        ``if seed is not None:``.
+        """
+        cfg = _make_photon_gen_cfg(photon_generation_enabled=True)
+        _, baseline_deps, _, _ = _run_generation_branch_query(
+            cfg,
+            photon_side_effect=RuntimeError("oom"),
+            seed=0,
+        )
+        gen_calls = baseline_deps["generator"].generate.call_args_list
+        for call in gen_calls:
+            assert call.kwargs.get("seed") == 0, (
+                f"seed=0 silently dropped; kwargs={call.kwargs}"
+            )
