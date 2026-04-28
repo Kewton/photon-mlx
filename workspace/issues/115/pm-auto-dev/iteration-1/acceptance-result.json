@@ -1,0 +1,121 @@
+{
+  "issue_number": 115,
+  "verified_at": "2026-04-27",
+  "acceptance_criteria": [
+    {
+      "id": 1,
+      "title": "wizard で institutional_docs を選択すると適切な YAML が生成される",
+      "status": "pass",
+      "evidence": "app/photon_app.py:1234-1242 selectbox に 'institutional_docs' オプションが追加 (line 1240, '# Issue #115' コメント付き)。app/components/wizard.py:316-319 で base_profile=='institutional_docs' のときに _DOMAIN_TEMPLATES merge が実行される。tests/test_photon_app_components.py::TestDomainTemplatesInstitutional::test_institutional_docs_template_merges_3_keys が PASS。Streamlit UI 経由の手動 UAT は未実施だが、helper レベル (validate_generated_repo_id + generate_yaml_from_wizard) で十分担保されている。",
+      "notes": "Streamlit selectbox の選択 → 保存フローの end-to-end は手動 UAT 推奨 (test pyramid: pure helper は automated test, streamlit glue は manual UAT)。"
+    },
+    {
+      "id": 2,
+      "title": "best-practice merge が domain 別に動作 (base_profile=institutional_docs 限定)",
+      "status": "pass",
+      "evidence": "app/components/wizard.py:316-319 で `template = _DOMAIN_TEMPLATES.get(base_profile)` により base_profile が template name と一致した場合のみ merge。tests/test_photon_app_components.py::TestDomainTemplatesInstitutional::test_domain_template_no_op_on_other_profiles が PASS — photon_small base_profile では institutional template が effect しないことを確認。",
+      "notes": "設計判断 #1 (DR-S3-002 方針 b) を厳密に実装、index 整合性が担保される。"
+    },
+    {
+      "id": 3,
+      "title": "_DOMAIN_TEMPLATES['institutional_docs'] の値が source of truth (configs/institutional_docs.yaml) と一致",
+      "status": "pass",
+      "evidence": "tests/test_photon_app_components.py::TestDomainTemplatesInstitutional::test_domain_template_matches_institutional_yaml が PASS — yaml.safe_load で institutional_docs.yaml を直接 parse し、template の各 path tuple について完全一致を assert (DR1-001 / DR2-002)。pin 定数を経由しないため #133 採用前後どちらでも CI guard が機能。configs/institutional_docs.yaml:84 (multilingual-e5-small)、:90 (symbol_graph.enabled=false)、:107 (cross-encoder/ms-marco-MiniLM-L-6-v2) と一致。",
+      "notes": "pre-#137 (3-key) 形式で実装。#137 が先に merge されていないことを確認済み。"
+    },
+    {
+      "id": 4,
+      "title": "日本語質問で条件付き prompt hints が付与される",
+      "status": "pass",
+      "evidence": "baseline_reporag/generation/prompt.py:221-227 で _JP_INSTITUTIONAL_HINT 定義 (3 行の条件付きヒント)。:230-240 で _resolve_system_prompt() が detect_language=='ja' のときのみ _SYSTEM + _JP_INSTITUTIONAL_HINT を返す。test_prompt.py::TestBuildMessagesLanguageBranching::test_japanese_question_system_prompt_includes_jp_hint が PASS。",
+      "notes": "DR1-006 に従い substring assert (\"制度文書を根拠に回答する場合は\") を採用、private 命名維持。"
+    },
+    {
+      "id": 5,
+      "title": "日本語/英語代表 5 件ずつ + edge case で detect_language() が正しく分類",
+      "status": "pass",
+      "evidence": "test_prompt.py::TestDetectLanguage に @pytest.mark.parametrize 形式で ja 5 件 (純日本語 / ひらがな / カタカナ / 漢字 / 英日混在) と en 5 件 (FastAPI / auth / config / pipeline / endpoint) + edge case 5 件 (空文字 / 空白のみ / 記号のみ / 絵文字のみ / 数字のみ) をカバー。全 15 test PASS。",
+      "notes": "tdd-result.json では count=15 と申告、実測も合致 (5 ja + 5 en + 5 edge)。"
+    },
+    {
+      "id": 6,
+      "title": "空白のみ入力で other を返し ZeroDivisionError 起こさない",
+      "status": "pass",
+      "evidence": "baseline_reporag/generation/prompt.py:62-64 で `if non_space_len == 0: return 'other'` の早期 return が ja 判定後に挟まれる (実装 docstring にも DR1-002 / ZeroDivisionError 回避を明記)。test_prompt.py::TestDetectLanguage::test_whitespace_only_returns_other_no_zero_division が PASS。",
+      "notes": "S7-002 対応の guard が実装に反映されている。"
+    },
+    {
+      "id": 7,
+      "title": "英語質問で build_messages() が現状と完全一致 (golden snapshot)",
+      "status": "pass",
+      "evidence": "test_prompt.py::TestBuildMessagesLanguageBranching::test_english_question_system_prompt_is_unchanged が PASS — `assert msgs[0]['content'] == _SYSTEM` で完全一致を assert。English question では _JP_INSTITUTIONAL_HINT が付与されない golden snapshot が成立。",
+      "notes": "回帰検証として canonical _SYSTEM そのものとの byte-level 一致を担保。"
+    },
+    {
+      "id": 8,
+      "title": "日本語の非制度文書質問で条文番号引用を無条件強制しない",
+      "status": "pass",
+      "evidence": "baseline_reporag/generation/prompt.py:221-227 で _JP_INSTITUTIONAL_HINT が条件節「制度文書を根拠に回答する場合は」を冒頭に持つ (S5-001 対応)。test_prompt.py::TestBuildMessagesLanguageBranching::test_japanese_hint_uses_conditional_phrasing が PASS — 「この関数の使い方を教えてください」(コード関連の日本語質問) でも条件節「制度文書を根拠に回答する場合は」「可能な範囲で条文番号」が含まれることを assert (LLM に判断委譲)。",
+      "notes": "条件節の文言で非制度文書日本語質問への影響を回避する設計判断 #2 が test 化されている。"
+    },
+    {
+      "id": 9,
+      "title": "PHOTON follow-up (include_few_shot=False) でも日本語ヒント維持",
+      "status": "pass",
+      "evidence": "baseline_reporag/tests/test_photon_pipeline.py::TestBuildMessagesJapaneseFollowUp::test_japanese_hint_preserved_with_include_few_shot_false が PASS — `build_messages(question='制度文書の第3条…', evidence_text=..., session_summary='[PHOTON] previous turn discussed 第2条', include_few_shot=False)` を呼び、戻り値の system message に「制度文書を根拠に回答する場合は」が含まれることを assert。実装側でも _resolve_system_prompt() が include_few_shot とは独立に呼ばれる構造になっている (prompt.py:265)。",
+      "notes": "S3-006 / S7-003 の受入条件を直接 test で担保。"
+    },
+    {
+      "id": 10,
+      "title": "build_messages() シグネチャ不変 (callsite 修正不要)",
+      "status": "pass",
+      "evidence": "baseline_reporag/generation/prompt.py:243-249 のシグネチャは `(question, evidence_text, history_text='', session_summary='', include_few_shot=True)` で変更なし。pipeline.py:201-205 (question / evidence_text / history_text のみ keyword 渡し)、photon_pipeline.py:1005-1010 (question / evidence_text / history_text / include_few_shot) ともに既存 keyword 引数のみで呼び出し可能。両 callsite に変更ゼロ。",
+      "notes": "S3-004 方針 (b) に従い detect_language() は build_messages 内部で呼ばれる。"
+    },
+    {
+      "id": 11,
+      "title": "test_prompt.py 既存 3 test class 改変なしで pass",
+      "status": "pass",
+      "evidence": "TestBuildMessages (3 test) / TestFormatHintFewShot (4 test) / TestFlattenMessagesForPlainLM (4 test) は test_prompt.py:16-76 と :207-317 にあり、Issue #115 の追加 (新規 3 test class) と並列に存在。`python -m pytest baseline_reporag/tests/test_prompt.py -v` で全 11 test PASS (test_few_shot_examples_count=7 / test_format_hint_token_budget<=6000 chars 含む)。",
+      "notes": "_FORMAT_HINT / _FEW_SHOT_EXAMPLES / flatten_messages_for_plain_lm は touched せず。"
+    },
+    {
+      "id": 12,
+      "title": "T-C6 拡張 test pass (test_institutional_docs_template_merges_3_keys + test_domain_template_no_op_on_other_profiles)",
+      "status": "pass",
+      "evidence": "tests/test_photon_app_components.py::TestDomainTemplatesInstitutional クラスに 3 test (3_keys merge / no_op_on_other / matches_institutional_yaml) が追加済。3 test とも PASS。test_institutional_docs_template_merges_3_keys は base_yaml_text に意図的に WRONG/embedding 等の異なる値を embed → _DOMAIN_TEMPLATES の値で上書きされることを assert (S5-002 / DR2-009 対応)。",
+      "notes": "T-C6 既存 5 test は不変 (line 728-784)。新規 test の追加のみ。"
+    },
+    {
+      "id": 13,
+      "title": "test_domain_template_matches_institutional_yaml で yaml 直接 parse 一致 assert (DR1-001 / DR2-002)",
+      "status": "pass",
+      "evidence": "tests/test_photon_app_components.py:862-883 で yaml.safe_load(configs/institutional_docs.yaml) を直接 parse し、_DOMAIN_TEMPLATES['institutional_docs'] の各 (path, expected) について dict path traversal で完全一致を assert。pin 定数 (INSTITUTIONAL_*) を経由しないため #133 採用前後どちらでも CI guard が常時有効。",
+      "notes": "DR2-002 確定の配置先 (test_photon_app_components.py) と比較方法 (yaml 直接 parse) を厳密に踏襲。"
+    },
+    {
+      "id": 14,
+      "title": "ruff check / pytest 全パス",
+      "status": "pass",
+      "evidence": "`ruff check .` → 'All checks passed!' (warning 0)。`ruff format --check .` → '147 files already formatted' (差分なし)。`python -m pytest baseline_reporag/tests/ tests/ -v` → 621 passed / 2 failed / 2 skipped。failed 2 件は既知の pre-existing failure (tests/test_generate_training_corpus.py の test_main_cli_tokenizer_id / test_main_uses_tokenize_text) で CLAUDE.md §品質チェック節 ('残り 2 件は既知の pre-existing failure') 対象外。Issue #115 由来の test fail は 0 件。",
+      "notes": "issue 受入条件 §10 の '#115 由来 test 0 件 fail' を満たす。"
+    }
+  ],
+  "test_summary": {
+    "total": 625,
+    "passed": 621,
+    "failed": 2,
+    "skipped": 2,
+    "pre_existing_failures_excluded": 2,
+    "issue_115_failures": 0
+  },
+  "ruff_check_passed": true,
+  "ruff_format_passed": true,
+  "overall_verdict": "pass",
+  "blockers": [],
+  "follow_up_items": [
+    "CB-002 (codex review v2): 同一 photon.yaml 上書き後の pipeline cache key が stale のまま再利用される可能性 — Phase 4 / 別 Issue で pipeline cache key に config mtime/hash を含める検討。本 Issue scope 外 (wizard YAML 生成と prompt 調整に集中) のため acceptance には影響しない。",
+    "Streamlit UI を起動した手動 UAT (institutional_docs 選択 → 保存 → CLI 疎通) — Task 1.8 として作業計画に明記されているが、本 acceptance テストでは実施していない (helper レベルで担保)。",
+    "#137 (institutional retrieval A/B) merge 後の _DOMAIN_TEMPLATES 5-key 化 (BAAI/bge-m3 / bge-reranker-v2-m3 / batch_size=32 / max_input_chars=8192) — DR1-003 確定運用ルールに従い follow-up Issue で対応。test_domain_template_matches_institutional_yaml が yaml 直接 parse のため drift 検知は CI で自動。"
+  ]
+}

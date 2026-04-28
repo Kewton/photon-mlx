@@ -1,0 +1,20 @@
+{
+  "issue_number": 148,
+  "issue_title": "test(eval): re-establish true baseline — fixed PHOTON pipeline + new LLM upgrade (Qwen3.5-9B / Gemma4-26B)",
+  "focus_area": "通常",
+  "iteration": 1,
+  "stage": 1,
+  "stage_name": "通常レビュー（1回目）",
+  "reviewer_model": "claude-opus",
+  "hypothesis_verification_path": "workspace/issues/148/issue-review/hypothesis-verification.md",
+  "original_issue_path": "workspace/issues/148/issue-review/original-issue.json",
+  "review_focus": [
+    "Issue 記述の整合性 (前提・ゴール・受入条件の論理整合)",
+    "コードベース/ドキュメントとの整合性",
+    "受入条件の検証可能性 (測定可能・観測可能か)",
+    "技術的正確性 (model_id, config 構造, ファイルパス等)",
+    "曖昧な記述/未定義の前提条件",
+    "Phase 分割の妥当性 (依存関係、並列性記述の整合性)"
+  ],
+  "output_path": "workspace/issues/148/issue-review/stage1-review-result.json"
+}

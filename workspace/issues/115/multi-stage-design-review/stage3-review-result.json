@@ -1,0 +1,45 @@
+{
+  "stage": 3,
+  "focus": "影響範囲",
+  "reviewer": "codex",
+  "reviewed_at": "2026-04-27",
+  "summary": "設計の主要影響範囲は概ね整理済み。ただし wizard 生成 YAML と Project repo_id の整合、_resolve_system_prompt の実装例、#135/#139 とのテスト衝突を補強すべき。",
+  "findings": [
+    {
+      "id": "DR3-001",
+      "severity": "Must Fix",
+      "category": "運用/runtime",
+      "title": "wizard 生成 YAML の `cfg.repo.repo_id` と Project の選択 `repo_id` が不一致になり得る",
+      "description": "Streamlit Project 登録ではユーザが `repo_id` を selectbox で選び、その値が `Project.repo_id` と eval job の `--repo-id` に使われる。一方、wizard は `generate_yaml_from_wizard(wiz_base_profile, user_toggles)` を呼ぶだけで、生成 YAML 内の `repo.repo_id` は base profile の値のまま残る。`institutional_docs` を選ぶと YAML 内は `institutional_documents` になるが、Project 側で別 repo_id を選んでいても現設計では検知しない。評価スクリプトは `repo_id = args.repo_id or cfg.repo.repo_id` を持つ一方、`build_pipeline(cfg)` は cfg 側の repo_id で index を load するため、index load と query の repo_id が食い違う可能性がある。",
+      "evidence": "app/photon_app.py:1192-1195,1361-1364,1388-1392 / scripts/run_baseline_eval.py:40-46,89-92 / scripts/run_multi_turn_eval.py:41-47,88-91 / baseline_reporag/pipeline_factory.py:112-114 / 設計書 §3-1, §4, §8",
+      "recommendation": "設計書に repo_id 整合ルールを追加する。`wiz_base_profile=\"institutional_docs\"` の場合は、生成 YAML の `repo.repo_id` と Project 選択 `repo_id` が一致することを `app/photon_app.py` 側で validation し、不一致なら保存せず `st.error` を出す。受入条件と T-C6/Streamlit helper test に『mismatch を拒否する』検証を追加する。"
+    },
+    {
+      "id": "DR3-002",
+      "severity": "Should Fix",
+      "category": "テスト/API互換",
+      "title": "`_resolve_system_prompt()` helper 方針と `build_messages()` サンプル実装が一致していない",
+      "description": "Stage 1/2 反映で `_resolve_system_prompt(question: str) -> str` を切り出し、`TestResolveSystemPrompt` で helper 単体 test を追加する方針になっている。しかし §3-2 の `build_messages()` サンプルは依然として `detect_language(question)` を直接呼んで `_SYSTEM + _JP_INSTITUTIONAL_HINT` を作っており、helper を使っていない。このまま実装者がサンプルを写すと helper が未実装または未使用になり、§3-3 の test pyramid と矛盾する。",
+      "evidence": "設計書 §3-2 DR1-005 helper 方針、§3-2 build_messages サンプル、§3-3 TestResolveSystemPrompt",
+      "recommendation": "§3-2 に `_resolve_system_prompt()` の実装例を明示し、`build_messages()` サンプルを `system_content = _resolve_system_prompt(question)` に差し替える。"
+    },
+    {
+      "id": "DR3-003",
+      "severity": "Should Fix",
+      "category": "並列開発",
+      "title": "#135/#139 が `photon_pipeline.py` と `test_photon_pipeline.py` を触る影響が未記載",
+      "description": "設計書は #133/#137 との config 衝突を詳しく扱っているが、レビュー観点に含まれる #135/#139 については影響分析がない。ローカルの並行ブランチでは #135 と #139 が `baseline_reporag/photon_pipeline.py` と `baseline_reporag/tests/test_photon_pipeline.py` を変更しており、本 Issue が追加する `TestBuildMessagesJapaneseFollowUp` と同じテストファイルで衝突・rebase 手戻りが発生し得る。callsite シグネチャ不変なので runtime 競合は限定的だが、テスト配置と rebase 順序は明示した方がよい。",
+      "evidence": "`git diff --name-only HEAD...feature/issue-135-photon-retrain` と `HEAD...feature/issue-139-stub-audit` に `baseline_reporag/photon_pipeline.py` / `baseline_reporag/tests/test_photon_pipeline.py` が含まれる。設計書 §8 は #137 のみ。",
+      "recommendation": "リスク表または並列開発メモに、#135/#139 は PHOTON pipeline と同テストファイルを触るため rebase 時に `TestBuildMessagesSessionSummary` 周辺へ test を追加し直し、`pytest baseline_reporag/tests/test_photon_pipeline.py` を単独実行する、と明記する。"
+    }
+  ],
+  "must_fix_count": 1,
+  "should_fix_count": 2,
+  "nice_to_have_count": 0,
+  "good_points": [
+    "safe_recgen / evidence pruning / session memory については wizard toggle 既存経路を維持しており、新規 domain template と責務分離できている",
+    "`detect_language()` の入力を question のみに限定しており、PHOTON multi-turn の history/evidence 長に比例したランタイム増を避けられている",
+    "既存 test class を改変しない方針と golden snapshot test により、英語 prompt の後方互換性を検証しやすい",
+    "#137 の pre/post 採用値と CI guard の関係は Stage 2 反映でかなり明確化されている"
+  ]
+}

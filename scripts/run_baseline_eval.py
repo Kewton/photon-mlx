@@ -17,6 +17,11 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from baseline_reporag.config import load_config
 
+# Issue #143 / Step 3: eval scripts resolve ``cfg.run.seed`` /
+# ``cfg.run.deterministic`` and forward the resolved seed into
+# ``pipeline.query`` so MLX-LM sampling is deterministic across runs.
+from baseline_reporag.eval.run_config import resolve_eval_seed
+
 # CB-004 (codex-fix): lightweight factory import — baseline-only envs no
 # longer have to install MLX to run this evaluation script.
 from baseline_reporag.pipeline_factory import build_pipeline
@@ -39,6 +44,19 @@ def main() -> None:
 
     cfg = load_config(args.config)
     repo_id = args.repo_id or cfg.repo.repo_id
+    # Issue #143 / Step 3: ``--repo-id`` silent bug fix.  The factory
+    # below loads the index at ``data/indexes/{cfg.repo.repo_id}``, so
+    # we MUST mutate ``cfg.repo.repo_id`` *before* ``build_pipeline``
+    # runs — otherwise the index of the YAML default repo loads while
+    # ``pipeline.query(repo_id=...)`` filters for the requested repo,
+    # silently producing empty retrieval.  ``run_multi_turn_eval.py``
+    # already does this; ``run_baseline_eval.py`` was missing the
+    # mirroring fix until now.
+    cfg.repo.repo_id = repo_id
+
+    # Resolve the eval seed once per run.  The resolver fails fast on
+    # malformed ``cfg.run`` blocks (YAML bool / str / out-of-range int).
+    seed = resolve_eval_seed(cfg)
 
     # Route via ``build_pipeline`` so PHOTON / baseline providers both
     # receive a fully-wired pipeline and so evaluation runs observe
@@ -89,6 +107,7 @@ def main() -> None:
                 question=q["question"],
                 session_id=f"eval-{q['id']}",
                 repo_id=repo_id,
+                seed=seed,
             )
             pred = {
                 "eval_id": q["id"],

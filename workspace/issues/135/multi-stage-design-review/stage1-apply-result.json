@@ -1,0 +1,75 @@
+{
+  "stage": 1,
+  "applied_count": 11,
+  "skipped_count": 0,
+  "applied": [
+    {
+      "finding_id": "DR1-001",
+      "applied": true,
+      "section": "§4 / §6.6 / §8",
+      "summary": "generate_institutional_training_corpus.py の 8 責務を 3 関数 (build_sessions / verify_corpus / main) + _corpus_core.validate_eval_overlap に分割。§4 レイヤー責務表に 3 行で展開、§6 に新サブセクション §6.6 を追加し関数 signature 案 (Session / CorpusReport dataclass + 3 関数) を提示、§8 unit test 行を LLM 非依存テストの 5-7 件に再構成。"
+    },
+    {
+      "finding_id": "DR1-002",
+      "applied": true,
+      "section": "§3.1 / §3.2 / §4 / §6.5 / §10",
+      "summary": "photon_mlx/checkpoint.py を新規軽量 module として §3.1 アーキ図 / §3.2 / §4 / §10 影響範囲表に追加。_build_photon_deps の import を photon_mlx.trainer から photon_mlx.checkpoint に切り替え、§6.5 末尾に境界規約 (baseline → photon_mlx の inference 専用 module 5 つ {model, inference, session, safe_recgen, checkpoint} のみ許可、trainer.py の引き込み禁止) を明文化。trainer.py 側は from .checkpoint import load_checkpoint で再 export。"
+    },
+    {
+      "finding_id": "DR1-003",
+      "applied": true,
+      "section": "§6.2 / §6.3 / §11",
+      "summary": "iterate_mixed_batches API 契約と TrainingConfig.__post_init__ を strict ValueError ルール (sum=1.0 ±1e-6 / weight > 0 / dict 非空) に統一。silent normalize / warning fallback を明示的に禁止。path 解決規則を 'YAML load 時に YAML ファイルディレクトリ基準で絶対化、iterate_mixed_batches は再解決しない' と §6.2 docstring に明文化。§11 リスク表に silent-normalize 禁止行を追加。"
+    },
+    {
+      "finding_id": "DR1-004",
+      "applied": true,
+      "section": "§4 / §10",
+      "summary": "既存 scripts/generate_training_corpus.py を本 Issue では触らず legacy 並存を選択し、follow-up Issue を Day 5 中に必ず起票するルールを §4 / §10 に明記 (mulmoclaude corpus 再生成 diff 0 回帰テスト追加が follow-up Issue のスコープ)。曖昧な並存放置を防止。"
+    },
+    {
+      "finding_id": "DR1-005",
+      "applied": true,
+      "section": "§3.1 図 / §4 / §6.3 / §6.4 / §8",
+      "summary": "val_corpora_mix dict を廃止し val_split: float = 0.05 で train pool 内 sequence-level split に簡素化。trainer.py 分岐は 4 通り (train mix/single × val mix/single) から 2 通り (train mix/single) に削減。§8 test 件数も TrainingConfig 4 件 → 3-4 件 / iterate_mixed_batches 5-7 件 → 5-6 件に削減反映。"
+    },
+    {
+      "finding_id": "DR1-006",
+      "applied": true,
+      "section": "§6.2 / §11",
+      "summary": "iterate_mixed_batches は list[mx.array] 戻り (S3-001 既存 callsite 不変原則を最優先) を維持。§6.2 docstring に memory 試算 (5,000 sessions × ~4K tokens × bf16 ≈ 40 MB / 全体 < 1 GB 想定) を追記し、Day 3 lr-finder で 3 GB 超 peak RSS を観測した場合に Iterator[mx.array] へ切替する fallback path を §11 リスク表に追加。"
+    },
+    {
+      "finding_id": "DR1-007",
+      "applied": true,
+      "section": "§2.2 / §6.1 / §6.2 / §8 / §9",
+      "summary": "JP/EN ratio を sequence-level (制御目標、target = 0.5 exact、ε≤2pp) と token-level (実測値、≥ 50%±5pp) の 2 metric に分離。§2.2 成功条件表に 2 行、§6.1 metadata.json に jp_sequence_ratio / jp_token_ratio 両方を記録、§6.2 docstring と §8 test 行と §9 受入条件 #2 にも反映。"
+    },
+    {
+      "finding_id": "DR1-008",
+      "applied": true,
+      "section": "§5 設計判断 #2 / §4 / §10",
+      "summary": "累計 step 表記 (option a) を維持しつつ、reports/institutional_photon_mt_eval_v2.md の checkpoint metadata 列に resume_base_step / additional_updates / cumulative_step の 3 列を必ず含める強制ルールを §5 / §4 / §10 で明記。例外発動条件 (max_steps=10600 で step_010600 表記に切替) も明文化し、本 Issue では発動しない方針を確定。"
+    },
+    {
+      "finding_id": "DR1-009",
+      "applied": true,
+      "section": "§4 / §6.1 metadata schema / §11",
+      "summary": "失敗カテゴリを 4 種 (api_error / json_parse_error / scenario_misclassified / token_overflow) に列挙。5% 閾値は LLM 不可避な失敗 = api_error + json_parse_error の和のみで計算。scenario_misclassified は scenario 別 retry / token_overflow は事前 truncate で対処。metadata.json に n_sessions_requested / n_sessions_succeeded / failure_breakdown の 3 項目を追加。閾値超過で abort、以下なら達成数で続行可。"
+    },
+    {
+      "finding_id": "DR1-010",
+      "applied": true,
+      "section": "§11 リスク表 (S7-006 行)",
+      "summary": "compute order-of-magnitude check を S7-006 リスク行に追記。M3 Ultra で 3-6 sec/step 仮定 → 累計 20K step = 17-33 GPU-hours ≈ 0.7-1.4 日 / 10K step = 8.5-17h ≈ 0.4-0.7 日。設計工数 3-5 日のうち学習は 1-2 日想定、残りデータ準備 / eval / report に割当。Day 3 lr-finder で原理計算との乖離 (≥ 2x) を再見積り条件として明文化。"
+    },
+    {
+      "finding_id": "DR1-011",
+      "applied": true,
+      "section": "§5 設計判断 #7",
+      "summary": "tests/test_institutional_yaml_diff.py で 2 yaml の model.{name, generation, photon} セクション同等性を assert する案を follow-up Issue として Day 5 中に起票するルールを §5 設計判断 #7 末尾に追記。本 Issue 内では実装しない (再現性最優先)。"
+    }
+  ],
+  "skipped": [],
+  "design_policy_updated": true
+}

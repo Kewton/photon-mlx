@@ -1,0 +1,14 @@
+{
+  "stage": 4,
+  "reviewer": "codex",
+  "issue_number": "143",
+  "applied_findings": [
+    "DR4-001",
+    "DR4-002",
+    "DR4-003"
+  ],
+  "skipped_findings": [],
+  "applied_count": 3,
+  "design_doc_updated": true,
+  "summary": "設計方針書のみ更新。run.seed は `type(seed) is int` で厳密判定し bool/NaN/float/str を拒否する方針、`--runs` は `1 <= runs <= 20` の bounded validator、CLI path は trusted operator 境界で扱い Streamlit は make_eval_paths() confined path のみを渡す方針を §4/§6/§7/§9-§12 に反映した。"
+}

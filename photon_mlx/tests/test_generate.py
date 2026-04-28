@@ -20,8 +20,15 @@ from photon_mlx.inference import PhotonInference, _TokenizerEncodeFailure
 from photon_mlx.model import PhotonModel
 
 
+# Issue #140 / DR4-002: random-init PhotonModel has high embedding σ; this
+# finite-large threshold keeps test runs WARNING-quiet without skipping the
+# production validation branch (``float('inf')`` would be rejected by
+# ModelConfig.__post_init__).
+TEST_EMBEDDING_RANDOM_INIT_THRESHOLD = 1e9
+
+
 def _tiny_cfg() -> PhotonConfig:
-    return PhotonConfig(
+    cfg = PhotonConfig(
         model=ModelConfig(
             base_embed_dim=16,
             hidden_size=64,
@@ -40,6 +47,8 @@ def _tiny_cfg() -> PhotonConfig:
         ),
         tokenizer=TokenizerConfig(vocab_size=256),
     )
+    cfg.model.embedding_random_init_threshold = TEST_EMBEDDING_RANDOM_INIT_THRESHOLD
+    return cfg
 
 
 @pytest.fixture

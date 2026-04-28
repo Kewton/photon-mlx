@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from baseline_reporag.citation import resolve_citations
+from baseline_reporag.citation import is_refusal_answer, resolve_citations
 from baseline_reporag.generation.evidence_pack import EvidencePack
 from baseline_reporag.ingestion.chunker import Chunk
 
@@ -84,3 +84,62 @@ class TestEchoBackResistance:
         result = resolve_citations(answer, pack)
         assert set(result.cited_chunk_ids) == {"chunk_0", "chunk_1"}
         assert result.no_citation is False
+
+
+# Issue #154 Bug 2: refusal detection -------------------------------------
+
+
+class TestIsRefusalAnswer:
+    """is_refusal_answer は形式的な [C:N] と無関係に「根拠なし」回答を検出する。"""
+
+    def test_detects_abstain_marker(self) -> None:
+        assert is_refusal_answer("根拠が不足しています。詳細不明。") is True
+
+    def test_detects_marker_followed_by_citation(self) -> None:
+        # The bug: baseline writes refusal + [C:1] and used to be counted as cited
+        assert (
+            is_refusal_answer(
+                "根拠が不足しています。提供されたコードチャンクには情報がありません [C:1]"
+            )
+            is True
+        )
+
+    def test_detects_short_refusal(self) -> None:
+        assert is_refusal_answer("根拠不足。") is True
+
+    def test_detects_jouhou_ga_arimasen(self) -> None:
+        assert is_refusal_answer("該当する情報がありません。") is True
+
+    def test_normal_answer_is_not_refusal(self) -> None:
+        assert (
+            is_refusal_answer("The router is registered in fastapi/cli.py [C:1]")
+            is False
+        )
+
+    def test_empty_string_is_not_refusal(self) -> None:
+        assert is_refusal_answer("") is False
+
+
+class TestResolveCitationsRefusalFlag:
+    """resolve_citations は CitationResult.is_refusal を埋める。"""
+
+    def test_refusal_with_citation_marks_is_refusal(self) -> None:
+        pack = _make_pack(3)
+        answer = "根拠が不足しています。提供されたコードチャンクからは特定不能 [C:1]"
+        result = resolve_citations(answer, pack)
+        assert result.is_refusal is True
+        # 既存挙動の互換性: 形式的な [C:1] は no_citation=False のまま
+        assert result.no_citation is False
+
+    def test_refusal_without_citation(self) -> None:
+        pack = _make_pack(3)
+        answer = "根拠が不足しています。"
+        result = resolve_citations(answer, pack)
+        assert result.is_refusal is True
+        assert result.no_citation is True
+
+    def test_normal_answer_not_refusal(self) -> None:
+        pack = _make_pack(3)
+        answer = "The function is in [C:1]."
+        result = resolve_citations(answer, pack)
+        assert result.is_refusal is False

@@ -1,0 +1,46 @@
+{
+  "reviewer": "codex",
+  "issue_number": 139,
+  "review_focus": [
+    "潜在バグ",
+    "セキュリティ脆弱性"
+  ],
+  "files_reviewed": [
+    "baseline_reporag/photon_pipeline.py",
+    "baseline_reporag/tests/test_photon_pipeline.py",
+    "docs/troubleshooting.md",
+    "photon_mlx/tests/conftest.py",
+    "tests/test_pipeline_factory_yaml_invariants.py",
+    "tests/test_no_scaffolding_in_prod.py"
+  ],
+  "findings": [
+    {
+      "id": "CB-001",
+      "severity": "high",
+      "category": "セキュリティ脆弱性",
+      "file": "baseline_reporag/photon_pipeline.py",
+      "line": 453,
+      "title": "tokenizer_id allowlist が traversal-like repo id を許可している",
+      "description": "_TOKENIZER_ID_PATTERN は ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ のみを見ているため、../model や org/.. のような dot-only component、.cache/model のような leading-dot component、極端に長い repo id が通過する。transformers.AutoTokenizer.from_pretrained は Hugging Face repo id だけでなく local path も受けるため、yaml 由来の untrusted input としては traversal/local-path 誤解釈や log/message 膨張を防ぎ切れていない。既存 test も ../../etc/passwd は見るが ../model / org/.. / .cache/model をカバーしていない。",
+      "suggestion": "regex だけでなく component validation を追加し、org/name の各 component が '.' または '..' ではないこと、'.' で始まらないこと、'..' を含まないこと、先頭が '/', '.', '~' でないこと、全体長と component 長が Hugging Face repo id として妥当な上限内であることを検証する。テストに '../model', 'org/..', '.cache/model', 長大文字列を追加する。"
+    },
+    {
+      "id": "CB-002",
+      "severity": "medium",
+      "category": "セキュリティ脆弱性",
+      "file": "baseline_reporag/photon_pipeline.py",
+      "line": 519,
+      "title": "sanitized ValueError でも exception chaining で raw upstream exception が露出し得る",
+      "description": "ValueError の message は tokenizer_id と例外 class 名だけに抑えているが、raise ... from exc により元例外が __cause__ として保持される。server/CLI 起動失敗時に traceback 全体が log、Streamlit error、Slack 通知などへ流れる運用では、Hugging Face 側例外の raw message に含まれる private path、private model id、環境由来の詳細が sanitized message を迂回して露出する可能性がある。",
+      "suggestion": "公開される起動失敗 path では raise ValueError(...) from None とするか、元例外を sanitized した内部ログ/debug-only 経路に分離する。原因 chain を残す場合は、公開ログが str(exc) ではなく str(ValueError) のみを出すことを呼び出し側テストで固定する。"
+    }
+  ],
+  "summary": {
+    "critical": 0,
+    "high": 1,
+    "medium": 1,
+    "low": 0,
+    "total": 2
+  },
+  "verdict": "needs_fix"
+}

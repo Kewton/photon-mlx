@@ -1,0 +1,103 @@
+{
+  "stage": 2,
+  "focus": "整合性",
+  "reviewer": "claude-opus",
+  "issue_number": "143",
+  "summary": "設計方針書は Issue 本文 / 既存コード / 内部 ADR との整合性が概ね高く、Stage 1 の 13 findings が漏れなく反映されている。Must Fix は 2 件: (1) §3 表 / §7 で参照する aggregator test ファイル名が実在ファイル名 (`tests/test_aggregate_institutional.py`) と異なる (`tests/test_aggregate_institutional_baseline.py` と誤記)、(2) §10 影響範囲表に Step 7 の compare_generators test が抜け Step 7 の影響ファイルとも齟齬。Should Fix は受入条件 §12 に DR1-006 (predictions schema を 2 fields に絞る) と DR1-007 (Code Review Checklist 追記) の言及不足、Issue 本文の Task 3 受入条件 (`run_index/run_seed/run_id`) と §12 / ADR-5 で fields 数が変わったが Issue 側との整合説明が無い等。",
+  "findings": [
+    {
+      "id": "DR2-001",
+      "severity": "Must Fix",
+      "category": "コード整合性",
+      "title": "aggregator test ファイル名が実在ファイル名と一致しない (`tests/test_aggregate_institutional_baseline.py` ではなく `tests/test_aggregate_institutional.py`)",
+      "description": "設計方針書 §3 表 (line 87)、§7 (line 558-560)、§10 (line 642 Step 6) で `tests/test_aggregate_institutional_baseline.py` と記載されているが、リポジトリの実在ファイルは `tests/test_aggregate_institutional.py` (`_baseline` 接尾辞なし) である (`find tests -name 'test_aggregate*.py'` で確認)。スクリプト側 (`scripts/aggregate_institutional_baseline.py`) は `_baseline` 接尾辞を持つが、対応する test は元から接尾辞が無い命名。設計方針書のまま実装すると新規ファイルとして `test_aggregate_institutional_baseline.py` が作られ、既存 `test_aggregate_institutional.py` の test 群とロジックが二重管理される。Stage 1 の review でも参照されたファイル名がそのまま無検証で記載された。",
+      "evidence": "設計方針書 §3 line 87 (`tests/test_aggregate_institutional_baseline.py`)、§7 line 558-560、§10 line 642 (Step 6)。実コード: `find . -path '*tests*' -name 'test_aggregate*.py'` → `tests/test_aggregate_institutional.py` のみ存在。",
+      "suggested_fix": "§3 / §7 / §10 のすべての `tests/test_aggregate_institutional_baseline.py` を `tests/test_aggregate_institutional.py` に修正。実装時に新規ファイルが作られないよう、test 追加対象 (per-run 集計 / record_type=multi_turn) は既存ファイルへの追記とすることも明記。"
+    },
+    {
+      "id": "DR2-002",
+      "severity": "Must Fix",
+      "category": "Issue整合性",
+      "title": "Issue 本文 Task 3 受入条件 (`run_index/run_seed/run_id` 出力) と設計方針書 §12 / ADR-5 (2 fields に絞る決定) の整合説明が欠如",
+      "description": "Issue 本文 (現状の最新 body) の受入条件は `Task 3: --runs N 引数追加、predictions JSONL に run_index/run_seed/run_id を出力、aggregator が pooled ではなく per-run mean/std/min/max/n_runs/seeds 集計対応` と **3 fields** を必須としている。一方、設計方針書 ADR-5 (DR1-006 反映) では `run_index/run_seed` の **2 fields** に絞り、`run_id` は計算で復元する決定をしている。ところが §12 受入条件 line 671 は `predictions JSONL に run_index/run_seed/run_id を出力` のまま **3 fields** で記載されており、ADR-5 / §5 (line 485-489) の決定と矛盾する。実装フェーズで開発者が「受入条件 = 3 fields だが ADR = 2 fields」のどちらに従えば良いか判断不能。",
+      "evidence": "Issue 本文 受入条件 Task 3 (3 fields)、設計方針書 §12 line 671 (3 fields)、§5 line 485-489 (2 fields)、ADR-5 line 297-304 (2 fields)。",
+      "suggested_fix": "§12 受入条件 Task 3 を `predictions JSONL に run_index/run_seed を出力 (run_id は計算で復元 — ADR-5 / DR1-006)` に修正。さらに「Issue 本文の表現は 3 fields だが、設計判断 ADR-5 で 2 fields に絞った理由」を §12 末尾または §5 冒頭に注釈として明示し、Issue 本文側を後追いで update する旨も記載 (Issue body 更新は work-plan / PR 段階で対応する Task として §9 Step 11 に追加)。"
+    },
+    {
+      "id": "DR2-003",
+      "severity": "Should Fix",
+      "category": "内部整合性",
+      "title": "§10 影響範囲表 Step 7 の影響ファイルが §3 表 (compare_generators の test) を反映していない",
+      "description": "§10 line 643 Step 7 の影響ファイルは `scripts/compare_generators.py, tests/test_compare_generators.py` (推定 LOC +20) と書かれており、これは §3 表 (line 86) の `tests/test_compare_generators.py` 修正と一致する。一方、§9 Step 順序の Step 7 (line 605) は `compare_generators の seed 伝播 + test` と記載されている。確認したところ §3 と §9 と §10 の Step 7 は内容として整合しているため、ここは整合性 OK。しかし `tests/test_compare_generators.py` 自体は実在 (`find` で確認済) するため整合の問題はないが、別の不整合を発見した: §3 表 (line 87) と §10 Step 6 (line 642) では `tests/test_aggregate_institutional_baseline.py` という存在しないファイルを引用している (DR2-001 と関連)。",
+      "evidence": "設計方針書 §3 line 87、§9 line 605、§10 line 642-643。",
+      "suggested_fix": "DR2-001 と統合して対処。§10 Step 6 の test ファイル名を `tests/test_aggregate_institutional.py` に揃え、§3 表の対応行も同時に修正。"
+    },
+    {
+      "id": "DR2-004",
+      "severity": "Should Fix",
+      "category": "Issue整合性",
+      "title": "Issue 本文「影響ファイル」セクションの `tests/test_ci_eval_check.py` / `demo/run_demo.py` / `baseline_reporag/pipeline_factory.py` が設計方針書 §3 / §10 で扱われていない",
+      "description": "Issue 本文「影響ファイル」セクションには (a) `tests/test_ci_eval_check.py` (`ci_eval_check.py` を per-run 対応する場合)、(b) `demo/run_demo.py` (Generator() コンストラクタ呼び出し点 — seed 既定値で動作確認のみ)、(c) `baseline_reporag/pipeline_factory.py` (`cfg.run.seed` / `cfg.run.deterministic` を source of truth とする場合の wiring 確認) の 3 ファイルが挙がっている。一方、設計方針書 §3 表 / §10 推定 LOC 表にはこの 3 ファイルが**全く現れない**。設計方針書は ADR-7 (weekly は --runs 1 維持) で `ci_eval_check.py` 変更不要と決定しているため `tests/test_ci_eval_check.py` も不要なのは推測できるが、`demo/run_demo.py` と `baseline_reporag/pipeline_factory.py` の扱い (動作確認スコープ / wiring 確認スコープ) が設計方針書に明記されていない。",
+      "evidence": "Issue 本文「影響ファイル」セクション、設計方針書 §3 表 (line 67-91)、§10 表 (line 633-647)。",
+      "suggested_fix": "§3 表または §10 表に下記行を追加: (a) `tests/test_ci_eval_check.py` → 「変更なし (ADR-7 で --runs 1 維持のため)」、(b) `demo/run_demo.py` → 「変更なし (Generator() seed 既定値で動作確認のみ、interactive 経路は seed=None)」、(c) `baseline_reporag/pipeline_factory.py` → 「変更なし (resolve_eval_seed は eval scripts 側で呼ぶため pipeline_factory 内には wiring 不要)」。これにより Issue 本文の影響ファイル一覧と §3 / §10 が 1:1 対応し、scope の証跡が表上で確認可能になる。"
+    },
+    {
+      "id": "DR2-005",
+      "severity": "Should Fix",
+      "category": "規約整合性",
+      "title": "Code Review Checklist (`docs/code_review_checklist.md`) への DR1-007 (seed keyword-only) / ADR-11 (seed 注入の重複) 追記が Task 5 に明示的に列挙されていない",
+      "description": "DR1-007 (§3.1 line 131) は「Code Review Checklist (`docs/code_review_checklist.md`) に『query/generate の seed は keyword-only でなければならない』を追加する (Task 5 文書更新タスクに含む)」と明記している。さらに ADR-11 (line 462) では「Code Review Checklist に『seed 注入を増やす場合は両者同時更新』を追記」と書かれている。一方、§12 受入条件 Task 5 (line 677) は `CLAUDE.md「現在のメトリクス」更新、docs/deployment.md docs/troubleshooting.md 更新` のみで、**`docs/code_review_checklist.md` の更新が列挙されていない**。受入条件の文面では Task 5 に含まれない読み方も可能になり、実装漏れリスクが残る。§3 表 line 88-90 でも `CLAUDE.md` / `docs/deployment.md` / `docs/troubleshooting.md` の 3 つしか docs 行がなく、`docs/code_review_checklist.md` 行が無い。",
+      "evidence": "設計方針書 §3.1 line 131 (Code Review Checklist 追記言及)、ADR-11 line 462 (同上)、ADR-2 line 250 (同上 `with_eval_seed` reference)、§12 Task 5 line 677 (3 docs のみ)、§3 表 line 88-90 (3 docs のみ)。",
+      "suggested_fix": "§3 表に以下を追加: `| Docs | docs/code_review_checklist.md | seed keyword-only ルール (DR1-007) + seed 注入時の両者同時更新 (ADR-11) を追記 | - |`。§12 Task 5 受入条件を `CLAUDE.md「現在のメトリクス」更新、docs/deployment.md / docs/troubleshooting.md / docs/code_review_checklist.md 更新` に変更。§10 Step 10 の影響ファイルにも `docs/code_review_checklist.md` を追加 (推定 +5 LOC)。"
+    },
+    {
+      "id": "DR2-006",
+      "severity": "Should Fix",
+      "category": "コード整合性",
+      "title": "ADR-11 で引用される `QwenMLXAdapter.generate` の line 番号 (line 105-111) は実コード (line 105-111) と一致するが、引用シグネチャが seed 既定値を反映していない",
+      "description": "ADR-11 (line 444) では `QwenMLXAdapter.generate` の seed 注入を引用し `if seed is not None: import mlx.core as mx; mx.random.seed(seed)` のパターンを示している。実コードを確認すると `baseline_reporag/eval/institutional/llm_client.py` line 91 で `seed: int | None = 42` (default 42)、line 105-111 で `if seed is not None: try: import mlx.core as mx; mx.random.seed(seed) except Exception: pass` という実装である。設計方針書 ADR-11 の引用は (a) try/except Exception で sanitized fail-soft している点、(b) 既定値が `42` (None ではない) である点を省略している。これは『Generator.generate(*, seed: int | None = None)』(本 Issue で追加) と異なる default policy を持つ。ADR-11 が「両者は同 shape」と語る根拠が、実は default 値の non-symmetry (Generator=None / QwenMLXAdapter=42) があるため、もし将来 helper 化する場合この差を別途扱う必要がある。",
+      "evidence": "設計方針書 ADR-11 line 438-444、baseline_reporag/eval/institutional/llm_client.py line 88-119 (`seed: int | None = 42` 既定 / try/except sanitized)。",
+      "suggested_fix": "ADR-11 の「両者の shape」段落に注記を追加: 『QwenMLXAdapter.generate は default `seed=42` (institutional grader は再現性必須)、本 Issue で追加する Generator.generate は default `seed=None` (interactive 経路維持) という non-symmetric default を持つ。helper 化する場合は default policy を呼び出し側で決める設計が必要。本 Issue では層分離 (B 採択) のためこの差分は扱わない。』"
+    },
+    {
+      "id": "DR2-007",
+      "severity": "Should Fix",
+      "category": "テスト整合性",
+      "title": "§7 で挙げられる 8 個の test_run_config test case が §10 推定 LOC (+80) と整合しているか検証が不足",
+      "description": "§7 line 549-557 で `test_run_config.py` の独立 8 test case (default / int / deterministic=False / run 欠落 / 不正型 TypeError × 2 / range 外 ValueError × 2) を列挙し、§10 Step 1 line 637 で `baseline_reporag/eval/run_config.py` (新規) + `baseline_reporag/tests/test_run_config.py` (新規) で +80 LOC と推定している。これに対し helper 本体 (resolve_eval_seed + _validate_run_block private function) は ADR-2 内訳から推定 25-30 LOC、test 8 case は 1 case 平均 6-8 LOC として 50-60 LOC で合計 75-90 LOC のレンジ。+80 はギリギリ妥当だが、§10 表のセル内に「test 8 case を含む」のような根拠記載が無いため、work-plan 段階で過小推定が発覚するリスクがある。",
+      "evidence": "設計方針書 §7 line 549-557 (8 test case)、§10 Step 1 line 637 (+80 LOC)。",
+      "suggested_fix": "§10 Step 1 のセルに `test_run_config.py 8 test cases (default / int / deterministic=False / run 欠落 / TypeError × 2 / ValueError × 2)` を補足。LOC 内訳を `helper +30 / tests +50 = +80` に分解する補注を §10 末尾に追加。"
+    },
+    {
+      "id": "DR2-008",
+      "severity": "Should Fix",
+      "category": "依存関係",
+      "title": "ADR-5 / ADR-6 の merge order (#156 → #143) 固定が §11 リスク表で言及されているが、§9 Step 順序にも明示されるべき",
+      "description": "ADR-5 line 314-315 と ADR-6 line 332-333 で merge order を **#156 → #143** に固定すると明記しており、§11 リスク表 line 657 でも同方針を re-state している。一方、§9 Step 順序 (line 591-614) は本 Issue 内部の 11 step を時系列で並べているのみで、`#156 マージ完了` を前提条件とする旨が **Step 5 (predictions schema 拡張) や Step 6 (aggregator 拡張) の依存条件として記載されていない**。実装者が §9 だけを見て Step 5-6 に着手すると、#156 が未マージのまま REQUIRED_FIELDS 衝突を生じるリスクがある。",
+      "evidence": "設計方針書 ADR-5 line 314-315、ADR-6 line 332-333、§9 Step 順序 line 591-614 (#156 への dependency 言及なし)、§11 リスク line 657。",
+      "suggested_fix": "§9 Step 5 の前 (line 601 直前) に注記を追加: `[前提] Step 5-6 着手前に Issue #156 (is_refusal 出力欠落) のマージを完了させる。理由: 両者とも predictions JSONL の REQUIRED_FIELDS / aggregator REQUIRED_FIELDS を変更するため、merge order #156 → #143 を ADR-5/6 で固定 (リスク §11)。`"
+    },
+    {
+      "id": "DR2-009",
+      "severity": "Nice to Have",
+      "category": "内部整合性",
+      "title": "§9 Step 11 (PR 作成) と §12 受入条件 Task 5 のスコープが重複しており、Step 10 と Step 11 の境界が暗黙的",
+      "description": "§9 Step 10 (line 611) は Task 5 文書更新 (CLAUDE.md / docs/deployment.md / docs/troubleshooting.md) で、Step 11 (line 613) は PR 作成 + multi-stage-design-review 反映と記載されている。受入条件 §12 line 677 は Task 5 として 3 docs 更新を必須化。Step 11 の `multi-stage-design-review 反映` は本 Stage 2 review が含まれるため、Step 11 自身が現在進行中のレビューの帰結を意味するが、Step 10 → Step 11 の境界 (= Task 5 文書更新が PR 作成より先か後か) が明示されていない。一般的には Task 5 文書更新を含めて 1 PR で出すべきだが、PR 上で multi-stage review の指摘で再修正が入る可能性もあり、ワークフロー観点で曖昧さが残る。",
+      "evidence": "設計方針書 §9 Step 10 / Step 11 line 611-613、§12 受入条件 Task 5 line 677。",
+      "suggested_fix": "§9 末尾に注釈を追加: `Step 10 (Task 5 文書更新) の成果物を Step 11 PR の一部として出す。multi-stage-design-review の追加指摘で文書更新が必要になった場合は Step 11 内で再修正する (= 文書更新は PR 作成サイクルに内包)。`"
+    },
+    {
+      "id": "DR2-010",
+      "severity": "Nice to Have",
+      "category": "規約整合性",
+      "title": "CLAUDE.md「品質チェック」と §8 品質基準で `pytest` のスコープ定義が異なる",
+      "description": "CLAUDE.md「品質チェック」セクションは `python -m pytest torch_ref/tests/ photon_mlx/tests/ baseline_reporag/tests/ tests/ -v` を全テスト基準としている。一方、§8 line 582 では `python -m pytest baseline_reporag/tests/ tests/ evals/tests/` を基準に挙げており、`torch_ref/tests/` と `photon_mlx/tests/` が抜け、代わりに `evals/tests/` が追加されている。本 Issue の test 範囲 (run_config / pipeline_integration / photon_pipeline / aggregate / compare_generators / eval_determinism) は §8 のスコープで網羅できるが、CLAUDE.md の全テスト基準とは一致しない。CI の必須通過基準は CLAUDE.md 側のため、§8 にその差分の理由 (本 Issue 影響範囲外の test は省略するが、CI / 受入は CLAUDE.md スコープで実行する) を補注する方が運用混乱を避ける。",
+      "evidence": "CLAUDE.md「品質チェック」、設計方針書 §8 line 582。",
+      "suggested_fix": "§8 末尾に補注を追加: `本表は本 Issue の影響範囲に絞った最小スコープ。CI / 受入時は CLAUDE.md 品質チェックの全 test scope (torch_ref/tests/ photon_mlx/tests/ baseline_reporag/tests/ tests/) を通過させる。evals/tests/ は本 Issue で新規追加するため明示。`"
+    }
+  ],
+  "must_fix_count": 2,
+  "should_fix_count": 6,
+  "nice_to_have_count": 2,
+  "overall_assessment": "approve_with_changes"
+}

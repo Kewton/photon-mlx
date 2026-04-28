@@ -365,3 +365,46 @@ def test_run_phase_honors_stop_flag(tmp_path: Path) -> None:
         )
     state = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
     assert state["status"] == "interrupted"
+
+
+# ---------------------------------------------------------------------------
+# Issue #143: ``run_eval_inproc`` forwards ``seed`` into ``pipeline.query``.
+# ---------------------------------------------------------------------------
+
+
+def test_run_eval_inproc_default_seed_none() -> None:
+    """Default ``seed=None`` -> pipeline.query receives seed=None.
+
+    ``pipeline.query`` (at the production layer) handles ``seed=None`` by
+    skipping MLX seeding so interactive callers stay nondeterministic;
+    this test only asserts the kwarg is forwarded transparently here.
+    """
+    mock_pipeline = MagicMock()
+    mock_pipeline.query.return_value = _mk_result(no_citation=False)
+    questions = [{"id": "q1", "question": "Q1"}]
+    run_eval_inproc(mock_pipeline, questions, config_idx=0, repo_id="r1")
+    call = mock_pipeline.query.call_args
+    assert call.kwargs.get("seed") is None
+
+
+def test_run_eval_inproc_propagates_seed() -> None:
+    """``seed=42`` -> pipeline.query receives seed=42 every iteration."""
+    mock_pipeline = MagicMock()
+    mock_pipeline.query.side_effect = [
+        _mk_result(no_citation=False),
+        _mk_result(no_citation=True),
+    ]
+    questions = [{"id": "q1", "question": "Q1"}, {"id": "q2", "question": "Q2"}]
+    run_eval_inproc(mock_pipeline, questions, config_idx=0, repo_id="r1", seed=42)
+    for call in mock_pipeline.query.call_args_list:
+        assert call.kwargs.get("seed") == 42
+
+
+def test_run_eval_inproc_seed_zero_propagates() -> None:
+    """``seed=0`` MUST propagate (DR3-002 silent-bug guard)."""
+    mock_pipeline = MagicMock()
+    mock_pipeline.query.return_value = _mk_result(no_citation=False)
+    questions = [{"id": "q1", "question": "Q1"}]
+    run_eval_inproc(mock_pipeline, questions, config_idx=0, repo_id="r1", seed=0)
+    call = mock_pipeline.query.call_args
+    assert call.kwargs.get("seed") == 0

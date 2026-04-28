@@ -1,0 +1,57 @@
+{
+  "stage": 4,
+  "applied_count": 8,
+  "skipped_count": 0,
+  "applied": [
+    {
+      "finding_id": "DR4-001",
+      "applied": true,
+      "section": "§6.6 / §7 / §8 / §9",
+      "summary": "generate script の CLI / I/O security contract を追加し、--corpus-dir / --output / --sessions / --seed / --val-ratio の strict validation、approved root、symlink escape 拒否、0600 tmp file + atomic rename、失敗時 cleanup、原文/token log 禁止を明記した。"
+    },
+    {
+      "finding_id": "DR4-002",
+      "applied": true,
+      "section": "§6.2 / §7 / §8",
+      "summary": "iterate_mixed_batches / load_jsonl の security validation として、corpus_paths の approved root + regular file check、JSONL tokens の list[int] / 長さ / vocab 範囲 / line size / fail-fast を追記した。"
+    },
+    {
+      "finding_id": "DR4-003",
+      "applied": true,
+      "section": "§6.5 / §7 / §8 / §10",
+      "summary": "checkpoint_path の approved root / symlink escape 拒否、manifest.json による weights.npz / state.json / config / corpus metadata sha256 検証、LFS/external fetch 後 hash check を追記した。"
+    },
+    {
+      "finding_id": "DR4-004",
+      "applied": true,
+      "section": "§7 / §9 / §10",
+      "summary": "training data extraction / membership inference リスクを追加し、本 Issue では checkpoint を private / ACL 制限 storage のみに限定、public release は別 security review と red-team / canary / k-anonymity gate 完了まで禁止とした。"
+    },
+    {
+      "finding_id": "DR4-005",
+      "applied": true,
+      "section": "§6.6 / §8 / §11",
+      "summary": "eval leak 検証を session_id 重複だけでなく normalized hash / 5-gram Jaccard などの near-duplicate 判定まで拡張し、build_sessions が eval set を読まないことを明記した。"
+    },
+    {
+      "finding_id": "DR4-006",
+      "applied": true,
+      "section": "§8 / §9",
+      "summary": "staged diff で data/training / checkpoints / .env / provider logs の混入を確認し、gitleaks 相当の secret scan を添付する方針を追記した。"
+    },
+    {
+      "finding_id": "DR4-007",
+      "applied": true,
+      "section": "§11 / Day 別タスクサマリ",
+      "summary": "self-hosted runner / commandmatedev 同時アクセス対策として lockfile/flock による serialize、issue 固有 worktree/run id 分離、pre/post git status と cleanup 確認を追加した。"
+    },
+    {
+      "finding_id": "DR4-008",
+      "applied": true,
+      "section": "§7 / §8 / §9 / Day 1 gate",
+      "summary": "requirements が unpinned であるため、Day 1 に pip freeze lock/SBOM と pip-audit または osv-scanner を実行し、High/Critical は upgrade/pin/risk acceptance まで training/release に進まない方針を追記した。"
+    }
+  ],
+  "skipped": [],
+  "design_policy_updated": true
+}

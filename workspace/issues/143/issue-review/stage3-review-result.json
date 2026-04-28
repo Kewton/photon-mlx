@@ -1,0 +1,94 @@
+{
+  "stage": 3,
+  "focus": "影響範囲（1回目）",
+  "reviewer": "claude-opus",
+  "issue_number": "143",
+  "summary": "Issue #143 が触る `Generator.generate(seed=42)` API 拡張は、本コードベースの 4 つの呼び出し点 (RepoRAGPipeline / PhotonRAGPipeline 3 箇所 / demo) と 17+ 件の MagicMock 既存テストに波及するが、デフォルト引数を維持する限り後方互換は守れる設計余地がある。一方で (a) `bl.generator.generate(messages, max_new_tokens=...)` のような既存キーワード呼び出しと衝突する可能性、(b) Issue #135 採用済 PHOTON checkpoint の主要メトリクス (Turn 5-6 NC 0.00%) が未固定 seed 下の計測である懸念、(c) `weekly_eval.yml` (180 min timeout) と `ci_eval_check.py` (NC 30%/35% 上限) が seed 固定で挙動変化したときの threshold 整合性、(d) Issue #156 (refusal-aware bug) との作業順序が未調整、という 4 つの影響を Issue 本文に追記推奨。",
+  "findings": [
+    {
+      "id": "S3-001",
+      "severity": "Must Fix",
+      "category": "API影響",
+      "title": "`Generator.generate()` への seed 引数追加による既存 4 呼び出し点 (RepoRAGPipeline / PhotonRAGPipeline 3 箇所 / demo/run_demo.py) の後方互換確認が Issue 本文に欠落",
+      "description": "Issue 本文 Task 1 は `Generator.generate(seed=42)` 引数を追加する設計だが、本リポジトリには既存呼び出し点が 4 件あり、それぞれシグネチャが異なる: \n1. `baseline_reporag/pipeline.py:207` `self.generator.generate(messages)` — 1 引数\n2. `baseline_reporag/photon_pipeline.py:1030` `bl.generator.generate(messages, max_new_tokens=followup_tokens)` — keyword 1 件\n3. `baseline_reporag/photon_pipeline.py:1043` 同上\n4. `baseline_reporag/photon_pipeline.py:1394` 同上 (PHOTON 経路の Qwen fallback)\n5. `demo/run_demo.py:75` `Generator(...)` のコンストラクタ呼び出し\n\n現実装は `def generate(self, messages: list[dict], max_new_tokens: int | None = None) -> str:` (generator.py:43) のため、Issue 本文の `def generate(self, prompt: str, *, seed: int | None = 42)` というサンプルは引数名 (messages → prompt) が乖離しており、修正版がそのままマージされると 4 呼び出し点全てが TypeError で破綻する。Issue 本文で「既存 `messages` 引数を維持し、`seed: int | None = 42` を `*` 区切りで追加 (= keyword-only)」と明示する必要がある。",
+      "evidence": "`baseline_reporag/generation/generator.py:43` `def generate(self, messages: list[dict], max_new_tokens: int | None = None) -> str:`。Issue 本文 Task 1 サンプル `def generate(self, prompt: str, *, seed: int | None = 42) -> str:` — 第一引数名が乖離。`grep -rn 'generator.generate'` の結果は 4 ファイルで合計 4 呼び出し点。",
+      "suggested_fix": "Issue 本文 Task 1 の Python サンプルを下記に置換:\n```python\n# baseline_reporag/generation/generator.py\ndef generate(\n    self,\n    messages: list[dict],\n    max_new_tokens: int | None = None,\n    *,\n    seed: int | None = 42,\n) -> str:\n    self._load()\n    if seed is not None:\n        import mlx.core as mx\n        mx.random.seed(seed)\n    prompt = self._tokenizer.apply_chat_template(messages, ...)\n    return mlx_lm.generate(self._model, self._tokenizer, prompt=prompt, max_tokens=..., sampler=self._sampler)\n```\n+ Issue 本文「影響ファイル」セクションに `demo/run_demo.py` を追加 (Generator() コンストラクタ呼び出し点)。"
+    },
+    {
+      "id": "S3-002",
+      "severity": "Must Fix",
+      "category": "メトリクス",
+      "title": "CLAUDE.md「現在のメトリクス」(Turn 5-6 NC 0.00%, follow-up p50 12,092ms) は未固定 seed 計測で、Task 1 適用後に再計測が必要なリスク",
+      "description": "CLAUDE.md「現在のメトリクス」(Gate 2 v6) は `photon_institutional_retrain_20260428/step_003000` の Turn 5-6 NC 0.00% を採用判定の根拠としているが、本 Issue が問題提起する V0 baseline +1.72pt drift と同じ nondeterminism の対象である (`run_multi_turn_eval.py` も同 `build_pipeline(cfg)` 経由)。0.00% が真に決定的かは未検証で、Task 1 適用後に「実は seed=42 では Turn 5-6 NC = 3-7% 範囲」となる可能性がある。これは Issue #135 の採用判定そのものに影響し、もし NC 6% 超を確認した場合 MVP 受入基準 (< 6%) ギリギリで再検証が必要。Issue 本文「ゴール」または「影響」に「Task 1 適用後、CLAUDE.md 採用メトリクスの再計測 (Turn 5-6 NC, follow-up p50) が前提条件として必要」と明記すべき。",
+      "evidence": "CLAUDE.md L121-128 「Gate 2 v6: Turn 5-6 NC 0.00% (refusal-aware)、follow-up p50 12,092ms」。`scripts/run_multi_turn_eval.py:55` `pipeline = build_pipeline(cfg)` で V0 と同じ generator.py 経路。`reports/institutional_photon_mt_eval_v2_3k_bug_check.md` (refusal-aware 検証) も同セッション 1-run 計測。",
+      "suggested_fix": "Issue 本文「影響」セクション末尾に「**現在のメトリクス再計測リスク**: CLAUDE.md 採用済の PHOTON `step_003000` Turn 5-6 NC 0.00% / follow-up p50 12,092ms は未固定 seed 計測。Task 1 適用後、PHOTON 採用判定 (#135 Phase 8 採用) の前提が崩れていないか seed=42 で再計測 (multi-turn + static、各 1 run)、結果を `reports/institutional_photon_mt_eval_v2_3k.md` に追記する。Turn 5-6 NC ≥ 6% (MVP 基準超え) の場合は Issue #135 採用判定の再評価が別 Issue として必要。」を追記。"
+    },
+    {
+      "id": "S3-003",
+      "severity": "Must Fix",
+      "category": "テスト影響",
+      "title": "既存 `baseline_reporag/tests/` の MagicMock generator 17+ 件が seed 引数追加で TypeError 化する懸念",
+      "description": "`baseline_reporag/tests/test_pipeline_integration.py` および `test_photon_pipeline.py` に、`mock_gen.generate.return_value = ...` 形式の MagicMock generator が合計 17+ 件存在する (`test_photon_pipeline.py` だけで 17 ヒット)。これらは `pipeline.query()` 経由で `self.generator.generate(messages)` または `bl.generator.generate(messages, max_new_tokens=...)` として呼ばれ、現行は MagicMock が任意引数を受け流すため動作している。Issue #143 で `Generator.generate(messages, max_new_tokens=None, *, seed=42)` に拡張しても MagicMock は引数を受け流すため**直接の TypeError は起きない**が、(a) もし `pipeline.py` 側で `self.generator.generate(messages, seed=cfg.something)` のように明示的 seed 渡しを実装した場合、テスト固定値の固定 seed=42 と config-derived seed が衝突し既存テストの assert 結果が変わるリスクあり、(b) `S1-006` で示した `evals/tests/test_eval_determinism.py` 新規作成では実際の `Generator` クラスを使う必要があり、既存 MagicMock パターンとの整合 (mock vs real) を Issue で明示する必要がある。",
+      "evidence": "`baseline_reporag/tests/test_photon_pipeline.py` で `baseline_deps['generator'].generate.return_value = ...` が 17 ヒット (line 1054, 1125, 1218, ..., 2602)。`test_pipeline_integration.py` でも `mock_gen.generate` を 8 件以上で使用 (line 156, 170, 186, 201)。",
+      "suggested_fix": "Issue 本文「変更内容 (案)」または「受入条件」に追記:\n- Task 1 実装時、`pipeline.py` / `photon_pipeline.py` の `self.generator.generate(...)` 呼び出しは **追加の seed 引数を渡さない** (= Generator のデフォルト `seed=42` に委譲) ことで既存 MagicMock テストとの後方互換を維持する。\n- `evals/tests/test_eval_determinism.py` は実 `Generator` を使う統合テストとし、`@pytest.mark.skipif(not _HAS_MLX)` で MLX 未インストール環境では skip する (CI workflow の self-hosted MLX 環境でのみ走る)。"
+    },
+    {
+      "id": "S3-004",
+      "severity": "Should Fix",
+      "category": "後方互換",
+      "title": "`server.py` / `cli.py` 経由の interactive ユーザー (CLI / FastAPI) で seed=42 固定が「同じ質問が毎回同じ回答」を生む UX 退化",
+      "description": "`baseline_reporag/cli.py` および `baseline_reporag/server.py` は `build_pipeline(cfg)` → `pipeline.query(question, ...)` で `Generator.generate(messages)` を呼ぶ。Issue #143 で Generator デフォルト `seed=42` を導入すると、interactive CLI / FastAPI 経由の同一プロンプトに対して毎回完全に同一の回答が返るようになる。これは eval 用途では望ましいが、production CLI / server ユーザーから見ると「LLM の自然なゆらぎがなくなり、回答が固定される」という UX 退化。`docs/deployment.md` で interactive 用途を案内している場合、ユーザー期待が崩れる可能性。Issue で「eval 経路は seed=42 固定、CLI/server 経路は seed=None (現状維持) を選べる」のような切り分けを設計するか、デフォルトを seed=None にして eval scripts 側で明示的に seed=42 を指定するか、いずれかの設計判断を明確化すべき。",
+      "evidence": "`baseline_reporag/cli.py:44` `pipeline.query(question=question, ...)`、`baseline_reporag/server.py:54` 同様。`baseline_reporag/pipeline.py:207` `answer = self.generator.generate(messages)` — seed 引数なし。Issue 本文 Task 1 サンプル `seed: int | None = 42` がデフォルトのため、CLI / server も無条件で seed 固定経路に乗る。",
+      "suggested_fix": "Issue 本文 Task 1 末尾に「**CLI / server (interactive) 経路の扱い**: `Generator.generate(seed=...)` のデフォルトを `42` にすると interactive 用途で回答が完全固定化されるため、(a) eval scripts (run_baseline_eval / run_multi_turn_eval) は明示的に seed=42 を渡し、(b) `Generator.__init__(default_seed=None)` 引数で interactive 用は `seed=None` を採用、または (c) `cli.py` / `server.py` で `os.environ['BASELINE_DETERMINISTIC']` が設定された時のみ seed 固定、のいずれかの設計を選択する。Stage 4 で確定。」を追記。"
+    },
+    {
+      "id": "S3-005",
+      "severity": "Should Fix",
+      "category": "他Issue衝突",
+      "title": "Issue #156 (run_multi_turn_eval.py の `is_refusal` 出力欠落計測 bug) と Issue #143 Task 3 (--runs N 集計) の作業順序が衝突",
+      "description": "Issue #156 (OPEN) は `run_multi_turn_eval.py` が `is_refusal` フィールドを predictions JSONL に書き出さない bug の修正で、`scripts/aggregate_institutional_baseline.py:60-65` (`is_no_citation`) の refusal-aware 集計と密結合。Issue #143 Task 3 (--runs N 引数追加 + aggregate スクリプト multi-run 対応) も同じ aggregate スクリプトを変更するため、(a) #156 を先に直して `is_refusal` フィールドを predictions に記録、その後 #143 が --runs 集計を実装するのが自然な順序、(b) もし並行作業すると aggregator の REQUIRED_FIELDS 拡張 (現在 10 件、`is_refusal` 追加で 11 件) と --runs 平均化のロジックが互いに rebase conflict を起こす。Issue #143 本文「並列性」は #156 に言及していない。",
+      "evidence": "`gh issue view 156`: OPEN `fix(eval): run_multi_turn_eval.py が is_refusal フィールドを記録しない計測 bug`。`scripts/aggregate_institutional_baseline.py:38` `from baseline_reporag.citation import is_refusal_answer`、L60-65 で answer から再判定する fallback。`scripts/aggregate_institutional_baseline.py:40-51` REQUIRED_FIELDS は `is_refusal` を含まない。Issue #143 本文「並列性」セクションは #156 を含まない。",
+      "suggested_fix": "Issue 本文「関連」セクションに追記:\n```\n- 関連: #156 (run_multi_turn_eval.py の is_refusal 出力欠落 bug) — Task 3 (aggregator multi-run 対応) は #156 修正後または同時に実施。両方とも aggregate_institutional_baseline.py を変更するため、merge order は #156 → #143 を推奨。両 Issue が並行マージされる場合、aggregate_institutional_baseline.py の REQUIRED_FIELDS と multi-run 平均化ロジックが互いにコンフリクトする。\n```"
+    },
+    {
+      "id": "S3-006",
+      "severity": "Should Fix",
+      "category": "CI",
+      "title": "`weekly_eval.yml` workflow (180 min timeout) と `ci_eval_check.py` (NC 30%/35% 上限) が seed 固定で挙動変化したときの threshold 整合性が未確認",
+      "description": "`.github/workflows/weekly_eval.yml` は self-hosted M3 Ultra で `run_baseline_eval` + `run_multi_turn_eval` + `ci_eval_check.py` を直列実行する 180 min CI。Issue #143 で seed 固定 + temperature=0 切替 + (将来) --runs 2 が入ると、(a) NC rate が現在の閾値 STATIC_NC_MAX=30% / MT_NC_MAX=35% と互換性があるかを Task 1 → Task 4 完了時点で確認すべき、(b) `--runs 2` 採用時に CI 実行時間がほぼ 2 倍になる (180 min → 360 min) 可能性があり workflow の timeout-minutes を引き上げる必要があるかも、(c) `evals/tests/test_eval_determinism.py` が CI に追加された場合、self-hosted MLX runner でしか動かないか pytest 一般 CI で skip するかの方針が未定。Issue 本文に CI への影響評価が無い。",
+      "evidence": "`.github/workflows/weekly_eval.yml:11` `timeout-minutes: 180`、L21-29 `run_baseline_eval` (~120 questions) + `run_multi_turn_eval` (~30 sessions)、L34-37 `ci_eval_check.py`。`scripts/ci_eval_check.py:31-33` `STATIC_NC_MAX = 0.30 / MT_NC_MAX = 0.35`。Issue 本文「影響ファイル」L1-7 に `.github/workflows/weekly_eval.yml` 言及なし。",
+      "suggested_fix": "Issue 本文「影響ファイル」セクションに追記:\n- `.github/workflows/weekly_eval.yml` (--runs N 採用時 timeout-minutes 引き上げ要否を確認)\n- `scripts/ci_eval_check.py` (Task 1-4 完了後、STATIC_NC_MAX/MT_NC_MAX 閾値が seed 固定後の実測 NC と整合しているか確認、必要なら mean - 2*std で Task 4 noise floor を反映)\n- `evals/tests/test_eval_determinism.py` (Task 1) は実 MLX を要求するため、`@pytest.mark.skipif(not _HAS_MLX)` で MLX 未インストール環境では skip。CI 経路は self-hosted runner (weekly_eval.yml) のみで実走。"
+    },
+    {
+      "id": "S3-007",
+      "severity": "Should Fix",
+      "category": "ドキュメント",
+      "title": "CLAUDE.md「品質チェック」「現在のメトリクス」表と `docs/deployment.md` / `docs/troubleshooting.md` の更新が必要だが Issue 本文に明記されていない",
+      "description": "Issue #143 の Task 1-4 完了後、以下の文書更新が必要だが Issue 本文に明記されていない:\n1. CLAUDE.md「品質チェック」表 — Generator の seed 引数追加で `python -m pytest baseline_reporag/tests/` のテスト数 (現状 約 507/509) が変化する可能性\n2. CLAUDE.md「現在のメトリクス」 — Task 4 完了後、各メトリクスに `(seed=42 固定計測)` 注記または `mean ± std` 形式に更新\n3. `docs/deployment.md` — production CLI / server 起動時の seed 固定挙動を文書化 (S3-004 と関連)\n4. `docs/troubleshooting.md` — 「同じ質問なのに回答が変わる」FAQ に「`temperature=0` および `seed=42` 固定で再現性確保。それでも回答が変わる場合は mlx-lm 内部の nondeterminism 由来 (本リポジトリ範囲外)」を追加\n\n受入条件にこれらの文書更新タスクが無く、コードだけマージされて文書が古いまま残るリスクがある。",
+      "evidence": "CLAUDE.md L116 「品質チェック」表、L121-128 「現在のメトリクス」、`ls docs/` の出力 (deployment.md / troubleshooting.md / code_review_checklist.md / tutorial.md)。Issue 本文「受入条件」L1-5 に文書更新タスクなし。",
+      "suggested_fix": "Issue 本文「受入条件」末尾に追記:\n```\n- [ ] Task 5 (文書更新): \n  - CLAUDE.md「現在のメトリクス」を Task 4 完了後の seed=42 固定 mean ± std で更新\n  - docs/deployment.md に「seed 固定の有無」の節を追加\n  - docs/troubleshooting.md に「回答が seed 固定後も揺れる場合」を追加\n```"
+    },
+    {
+      "id": "S3-008",
+      "severity": "Nice to Have",
+      "category": "他Issue衝突",
+      "title": "PR #142 は MERGED 済のため Issue #143 と直接衝突しないが、Issue #143 完了後に再計測が必要",
+      "description": "Issue 本文「背景」が引用する PR #142 (`feature/issue-137-institutional-ab`) は Stage 1 時点で「候補」と書かれていたが `gh pr view 142` の結果は **state: MERGED**。すなわち Issue #137 の 5-variant A/B (V0=12.93%, V4=8.53% 採用) は既に main にマージ済み。Issue #143 のスコープは「base 変更を再計測」ではなく「将来の retrieval 改善 (1-2pt) が seed-noise に埋もれない判定基盤を作る」に絞れる。Issue 本文「背景」を「PR #142 候補」から「PR #142 (MERGED) 後に発覚した再現性課題」に修正することで、worker が「PR #142 はまだ候補で再計測が必要」と誤解するのを防げる。",
+      "evidence": "`gh pr view 142` の出力: `state: MERGED`、`mergeable: UNKNOWN` (merged のため判定不能)。Issue 本文「背景」L3 「PR #142 候補」。`gh issue view 137`: state=CLOSED。",
+      "suggested_fix": "Issue 本文「背景」冒頭の「(5-variant retrieval test、PR #142 候補)」を「(5-variant retrieval test、PR #142 マージ済 / Issue #137 CLOSED)」に修正。「影響」末尾に「PR #142 (V4) 採用後の再計測は、Task 1-4 完了後に別途 1 回実施推奨 (本 Issue スコープ外)」を追記。"
+    },
+    {
+      "id": "S3-009",
+      "severity": "Nice to Have",
+      "category": "整合性",
+      "title": "Issue #138 (tokenizer mismatch) は CLOSED 済のため #143 と直接衝突しないが、Issue 本文「関連」の言及位置を確認",
+      "description": "Issue 本文「関連」最終行で `#138 (tokenizer mismatch fix、eval 経路の品質向上)` と参照。`gh issue view 138` の結果は **state: CLOSED**。すなわち #138 は既に解決済で、Issue #143 のコード変更で tokenizer 経路に追加の調整は不要。これは Stage 1 で論理的に確認できなかった点で、Stage 3 で「#138 CLOSED のため Issue #143 では追加対応不要」と Issue 本文に明示すれば、worker が「#138 と並行作業が必要か」と迷うのを防げる。",
+      "evidence": "`gh issue view 138` の出力: `state: CLOSED`、title `fix(photon): tokenizer mismatch between training (Qwen 152064) and inference (_StubTokenizer byte-mod)`。Issue 本文「関連」L3 「#138 (tokenizer mismatch fix、eval 経路の品質向上)」。",
+      "suggested_fix": "Issue 本文「関連」の `#138` 行を「#138 (CLOSED, tokenizer mismatch fix 反映済 — 本 Issue では追加対応不要)」に置換。"
+    }
+  ],
+  "must_fix_count": 3,
+  "should_fix_count": 4,
+  "nice_to_have_count": 2,
+  "overall_assessment": "approve_with_changes"
+}

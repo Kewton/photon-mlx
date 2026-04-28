@@ -1,0 +1,48 @@
+{
+  "stage": 3,
+  "stage_name": "影響分析レビュー（Codex）",
+  "focus": "影響範囲",
+  "reviewer": "codex",
+  "findings": [
+    {
+      "id": "DR3-001",
+      "severity": "Must Fix",
+      "category": "既存テスト",
+      "title": "`_StubTokenizer` direct 参照 4 件だけでなく、tokenizer-less `_build_photon_deps` success tests 17-18 件の migration が必要",
+      "description": "design-policy.md は direct な `_StubTokenizer` import / isinstance / fallback test の migration を記載しているが、現行 `baseline_reporag/photon_pipeline.py` のコメント通り、`tokenizer:` section 以前の unit tests が fallback に依存している。`_build_photon_deps` が tokenizer_id 未設定で `ValueError` になると、direct 参照を持たない success-path tests も失敗するため、minimal yaml への `tokenizer:` ブロック追加と `AutoTokenizer.from_pretrained` mock が必要。",
+      "evidence": "baseline_reporag/photon_pipeline.py:298-314 comment/code; `perl -ne ... _build_photon_deps` output: baseline_reporag/tests/test_photon_pipeline.py:472,502,1927,1959,2010,2044,2078,2108,2873,2904,3171,3208,3257,3326,3396,3477,4307,4372; design-policy.md:263-315 before update listed only direct migration",
+      "suggested_fix": "design-policy.md の test migration plan に `_build_photon_deps` success-path fixture migration を追加する。対象候補の列挙、再確認コマンド、`tokenizer:` ブロック追加、`AutoTokenizer.from_pretrained` の MagicMock patch 方針を明記し、完了条件にも追加する。"
+    },
+    {
+      "id": "DR3-002",
+      "severity": "Should Fix",
+      "category": "既存テスト",
+      "title": "`photon_mlx/tests/conftest.py` の test-only `_StubTokenizer` は削除対象外だが利用 test 群を明示すべき",
+      "description": "design-policy.md は `photon_mlx/tests/conftest.py` の docstring 更新のみを記載しているが、同 fixture は `photon_mlx/tests/test_inference.py` などが直接利用する test-only tokenizer であり、production module の `_StubTokenizer` とは別物。影響分析上、削除・rename しない理由と利用箇所を明示しておくと実装時の過剰削除を避けられる。",
+      "evidence": "photon_mlx/tests/conftest.py:5,15,31,41; photon_mlx/tests/test_inference.py:396,399,408,453,465,493; design-policy.md:270 before update only docstring update mention",
+      "suggested_fix": "design-policy.md Task 1 に `photon_mlx/tests/conftest.py` の test-only stub は維持する、`tests/` 配下なので no-scaffolding gate 対象外、利用 test 群があるため削除しない、という影響メモを追加する。"
+    },
+    {
+      "id": "DR3-003",
+      "severity": "Should Fix",
+      "category": "merge衝突",
+      "title": "#135 側は #138 real-tokenizer path を外して stub + checkpoint load に戻しており、rebase 方針をより具体化する必要がある",
+      "description": "design-policy.md §8 は #135 rebase が必要とするが、実 diff では #135 側が `tokenizer_section` / `_load_hf_tokenizer` / `tokenizer.vocab_size` canonical path を削除し、`_get_stub_tokenizer` + `model.checkpoint_path` load に置換している。tests 側も real tokenizer tests を checkpoint tests に置換し、tokenizer-less fixtures を増やしているため、単なる『手動統合』では #139 の主目的を失う可能性がある。",
+      "evidence": "`git diff HEAD..feature/issue-135-photon-retrain -- baseline_reporag/photon_pipeline.py baseline_reporag/tests/test_photon_pipeline.py photon_mlx/tests/conftest.py`: `_load_hf_tokenizer` deletion, `_get_stub_tokenizer(photon_cfg.tokenizer.vocab_size)` addition, checkpoint_path branch addition, real tokenizer tests replaced by checkpoint tests",
+      "suggested_fix": "design-policy.md §8 に、#139 側の real tokenizer / `tokenizer.vocab_size` canonical / fallback 削除を優先し、その後 #135 側の `photon_mlx.checkpoint.load_checkpoint(model, ckpt_dir)` を `PhotonModel` 構築直後へ再適用する、と明記する。#135 側 checkpoint smoke tests も tokenizer block + tokenizer mock を追加してから取り込む。"
+    },
+    {
+      "id": "DR3-004",
+      "severity": "Should Fix",
+      "category": "運用",
+      "title": "Phase B に回す `getattr default` audit が実装中に stale になるリスクを明示した方がよい",
+      "description": "design-policy.md は `session_memory` / `answering` 等の default 必須化を Phase B としているが、本 Issue 実装中に新しい `getattr(cfg, ...)` / `cfg.get(... default ...)` が追加されると、Issue 本文の 8 件リストと Phase B follow-up 対象がずれる可能性がある。破壊的変更ではないが、影響分析として最終 audit コマンドを完了前に再実行する手順があるとよい。",
+      "evidence": "design-policy.md:180-187 Phase B policy; `rg -n \"getattr\\(cfg|cfg\\.get\" baseline_reporag photon_mlx -g '*.py' -g '!*/tests/*'` still shows the known cfg default sites in baseline_reporag/photon_pipeline.py and pipeline.py",
+      "suggested_fix": "design-policy.md §7 リスク表または完了前確認に、実装完了前に `rg -n \"getattr\\(cfg|cfg\\.get\" ...` を再実行し、新規 default が増えていれば Phase B follow-up に追記する、という手順を追加する。"
+    }
+  ],
+  "must_fix_count": 1,
+  "should_fix_count": 3,
+  "nice_to_have_count": 0,
+  "overall_assessment": "Stage 1-2 の設計原則・整合性レビューは反映済みだが、影響範囲では `_build_photon_deps` 成功 path 既存 tests の tokenizer-less fixture が最大の未記載リスクだった。config / CI / bench/scripts/demo は実測上、即時破壊する欠落や production import は見つからない。"
+}

@@ -94,6 +94,10 @@ hotfix/*  --PR--> main (緊急時のみ)
 - `pytest` で全テスト通過を維持
 - 型ヒントを推奨（`from __future__ import annotations`）
 
+### Code Review Checklist
+
+PR レビュー時に **production code path** に scaffolding 命名 (`_Stub`, `_Mock`, `_Dummy`, `_Placeholder` 等) が残っていないか確認する。詳細は [`docs/code_review_checklist.md`](docs/code_review_checklist.md) を参照 (Issue #140 / S7-001 follow-up)。
+
 ### モジュール構成
 ```
 baseline_reporag/       # Baseline RepoRAG (プロダクト線)
@@ -102,6 +106,8 @@ baseline_reporag/       # Baseline RepoRAG (プロダクト線)
 ├── retrieval/          # hybrid retrieval・graph expansion
 ├── memory/             # session memory
 ├── generation/         # evidence pack・prompt・mlx_lm generator
+├── eval/               # 評価データ基盤
+│   └── institutional/  # 制度文書 eval set 生成 (LLMClient / ChunkLookup / 2-layer citation grader)
 ├── contracts.py        # MLX-free 共有型 (QueryResult)
 ├── pipeline.py         # 共通クエリパイプライン (Qwen)
 ├── pipeline_factory.py # provider 分岐 factory (lazy MLX import)
@@ -142,7 +148,7 @@ reports/                # ベンチマークレポート
 
 | チェック項目 | コマンド | 基準 |
 |-------------|----------|------|
-| テスト | `python -m pytest torch_ref/tests/ photon_mlx/tests/ baseline_reporag/tests/ tests/ -v` | 全テストパス (約 507/509、残り 2 件は `tests/test_generate_training_corpus.py` の既知の pre-existing failure) |
+| テスト | `python -m pytest torch_ref/tests/ photon_mlx/tests/ baseline_reporag/tests/ tests/ -v` | 全テストパス (約 510/512、残り 2 件は `tests/test_generate_training_corpus.py` の既知の pre-existing failure。Issue #145 で `tests/integration/test_photon_real_weights.py` 3 件追加) |
 | リント | `ruff check .` | 警告0件 |
 | フォーマット | `ruff format --check .` | 差分なし |
 | Baseline疎通 | `python -m baseline_reporag.cli --config configs/baseline.yaml --repo-id fastapi_fastapi --question "test"` | 応答あり |
@@ -151,11 +157,18 @@ reports/                # ベンチマークレポート
 
 ## プロダクトライン
 
-- **プロダクトライン**: baseline_rag (Gate 2 v2 判定: No-Go → PHOTON 凍結)
-- **現在のメトリクス** (Gate 2 v4, 出典: `reports/gate2_judgment_v4_final.md`):
-  - Static no-citation: baseline 21.7% / PHOTON 20.0%
-  - MT no-citation: 6.7%
-  - Retrieval noise: 0%
+- **プロダクトライン**: baseline_rag + PHOTON institutional retrain (#135 採用済)
+- **現在のメトリクス** (Gate 2 v6 = #135 Phase 8 採用、出典: `reports/institutional_photon_mt_eval_v2_3k.md`):
+  - **採用 PHOTON checkpoint**: `photon_institutional_retrain_20260428/step_003000` (val_loss=0.4777)
+  - **Turn 5-6 no-citation rate (refusal-aware)**: **0.00%** (MVP < 6% / 理想 < 3% を共に達成)
+  - **Follow-up latency p50**: 12,092 ms (-37.7% vs baseline 19,426 ms)
+  - **Val_loss**: 0.4777 (-70.6% vs mulmoclaude 600-step 1.6238、perplexity 5.07 → 1.61)
+  - 訓練データ: institutional_documents 4,228 docs + mulmoclaude train_multi (JP:0.7/EN:0.3)
+  - エビデンス: `reports/institutional_photon_mt_eval_v2_3k_bug_check.md` (refusal-aware 検証)
+  - 計測: `scripts/run_multi_turn_eval.py` は Issue #156 で `is_refusal` / `true_failure` を JSONL/summary に直接出力 (過去 logs は `scripts/regrade_eval_with_refusal.py` で再集計可能)
+- **過去メトリクス参考**:
+  - Gate 2 v4 (#113 / mulmoclaude 600-step): Turn 5-6 NC 10.83%, follow-up p50 10,707 ms
+  - Gate 2 v5 (#148 Phase A): institutional baseline 7.78% NC、PHOTON random-init bug 修正
 - **運用ドキュメント**: `docs/deployment.md`, `docs/troubleshooting.md`
 
 ---
@@ -164,6 +177,10 @@ reports/                # ベンチマークレポート
 
 | コマンド | 説明 |
 |----------|------|
+| `/multi-stage-issue-review` | Issue記載内容の多段階レビュー（通常→影響範囲）×2回と指摘対応を自動実行（Codex 担当 Stage 5-8 必須） |
+| `/multi-stage-design-review` | 設計書の4段階レビュー（通常→整合性→影響分析→セキュリティ）と指摘対応を自動実行（Codex 担当 Stage 3-4 必須） |
+| `/pm-auto-issue2dev` | Issueレビューから実装完了まで完全自動化（Issueレビュー→設計→設計レビュー→作業計画→TDD実装） |
+| `/pm-auto-design2dev` | 設計レビューから実装完了まで完全自動化（設計→設計レビュー→作業計画→TDD実装） |
 | `/work-plan` | Issue単位の作業計画立案 |
 | `/tdd-impl` | テスト駆動開発で実装 |
 | `/pm-auto-dev` | Issue開発を完全自動化（TDD→テスト→報告） |

@@ -1,10 +1,45 @@
 # MVP メトリクス基準
 
-**更新日**: 2026-04-24
+**更新日**: 2026-04-28 (Issue #135 Phase 8 採用反映)
 
-## 現在のメトリクス
+## institutional retrain (#135 Phase 8 採用、Phase 2 完了)
 
-### baseline_rag（`configs/baseline.yaml`、Qwen 14B のみ）
+`configs/institutional_docs_photon.yaml` の checkpoint_path を `step_000600` (mulmoclaude only) → `photon_institutional_retrain_20260428/step_003000` (institutional retrain) に昇格。
+
+**採用 checkpoint**: `photon_institutional_retrain_20260428/step_003000`
+- val_loss: **0.4777** (-70.6% vs mulmoclaude 1.6238、perplexity 5.07 → 1.61)
+- 訓練 step: 累計 3,000 (resume from mulmoclaude 600 + 追加 2,400 step JP:0.7/EN:0.3 mix)
+- 訓練データ: institutional_documents 4,228 docs (raw markdown tokenize、26 eval source docs を除外)
+                 + mulmoclaude train_multi (英語コード)
+
+### Phase 7 institutional MT eval (#135、2026-04-28 実測)
+
+| 指標 | 表面値 (raw NC) | refusal-aware | 受入条件 |
+|------|----------------|---------------|----------|
+| **Turn 5-6 NC** | 6.67% | **0.00%** | ✅ < 6% (MVP) / < 3% (理想) 共に達成 |
+| Overall NC | 8.33% | **0.00%** | (参考) |
+| Follow-up p50 latency | 12,092 ms | (raw 同値) | ✅ -37.7% vs baseline 19,426 ms |
+
+raw NC 値は Issue #156 の計測 bug (`run_multi_turn_eval.py` が `is_refusal` 出力欠落) 由来。
+PHOTON 出力 180/180 で `[C:N]` markers と `cited_chunk_ids` 完全整合、ハルシネーション 0 件。
+
+### #113 Phase A 比較 (改善幅)
+
+| 指標 | mulmoclaude 600 (#113) | retrain 3K (#135) | Δ |
+|------|----------------------|------------------|---|
+| Val_loss | 1.6238 | 0.4777 | **-70.6%** ✅ |
+| Turn 5-6 NC (raw) | 10.83% | 6.67% | -38.4% (refusal-aware では 0%) |
+| Follow-up p50 | 10,707 ms | 12,092 ms | +12.9% (許容範囲、目標 -30% は達成) |
+
+エビデンス:
+- `reports/institutional_photon_mt_eval_v2_3k.md` (採用判定)
+- `reports/institutional_photon_mt_eval_v2_3k_bug_check.md` (refusal-aware 検証)
+
+---
+
+## 過去メトリクス参考
+
+### baseline_rag（`configs/baseline.yaml`、Qwen 14B のみ、Phase 1 時点）
 
 | 指標 | Static | MT |
 |------|--------|-----|
@@ -14,7 +49,7 @@
 | P50 latency | 19.5s | 22.3s first / 20.1s follow-up |
 | Retrieval noise | 0% | 0% |
 
-### photon_rag（`configs/photon_small.yaml`、default `aggregation: weighted`）
+### photon_rag（`configs/photon_small.yaml`、default `aggregation: weighted`、Phase 1 時点）
 
 2-run average（LLM 非決定性分散 ±4-5pp を平滑化、2026-04-23 実測）
 
@@ -66,13 +101,13 @@ PHOTON の本領は **Turn 5-6 の長期文脈維持**。単発質問（Static, 
 | fallback recall | ≥ 0.80 | スクリプト化済・計測運用中 | ✅ |
 | テスト通過率 | 100% | 832/834（pre-existing 2 除外）| ✅ |
 
-### Phase 2（汎用化）— ❌ 未達
+### Phase 2（汎用化）— ✅ 達成（2026-04-28、#135 採用 / Issue #116 完了レポート）
 
 | 指標 | 基準 | 現状 | 判定 |
 |------|------|------|------|
-| 他 repo MT NC | < 15% | FastAPI のみで 7.8% | ❌ 未検証 |
-| 他 repo latency 改善 | baseline -20%+ | FastAPI のみで -34% | ❌ 未検証 |
-| FastAPI 改善の再現率 | 70%+ | 未計測 | ❌ |
+| 他 repo MT NC | < 15% | 制度文書 8.33% raw / 0.00% refusal-aware (#135 step_003000) | ✅ |
+| 他 repo latency 改善 | baseline -20%+ | 制度文書 -37.7% (12,092 ms vs baseline 19,426 ms、#135) | ✅ |
+| FastAPI 改善の再現率 | 70%+ | Indicator A: 100% / Indicator B: 110%（`reports/phase2_cross_domain_validation.md`） | ✅ |
 
 ### Phase 3（配布）— ❌ 未達
 

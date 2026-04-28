@@ -29,7 +29,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from .config import Config
+from .config import Config, is_symbol_graph_enabled, validate_repo_id
 from .contracts import QueryResult  # re-exported; MLX-free
 
 if TYPE_CHECKING:
@@ -106,11 +106,22 @@ def _build_baseline_deps_no_mlx(cfg: Config) -> dict:
     from .memory.session import SessionManager
     from .retrieval.reranker import CrossEncoderReranker
 
-    idx_dir = Path(cfg.paths.data_root) / "indexes" / cfg.repo.repo_id
+    # CB-004: refuse ``../outside`` / ``/tmp/x`` / etc. before they reach
+    # ``Path`` concatenation. ``scripts/build_symbol_graph.py`` already
+    # ran the same check; now every index-loading entry point does.
+    repo_id = validate_repo_id(cfg.repo.repo_id)
+    idx_dir = Path(cfg.paths.data_root) / "indexes" / repo_id
     store = ChunkStore(idx_dir / "chunks.db")
     lexical = LexicalIndex.load(idx_dir / "lexical.pkl")
     embedding = EmbeddingIndex.load(idx_dir / "embedding")
-    graph = SymbolGraph.load(idx_dir / "symbol_graph.json")
+    # Issue #109: ``indexing.symbol_graph.enabled=false`` skips graph load.
+    # The ``graph_expansion`` helper accepts ``graph=None`` and falls back
+    # to file-neighbors only (see ``retrieval/graph_expansion.py``).
+    graph: SymbolGraph | None = (
+        SymbolGraph.load(idx_dir / "symbol_graph.json")
+        if is_symbol_graph_enabled(cfg)
+        else None
+    )
     sessions = SessionManager(log_dir=Path(cfg.paths.log_root) / "sessions")
     generator = Generator(
         model_id=cfg.model.model_id,
@@ -126,7 +137,8 @@ def _build_baseline_deps_no_mlx(cfg: Config) -> dict:
         CrossEncoderReranker(
             model_id=reranker_cfg.get(
                 "model_id", "cross-encoder/ms-marco-MiniLM-L-6-v2"
-            )
+            ),
+            noise_patterns=reranker_cfg.get("noise_patterns"),
         )
         if reranker_cfg.get("enabled", False)
         else None

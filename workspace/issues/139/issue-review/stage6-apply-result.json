@@ -1,0 +1,28 @@
+{
+  "stage": 6,
+  "stage_name": "指摘事項反映（2回目 / Stage 5）",
+  "iteration": 2,
+  "reviewer": "codex",
+  "applied_findings": [
+    {
+      "id": "S5-001",
+      "severity": "Should Fix",
+      "action": "Task 3 の対象 yaml を `provider == \"photon\"` のみから PHOTON profile yaml (`provider == \"photon\"` または `configs/photon_*.yaml` / `configs/institutional_docs_photon.yaml`) に拡張し、サンプルコードも filename 判定 + `CONFIGS_DIR` 利用に修正。",
+      "result": "applied"
+    },
+    {
+      "id": "S5-002",
+      "severity": "Should Fix",
+      "action": "Task 1 の方針・受入条件・影響ファイルに tokenizer load failure の `ValueError` 正規化と新規 test 要件を追記。",
+      "result": "applied"
+    }
+  ],
+  "must_fix_applied": 0,
+  "should_fix_applied": 2,
+  "nice_to_have_applied": 0,
+  "side_effects": [
+    "Issue #139 本文を Stage 5 指摘反映後の内容に更新",
+    "workspace/issues/139/issue-review/updated-issue-body.md を GitHub Issue 本文と同期"
+  ],
+  "issue_url": "https://github.com/Kewton/photon-mlx/issues/139"
+}

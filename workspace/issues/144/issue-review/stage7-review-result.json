@@ -1,0 +1,39 @@
+{
+  "stage": 7,
+  "focus": "影響範囲（2回目、Codex クロスレビュー）",
+  "reviewer": "codex",
+  "summary": "Stage 3 の主要指摘と Stage 5-6 の修正は概ね現状コードベースと整合している。`scripts/` は `tests/test_no_scaffolding_in_prod.py` の PROD_ROOTS 対象外で、`configs/institutional_docs.yaml` 直接書き換え禁止により `tests/test_pipeline_factory_yaml_invariants.py` の V4 pin も維持される。`data/indexes/` と `logs/` は gitignored かつ本 worktree には既存 artifact がなく、`institutional_documents_V2` の repo_id 分離で既存 V0/V1/V3/V4 破壊リスクは低い。CI は weekly_eval が `configs/baseline.yaml` のみを参照するため直接影響なし。silent change 確認では feature/issue-144 は origin/develop より #116 merge 1 件分古いが、差分は phase2 report/workspace mvp 更新のみで Issue #144 の対象コード・config・report には直接競合しない。一方、Option B fallback の venv 手順と低確率の V2 採用分岐に、既存依存管理・gitignore・invariant test との整合漏れが残るため Should Fix 3 件を指摘する。",
+  "findings": [
+    {
+      "id": "S7-001",
+      "severity": "Should Fix",
+      "category": "依存関係",
+      "title": "Option B の `pip install -e .` は現 repo で実行不能",
+      "description": "Issue 本文の Option B fallback は専用 venv 内で `pip install -e .` を実行する手順になっているが、現 repository には `pyproject.toml` / `setup.py` / `setup.cfg` が存在せず、editable install 可能な Python package として定義されていない。既存 CI も `.github/workflows/weekly_eval.yml` で `pip install -r requirements.txt` のみを使っている。Option A が失敗して Option B に分岐した場合、この手順は依存解決前に失敗し、V2 build fallback として機能しない。",
+      "location": "Issue本文 Option B / requirements.txt / .github/workflows/weekly_eval.yml",
+      "recommendation": "Option B の手順を repo root 実行前提の `python -m pip install -r requirements.txt \"transformers<5.0\" \"sentence-transformers<5.0\"` に変更する。`pip install -e .` は使わない旨を明記する。"
+    },
+    {
+      "id": "S7-002",
+      "severity": "Should Fix",
+      "category": "後方互換性",
+      "title": "Option B の `.venv-ruri-v2` が `.gitignore` 対象外で worktree 汚染リスクがある",
+      "description": "Issue 本文は既存 V0/V1/V3/V4 計測環境を壊さないため `.venv-ruri-v2` を作る方針だが、現 `.gitignore` は `.venv/` だけを ignore しており `.venv-ruri-v2/` や `.venv-ruri-*/` は対象外。Option B を実行すると大量の venv ファイルが未追跡として現れ、誤って `git add` されるリスクがある。fallback は低頻度でも、手順として Issue に明記されている以上、後方互換性・作業ツリー衛生の観点で ignore 方針を固定すべき。",
+      "location": "Issue本文 Option B / .gitignore:1-4",
+      "recommendation": "Option B を採用する場合は `.gitignore` に `.venv-ruri-*/` を追加することを Task 0 または Option B 手順に明記し、影響ファイルに `.gitignore` (Option B 採用時のみ) を追加する。"
+    },
+    {
+      "id": "S7-003",
+      "severity": "Should Fix",
+      "category": "既存テスト影響",
+      "title": "V2 が V4 を上回った場合の採用分岐に invariant test / deployment docs 更新が含まれていない",
+      "description": "Issue 本文は低確率 case として `V2 が V4 を上回った場合: #137 reopen + 新 PR で configs/institutional_docs.yaml 採用 variant を更新` としている。しかし `tests/test_pipeline_factory_yaml_invariants.py` は institutional profile の `reranker.model_id`、`embedding.model_id`、`embedding.max_input_chars` を現在の V4 採用値に pin しているため、V2 採用で `configs/institutional_docs.yaml` を変更するなら同じ PR で invariant 定数も更新しないと CI が失敗する。また `docs/deployment.md` には institutional profile の bge-m3/bge-reranker-v2-m3 常駐メモリ前提が記載されているため、採用 variant が変わる場合は deployment memory note も条件付きで更新対象になる。",
+      "location": "Issue本文 受入条件 `V2 が V4 を上回った場合` / tests/test_pipeline_factory_yaml_invariants.py:43-47 / docs/deployment.md:13-16",
+      "recommendation": "低確率 case の受入条件を `configs/institutional_docs.yaml` だけでなく `tests/test_pipeline_factory_yaml_invariants.py` の institutional pin 定数と `docs/deployment.md` の institutional memory note も更新する、に拡張する。影響ファイルにも条件付き更新対象として両ファイルを追記する。"
+    }
+  ],
+  "must_fix_count": 0,
+  "should_fix_count": 3,
+  "nice_to_have_count": 0,
+  "overall_assessment": "approve_with_changes"
+}

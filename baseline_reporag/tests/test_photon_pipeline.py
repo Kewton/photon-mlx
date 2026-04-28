@@ -4,7 +4,39 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from baseline_reporag.generation.evidence_pack import build_evidence_pack
+
+# Issue #139 / Task 2.5: stub _load_hf_tokenizer for tests that don't exercise
+# real HuggingFace loader behavior. Tests that test loader behavior (real
+# tokenizer success path, vocab-size mismatch, load failure normalization,
+# unsafe-id rejection) opt out via @pytest.mark.real_hf_loader.
+#
+# All affected fixtures must include a `tokenizer:` block with at minimum
+# `tokenizer_id: "fake-org/fake-tokenizer"` — _build_photon_deps now raises
+# ValueError when tokenizer_id is missing or unsafe (Issue #139 fail-fast
+# replaces the legacy _StubTokenizer fallback).
+_MINIMAL_TOKENIZER_BLOCK = 'tokenizer:\n  tokenizer_id: "fake-org/fake-tokenizer"\n'
+
+
+@pytest.fixture(autouse=True)
+def _stub_hf_loader(request, monkeypatch):
+    if "real_hf_loader" in request.keywords:
+        return
+
+    def _fake(tokenizer_id, expected_vocab_size):
+        fake = MagicMock()
+        fake.vocab_size = expected_vocab_size
+        fake.pad_token_id = 0
+        fake.encode.return_value = [1, 2, 3]
+        return fake
+
+    monkeypatch.setattr(
+        "baseline_reporag.photon_pipeline._load_hf_tokenizer",
+        _fake,
+    )
+
 
 # ---------------------------------------------------------------------------
 # TDD Cycle 1: Config._config_path and build_pipeline factory
@@ -394,6 +426,35 @@ class TestBuildMessagesSessionSummary:
 
 
 # ---------------------------------------------------------------------------
+# Issue #115: Japanese prompt hint must persist on PHOTON 2nd-turn calls
+# (where include_few_shot=False is the typical follow-up path) so the
+# institutional-doc routing rule is independent of the format-hint switch.
+# ---------------------------------------------------------------------------
+
+
+class TestBuildMessagesJapaneseFollowUp:
+    """build_messages() retains the Japanese institutional hint when called
+    in the PHOTON follow-up shape (include_few_shot=False, with a non-empty
+    session_summary). Signature must remain unchanged."""
+
+    def test_japanese_hint_preserved_with_include_few_shot_false(self):
+        from baseline_reporag.generation.prompt import build_messages
+
+        msgs = build_messages(
+            question="制度文書の第3条に関する補足説明をしてください",
+            evidence_text="[C:1] doc.md\n第3条 補足",
+            session_summary="[PHOTON] previous turn discussed 第2条",
+            include_few_shot=False,
+        )
+        # Signature is unchanged: 2 messages (system + user) come back.
+        assert len(msgs) == 2
+        assert msgs[0]["role"] == "system"
+        # DR1-006: substring assert on a stable phrase rather than
+        # importing the private constant.
+        assert "制度文書を根拠に回答する場合は" in msgs[0]["content"]
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -453,6 +514,8 @@ class TestBuildPhotonDeps:
             "  intermediate_size: 256\n"
             "  num_heads: 4\n"
             "  vocab_size: 1000\n"
+            "tokenizer:\n"
+            '  tokenizer_id: "fake-org/fake-tokenizer"\n'
             "hierarchy:\n"
             "  levels: 2\n"
             "  chunk_sizes: [4, 4]\n"
@@ -487,6 +550,8 @@ class TestBuildPhotonDeps:
             "  intermediate_size: 256\n"
             "  num_heads: 4\n"
             "  vocab_size: 1000\n"
+            "tokenizer:\n"
+            '  tokenizer_id: "fake-org/fake-tokenizer"\n'
             "hierarchy:\n"
             "  levels: 2\n"
             "  chunk_sizes: [4, 4]\n"
@@ -499,6 +564,290 @@ class TestBuildPhotonDeps:
         cfg = load_config(str(cfg_file))
         deps = _build_photon_deps(cfg)
         assert deps["safe_recgen"] is None
+
+
+# ---------------------------------------------------------------------------
+# Issue #138: training/inference tokenizer must be unified
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.real_hf_loader
+class TestBuildPhotonDepsRealTokenizer:
+    """``_build_photon_deps`` must load the real HuggingFace tokenizer when
+    ``cfg.tokenizer.tokenizer_id`` is set. Issue #138 introduced the real
+    HF loader path; Issue #139 made it the only path (the legacy
+    ``_StubTokenizer`` fallback was deleted) and added validation +
+    exception normalization at the ``_build_photon_deps`` boundary.
+
+    Tests in this class exercise the real ``_load_hf_tokenizer`` and
+    therefore opt out of the module-level autouse stub via the
+    ``real_hf_loader`` marker.
+    """
+
+    def test_loads_real_tokenizer_when_tokenizer_id_set(self, tmp_path):
+        from baseline_reporag.config import load_config
+        from baseline_reporag.photon_pipeline import _build_photon_deps
+
+        cfg_file = tmp_path / "photon.yaml"
+        cfg_file.write_text(
+            "model:\n"
+            "  provider: photon\n"
+            "  architecture: photon_decoder\n"
+            "  base_embed_dim: 64\n"
+            "  hidden_size: 128\n"
+            "  intermediate_size: 256\n"
+            "  num_heads: 4\n"
+            "hierarchy:\n"
+            "  levels: 2\n"
+            "  chunk_sizes: [4, 4]\n"
+            "  encoder_layers_per_level: [2, 2]\n"
+            "  decoder_layers_per_level: [2, 2]\n"
+            "tokenizer:\n"
+            '  tokenizer_id: "fake-org/fake-tokenizer"\n'
+            "  vocab_size: 152064\n"
+            "inference:\n"
+            "  hierarchical_prefill: true\n"
+            "  safe_recgen_enabled: false\n"
+        )
+        cfg = load_config(str(cfg_file))
+
+        fake_tokenizer = MagicMock()
+        fake_tokenizer.vocab_size = 152064
+        fake_tokenizer.pad_token_id = 0
+        fake_tokenizer.encode.return_value = [1, 2, 3]
+
+        with patch(
+            "transformers.AutoTokenizer.from_pretrained",
+            return_value=fake_tokenizer,
+        ) as mock_from_pretrained:
+            deps = _build_photon_deps(cfg)
+
+        mock_from_pretrained.assert_called_once_with(
+            "fake-org/fake-tokenizer", trust_remote_code=False
+        )
+        assert deps["tokenizer"] is fake_tokenizer
+        assert deps["photon_cfg"].tokenizer.vocab_size == 152064
+
+    def test_vocab_size_mismatch_raises(self, tmp_path):
+        from baseline_reporag.config import load_config
+        from baseline_reporag.photon_pipeline import _build_photon_deps
+
+        cfg_file = tmp_path / "photon.yaml"
+        cfg_file.write_text(
+            "model:\n"
+            "  provider: photon\n"
+            "  architecture: photon_decoder\n"
+            "  base_embed_dim: 64\n"
+            "  hidden_size: 128\n"
+            "  intermediate_size: 256\n"
+            "  num_heads: 4\n"
+            "hierarchy:\n"
+            "  levels: 2\n"
+            "  chunk_sizes: [4, 4]\n"
+            "  encoder_layers_per_level: [2, 2]\n"
+            "  decoder_layers_per_level: [2, 2]\n"
+            "tokenizer:\n"
+            '  tokenizer_id: "fake-org/fake-tokenizer"\n'
+            "  vocab_size: 152064\n"
+            "inference:\n"
+            "  hierarchical_prefill: true\n"
+            "  safe_recgen_enabled: false\n"
+        )
+        cfg = load_config(str(cfg_file))
+
+        fake_tokenizer = MagicMock()
+        fake_tokenizer.vocab_size = 32000  # mismatch
+        fake_tokenizer.pad_token_id = 0
+
+        with patch(
+            "transformers.AutoTokenizer.from_pretrained",
+            return_value=fake_tokenizer,
+        ):
+            with pytest.raises(ValueError, match="vocab_size"):
+                _build_photon_deps(cfg)
+
+    def test_raises_when_tokenizer_id_missing(self, tmp_path):
+        """Issue #139: ``_build_photon_deps`` must raise ``ValueError`` when
+        ``cfg.tokenizer.tokenizer_id`` is unset (no more silent stub fallback)."""
+        from baseline_reporag.config import load_config
+        from baseline_reporag.photon_pipeline import _build_photon_deps
+
+        cfg_file = tmp_path / "photon.yaml"
+        cfg_file.write_text(
+            "model:\n"
+            "  provider: photon\n"
+            "  architecture: photon_decoder\n"
+            "  base_embed_dim: 64\n"
+            "  hidden_size: 128\n"
+            "  intermediate_size: 256\n"
+            "  num_heads: 4\n"
+            "  vocab_size: 1000\n"
+            "hierarchy:\n"
+            "  levels: 2\n"
+            "  chunk_sizes: [4, 4]\n"
+            "  encoder_layers_per_level: [2, 2]\n"
+            "  decoder_layers_per_level: [2, 2]\n"
+            "inference:\n"
+            "  hierarchical_prefill: true\n"
+            "  safe_recgen_enabled: false\n"
+        )
+        cfg = load_config(str(cfg_file))
+        with pytest.raises(ValueError, match="tokenizer_id is required"):
+            _build_photon_deps(cfg)
+
+    def test_raises_when_tokenizer_load_fails(self, tmp_path):
+        """Issue #139 / S5-002: ``AutoTokenizer.from_pretrained`` failures
+        (HF Hub down, gated model, unknown id) are normalized to
+        ``ValueError`` at the ``_build_photon_deps`` boundary, with the
+        sanitized tokenizer_id included for operator diagnosis."""
+        from baseline_reporag.config import load_config
+        from baseline_reporag.photon_pipeline import _build_photon_deps
+
+        cfg_file = tmp_path / "photon.yaml"
+        cfg_file.write_text(
+            "model:\n"
+            "  provider: photon\n"
+            "  architecture: photon_decoder\n"
+            "  base_embed_dim: 64\n"
+            "  hidden_size: 128\n"
+            "  intermediate_size: 256\n"
+            "  num_heads: 4\n"
+            "hierarchy:\n"
+            "  levels: 2\n"
+            "  chunk_sizes: [4, 4]\n"
+            "  encoder_layers_per_level: [2, 2]\n"
+            "  decoder_layers_per_level: [2, 2]\n"
+            "tokenizer:\n"
+            '  tokenizer_id: "fake-org/non-existent-tokenizer"\n'
+            "  vocab_size: 152064\n"
+            "inference:\n"
+            "  hierarchical_prefill: true\n"
+            "  safe_recgen_enabled: false\n"
+        )
+        cfg = load_config(str(cfg_file))
+
+        def _boom(*args, **kwargs):
+            raise OSError("HF Hub unreachable")
+
+        with patch(
+            "transformers.AutoTokenizer.from_pretrained",
+            side_effect=_boom,
+        ):
+            with pytest.raises(
+                ValueError,
+                match=r"failed to load tokenizer 'fake-org/non-existent-tokenizer'",
+            ):
+                _build_photon_deps(cfg)
+
+    @pytest.mark.parametrize(
+        "unsafe_id",
+        [
+            "",  # empty
+            "no-slash",  # missing '/'
+            "http://evil.example/etc/passwd",  # URL form
+            "../../etc/passwd",  # path traversal
+            "a\\b/c",  # backslash
+            "a/b\nc",  # newline (log injection)
+            "/abs/path",  # leading slash
+            "a/b/c",  # extra slash
+            # Codex CB-001: HF AutoTokenizer.from_pretrained accepts paths,
+            # so dot-only / leading-dot / traversal-segment forms must also
+            # be rejected by component-level validation, not just regex shape.
+            "../model",  # parent-dir component
+            "org/..",  # parent-dir as second component
+            "./model",  # current-dir leading
+            ".cache/model",  # leading dot (hidden-file path-like)
+            "org/.cache",  # second component leading dot
+            "..a/b",  # leading double-dot
+            "a/..b",  # trailing component leading double-dot
+            "~/model",  # home-relative
+            "a" * 250 + "/b",  # exceeds total-length cap
+        ],
+    )
+    def test_rejects_unsafe_tokenizer_id(self, tmp_path, unsafe_id):
+        """Issue #139 / DR4-001: yaml-supplied tokenizer_id is untrusted
+        input. ``_build_photon_deps`` must reject any value that does not
+        match the HF repo-id allowlist (``<org>/<name>`` with
+        ``[A-Za-z0-9._-]`` only) before it reaches AutoTokenizer or any
+        log/error message."""
+        from baseline_reporag.config import load_config
+        from baseline_reporag.photon_pipeline import _build_photon_deps
+
+        cfg_file = tmp_path / "photon.yaml"
+        # Dump as yaml-safe via direct yaml string with the unsafe id quoted.
+        # Some unsafe values would break naive yaml interpolation; we use a
+        # block scalar style to keep the value literal.
+        import yaml as _yaml
+
+        cfg_dict = {
+            "model": {
+                "provider": "photon",
+                "architecture": "photon_decoder",
+                "base_embed_dim": 64,
+                "hidden_size": 128,
+                "intermediate_size": 256,
+                "num_heads": 4,
+                "vocab_size": 1000,
+            },
+            "hierarchy": {
+                "levels": 2,
+                "chunk_sizes": [4, 4],
+                "encoder_layers_per_level": [2, 2],
+                "decoder_layers_per_level": [2, 2],
+            },
+            "tokenizer": {"tokenizer_id": unsafe_id},
+            "inference": {
+                "hierarchical_prefill": True,
+                "safe_recgen_enabled": False,
+            },
+        }
+        cfg_file.write_text(_yaml.safe_dump(cfg_dict))
+        cfg = load_config(str(cfg_file))
+        with pytest.raises(ValueError):
+            _build_photon_deps(cfg)
+
+    def test_institutional_docs_photon_uses_tokenizer_section_vocab(self, tmp_path):
+        """``cfg.tokenizer.vocab_size`` (152064) must drive PhotonModel sizing,
+        not ``cfg.model.vocab_size`` (which is unset in production photon
+        configs and would silently fall back to a 1000-vocab embedding —
+        the latent half of the Issue #138 mismatch)."""
+        from baseline_reporag.config import load_config
+        from baseline_reporag.photon_pipeline import _build_photon_deps
+
+        cfg_file = tmp_path / "photon.yaml"
+        cfg_file.write_text(
+            "model:\n"
+            "  provider: photon\n"
+            "  architecture: photon_decoder\n"
+            "  base_embed_dim: 64\n"
+            "  hidden_size: 128\n"
+            "  intermediate_size: 256\n"
+            "  num_heads: 4\n"
+            "hierarchy:\n"
+            "  levels: 2\n"
+            "  chunk_sizes: [4, 4]\n"
+            "  encoder_layers_per_level: [2, 2]\n"
+            "  decoder_layers_per_level: [2, 2]\n"
+            "tokenizer:\n"
+            '  tokenizer_id: "fake-org/qwen-like"\n'
+            "  vocab_size: 152064\n"
+            "inference:\n"
+            "  hierarchical_prefill: true\n"
+            "  safe_recgen_enabled: false\n"
+        )
+        cfg = load_config(str(cfg_file))
+
+        fake_tokenizer = MagicMock()
+        fake_tokenizer.vocab_size = 152064
+        fake_tokenizer.pad_token_id = 0
+
+        with patch(
+            "transformers.AutoTokenizer.from_pretrained",
+            return_value=fake_tokenizer,
+        ):
+            deps = _build_photon_deps(cfg)
+
+        assert deps["photon_cfg"].tokenizer.vocab_size == 152064
 
 
 # ---------------------------------------------------------------------------
@@ -1736,6 +2085,8 @@ class TestBuildPhotonDepsWiresRopeScaling:
             "  rope_theta: 10000000.0\n"
             "  rope_scaling: ntk\n"
             "  rope_scale_factor: 4.0\n"
+            "tokenizer:\n"
+            '  tokenizer_id: "fake-org/fake-tokenizer"\n'
             "hierarchy:\n"
             "  levels: 2\n"
             "  chunk_sizes: [4, 4]\n"
@@ -1768,6 +2119,8 @@ class TestBuildPhotonDepsWiresRopeScaling:
             "  intermediate_size: 256\n"
             "  num_heads: 4\n"
             "  vocab_size: 1000\n"
+            "tokenizer:\n"
+            '  tokenizer_id: "fake-org/fake-tokenizer"\n'
             "hierarchy:\n"
             "  levels: 2\n"
             "  chunk_sizes: [4, 4]\n"
@@ -1818,6 +2171,8 @@ class TestBuildPhotonDepsIssue63SafeRecGen:
             "  num_heads: 2\n"
             "  head_dim: 16\n"
             "  vocab_size: 256\n"
+            "tokenizer:\n"
+            '  tokenizer_id: "fake-org/fake-tokenizer"\n'
             "hierarchy:\n"
             "  levels: 2\n"
             "  chunk_sizes: [4, 4]\n"
@@ -1849,6 +2204,8 @@ class TestBuildPhotonDepsIssue63SafeRecGen:
             "  num_heads: 2\n"
             "  head_dim: 16\n"
             "  vocab_size: 256\n"
+            "tokenizer:\n"
+            '  tokenizer_id: "fake-org/fake-tokenizer"\n'
             "hierarchy:\n"
             "  levels: 2\n"
             "  chunk_sizes: [4, 4]\n"
@@ -1888,6 +2245,8 @@ class TestBuildPhotonDepsIssue63SafeRecGen:
             "  num_heads: 2\n"
             "  head_dim: 16\n"
             "  vocab_size: 256\n"
+            "tokenizer:\n"
+            '  tokenizer_id: "fake-org/fake-tokenizer"\n'
             "hierarchy:\n"
             "  levels: 2\n"
             "  chunk_sizes: [4, 4]\n"
@@ -1919,6 +2278,8 @@ class TestBuildPhotonDepsIssue63SafeRecGen:
             "  num_heads: 2\n"
             "  head_dim: 16\n"
             "  vocab_size: 256\n"
+            "tokenizer:\n"
+            '  tokenizer_id: "fake-org/fake-tokenizer"\n'
             "hierarchy:\n"
             "  levels: 2\n"
             "  chunk_sizes: [4, 4]\n"
@@ -2391,10 +2752,17 @@ def _run_generation_branch_query(
     photon_answer="PHOTON generated [C:1]",
     photon_side_effect=None,
     qwen_answer="Qwen answer [C:1]",
+    seed=None,
 ):
     """Drive PhotonRAGPipeline.query end-to-end with mocked retrieval.
 
     Returns ``(result, baseline_deps, photon_deps, log_payload)``.
+
+    Issue #143: ``seed`` (keyword-only, default ``None``) is forwarded
+    into ``pipeline.query`` so seed-propagation tests can assert that
+    every Qwen-call site (Qwen-only path + 2 fallback paths) receives
+    the seed kwarg.  ``seed=None`` keeps the legacy call shape so
+    pre-#143 tests in this module keep working unchanged.
     """
     from baseline_reporag.ingestion.chunker import Chunk
 
@@ -2443,7 +2811,12 @@ def _run_generation_branch_query(
             return_value=expanded_ids,
         ),
     ):
-        result = pipeline.query("question?", session_id="s1", repo_id="test-repo")
+        if seed is not None:
+            result = pipeline.query(
+                "question?", session_id="s1", repo_id="test-repo", seed=seed
+            )
+        else:
+            result = pipeline.query("question?", session_id="s1", repo_id="test-repo")
 
     log_call = baseline_deps["logger"].log_turn.call_args
     log_payload = log_call.args[0] if log_call.args else log_call.kwargs["entry"]
@@ -2676,6 +3049,8 @@ class TestBuildPhotonDepsWorkingMemory:
             "  intermediate_size: 256\n"
             "  num_heads: 4\n"
             "  vocab_size: 1000\n"
+            "tokenizer:\n"
+            '  tokenizer_id: "fake-org/fake-tokenizer"\n'
             "hierarchy:\n"
             "  levels: 2\n"
             "  chunk_sizes: [4, 4]\n"
@@ -2713,6 +3088,8 @@ class TestBuildPhotonDepsWorkingMemory:
             "  intermediate_size: 256\n"
             "  num_heads: 4\n"
             "  vocab_size: 1000\n"
+            "tokenizer:\n"
+            '  tokenizer_id: "fake-org/fake-tokenizer"\n'
             "hierarchy:\n"
             "  levels: 2\n"
             "  chunk_sizes: [4, 4]\n"
@@ -2973,6 +3350,8 @@ class TestWorkingMemoryConfigAggregationYamlPropagation:
             "  intermediate_size: 256\n"
             "  num_heads: 4\n"
             "  vocab_size: 1000\n"
+            "tokenizer:\n"
+            '  tokenizer_id: "fake-org/fake-tokenizer"\n'
             "hierarchy:\n"
             "  levels: 2\n"
             "  chunk_sizes: [4, 4]\n"
@@ -3012,6 +3391,8 @@ class TestWorkingMemoryConfigAggregationYamlPropagation:
             "  intermediate_size: 256\n"
             "  num_heads: 4\n"
             "  vocab_size: 1000\n"
+            "tokenizer:\n"
+            '  tokenizer_id: "fake-org/fake-tokenizer"\n'
             "hierarchy:\n"
             "  levels: 2\n"
             "  chunk_sizes: [4, 4]\n"
@@ -3057,6 +3438,8 @@ class TestWorkingMemoryConfigAggregationYamlPropagation:
             "  intermediate_size: 256\n"
             "  num_heads: 4\n"
             "  vocab_size: 1000\n"
+            "tokenizer:\n"
+            '  tokenizer_id: "fake-org/fake-tokenizer"\n'
             "hierarchy:\n"
             "  levels: 2\n"
             "  chunk_sizes: [4, 4]\n"
@@ -3126,6 +3509,8 @@ class TestWorkingMemoryConfigAggregationYamlPropagation:
             "  intermediate_size: 256\n"
             "  num_heads: 4\n"
             "  vocab_size: 1000\n"
+            "tokenizer:\n"
+            '  tokenizer_id: "fake-org/fake-tokenizer"\n'
             "hierarchy:\n"
             "  levels: 2\n"
             "  chunk_sizes: [4, 4]\n"
@@ -3186,6 +3571,7 @@ class TestWorkingMemoryConfigAggregationYamlPropagation:
                 "encoder_layers_per_level": [2, 2],
                 "decoder_layers_per_level": [2, 2],
             },
+            "tokenizer": {"tokenizer_id": "fake-org/fake-tokenizer"},
             "inference": {
                 "hierarchical_prefill": True,
                 "safe_recgen_enabled": False,
@@ -3257,6 +3643,8 @@ class TestWorkingMemoryConfigAggregationYamlPropagation:
             "  intermediate_size: 256\n"
             "  num_heads: 4\n"
             "  vocab_size: 1000\n"
+            "tokenizer:\n"
+            '  tokenizer_id: "fake-org/fake-tokenizer"\n'
             "hierarchy:\n"
             "  levels: 2\n"
             "  chunk_sizes: [4, 4]\n"
@@ -4109,6 +4497,8 @@ class TestWorkingMemoryConfigPastTurnPinningYamlPropagation:
             "  intermediate_size: 256\n"
             "  num_heads: 4\n"
             "  vocab_size: 1000\n"
+            "tokenizer:\n"
+            '  tokenizer_id: "fake-org/fake-tokenizer"\n'
             "hierarchy:\n"
             "  levels: 2\n"
             "  chunk_sizes: [4, 4]\n"
@@ -4158,6 +4548,7 @@ class TestWorkingMemoryConfigPastTurnPinningYamlPropagation:
                 "encoder_layers_per_level": [2, 2],
                 "decoder_layers_per_level": [2, 2],
             },
+            "tokenizer": {"tokenizer_id": "fake-org/fake-tokenizer"},
             "inference": {
                 "hierarchical_prefill": True,
                 "safe_recgen_enabled": False,
@@ -4206,3 +4597,170 @@ class TestWorkingMemoryConfigPastTurnPinningYamlPropagation:
         assert wm.enabled is True
         assert wm.max_turns == 5
         assert abs(wm.decay_factor - 0.25) < 1e-9
+
+
+# ---------------------------------------------------------------------------
+# Issue #109: graph=None type compatibility at PHOTON pipeline layer
+# ---------------------------------------------------------------------------
+
+
+class TestPhotonPipelineGraphNoneCompatibility:
+    """``baseline_deps['graph']=None`` must build and query without error.
+
+    The real graph=None runtime branch is covered in
+    ``test_graph_expansion.py``; this test only asserts type compatibility
+    of PHOTON's internal ``RepoRAGPipeline`` construction when callers
+    pass ``graph=None`` (``expand_with_graph`` is still patched).
+    """
+
+    def test_photon_pipeline_builds_with_graph_none(self):
+        from baseline_reporag.ingestion.chunker import Chunk
+
+        cfg = _make_pruning_cfg_disabled()
+        pipeline, baseline_deps, photon_deps, mock_session, mock_results = (
+            _setup_pipeline_for_pruning(cfg, session_turns=0)
+        )
+
+        # Swap baseline.graph to None to simulate the enabled=false path.
+        pipeline.baseline.graph = None
+
+        chunks = [
+            Chunk(
+                chunk_id=f"chunk_{i}",
+                repo_id="test-repo",
+                repo_commit="abc123",
+                rel_path=f"file{i}.py",
+                language="python",
+                start_line=1,
+                end_line=10,
+                content=f"def func_{i}(): pass",
+                symbols=[f"func_{i}"],
+                section_header="",
+                file_header="",
+            )
+            for i in range(16)
+        ]
+
+        def mock_get_many(ids):
+            by_id = {c.chunk_id: c for c in chunks}
+            return [by_id[cid] for cid in ids if cid in by_id]
+
+        baseline_deps["store"].get_many.side_effect = mock_get_many
+        expanded_ids = [f"chunk_{i}" for i in range(16)]
+
+        with (
+            patch(
+                "baseline_reporag.photon_pipeline.hybrid_search",
+                return_value=mock_results,
+            ),
+            patch(
+                "baseline_reporag.photon_pipeline.expand_with_graph",
+                return_value=expanded_ids,
+            ),
+        ):
+            baseline_deps["generator"].generate.return_value = "Answer [C:1]"
+            result = pipeline.query(
+                "test question", session_id="s1", repo_id="test-repo"
+            )
+
+        assert result.answer == "Answer [C:1]"
+
+
+# ---------------------------------------------------------------------------
+# Issue #143: seed propagation through PhotonRAGPipeline.
+#
+# Three Qwen call sites in ``photon_pipeline.py`` need to forward ``seed``:
+# - L1030: Qwen fallback after ``_TokenizerEncodeFailure / ValueError /
+#   RuntimeError`` from PHOTON
+# - L1043: Qwen fallback after empty PHOTON output
+# - L1394: Qwen-only path when ``photon_generation_enabled=False``
+#
+# Backwards compat: ``query(seed=None)`` (default) MUST keep the legacy
+# call shape (no ``seed`` kwarg leaking through) so the 17+ existing
+# MagicMock fallback / Qwen-only tests in this file keep passing.
+# ---------------------------------------------------------------------------
+
+
+class TestPhotonPipelineSeedPropagation:
+    """PhotonRAGPipeline.query forwards ``seed`` into every Qwen call path."""
+
+    def test_qwen_only_path_default_seed_none_uses_legacy_shape(self):
+        """Default seed=None: Qwen-only path keeps legacy single-positional shape.
+
+        Backwards-compat invariant: existing MagicMock tests that did
+        ``mock_gen.generate.return_value = ...`` and never expected a
+        ``seed`` kwarg keep passing.
+        """
+        cfg = _make_photon_gen_cfg(photon_generation_enabled=False)
+        result, baseline_deps, photon_deps, _ = _run_generation_branch_query(cfg)
+        gen_calls = baseline_deps["generator"].generate.call_args_list
+        assert gen_calls, "Qwen generator must have been called once"
+        # No ``seed`` kwarg should have leaked into legacy callers.
+        for call in gen_calls:
+            assert "seed" not in call.kwargs, (
+                f"seed kwarg leaked into legacy Qwen-only path: {call.kwargs}"
+            )
+        assert result.answer == "Qwen answer [C:1]"
+
+    def test_qwen_only_path_propagates_seed(self):
+        """Qwen-only path (photon_generation_enabled=False) forwards seed=42."""
+        cfg = _make_photon_gen_cfg(photon_generation_enabled=False)
+        _, baseline_deps, _, _ = _run_generation_branch_query(cfg, seed=42)
+        gen_calls = baseline_deps["generator"].generate.call_args_list
+        assert gen_calls, "Qwen generator must have been called once"
+        # All Qwen-only calls must propagate seed=42.
+        for call in gen_calls:
+            assert call.kwargs.get("seed") == 42, (
+                f"seed=42 did not reach Qwen-only path; kwargs={call.kwargs}"
+            )
+
+    def test_qwen_fallback_after_value_error_propagates_seed(self):
+        """PHOTON ValueError → Qwen fallback (L1030) MUST forward seed=42."""
+        cfg = _make_photon_gen_cfg(photon_generation_enabled=True)
+        _, baseline_deps, _, _ = _run_generation_branch_query(
+            cfg,
+            photon_side_effect=ValueError("length guard"),
+            seed=42,
+        )
+        gen_calls = baseline_deps["generator"].generate.call_args_list
+        assert gen_calls, "Qwen fallback must have been called"
+        for call in gen_calls:
+            assert call.kwargs.get("seed") == 42, (
+                f"seed=42 did not reach exception-fallback Qwen path; "
+                f"kwargs={call.kwargs}"
+            )
+
+    def test_qwen_fallback_after_empty_photon_propagates_seed(self):
+        """PHOTON empty output → Qwen fallback (L1043) MUST forward seed=42."""
+        cfg = _make_photon_gen_cfg(photon_generation_enabled=True)
+        _, baseline_deps, _, _ = _run_generation_branch_query(
+            cfg,
+            photon_answer="   ",
+            seed=42,
+        )
+        gen_calls = baseline_deps["generator"].generate.call_args_list
+        assert gen_calls, "Qwen fallback must have been called for empty PHOTON output"
+        for call in gen_calls:
+            assert call.kwargs.get("seed") == 42, (
+                f"seed=42 did not reach empty-output fallback Qwen path; "
+                f"kwargs={call.kwargs}"
+            )
+
+    def test_qwen_fallback_seed_zero_propagates(self):
+        """seed=0 must propagate through the fallback path (DR3-002).
+
+        ``if seed:`` would silently drop 0, leaving the eval
+        nondeterministic. The implementation must use
+        ``if seed is not None:``.
+        """
+        cfg = _make_photon_gen_cfg(photon_generation_enabled=True)
+        _, baseline_deps, _, _ = _run_generation_branch_query(
+            cfg,
+            photon_side_effect=RuntimeError("oom"),
+            seed=0,
+        )
+        gen_calls = baseline_deps["generator"].generate.call_args_list
+        for call in gen_calls:
+            assert call.kwargs.get("seed") == 0, (
+                f"seed=0 silently dropped; kwargs={call.kwargs}"
+            )

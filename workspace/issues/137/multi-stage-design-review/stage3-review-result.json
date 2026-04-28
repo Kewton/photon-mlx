@@ -1,0 +1,32 @@
+{
+  "issue_number": 137,
+  "stage": 3,
+  "focus": "影響範囲",
+  "reviewer": "codex",
+  "review_date": "2026-04-26",
+  "summary": "Stage 1/2 反映済みの設計方針書と最新 Issue 本文を照合し、pipeline_factory の repo_id load 経路、EmbeddingIndex/CrossEncoder の model load 経路、採用 variant 別 test pattern、CI/配布影響を確認した。variant config full copy、repo.repo_id の一致、aggregator 個別実行、V4 invariant 条件分岐は概ね反映済み。一方で Phase B 後の cache/index cleanup 手順と、#135 直列化による業務影響の扱いが設計方針書に不足していたため Should Fix とした。",
+  "findings": [
+    {
+      "id": "DR3-001",
+      "severity": "Should Fix",
+      "category": "データ",
+      "title": "Phase B 後の index/HF cache/predictions cleanup 手順が不足している",
+      "description": "設計方針書は data/indexes 約 1GB と Hugging Face cache 約 5.8GB の一時占有を列挙しているが、採否判定後に何を残し、何を削除し、どこに記録するかが未定義だった。未採用 variant index と predictions JSONL が残存すると、ディスク占有と機密ログ保持が継続する。",
+      "evidence": "設計方針書 3 章は `data/indexes/institutional_documents{,_V1,_V2,_V4}/` と `~/.cache/huggingface/` を生成物として列挙し、11 章も gitignored 成果物として列挙するだけで cleanup/retention を定義していなかった。最新 Issue 本文は追加ディスク容量と HF model cache 追加 download を見積もり、未採用 variant index は削除可と記載している。",
+      "suggested_fix": "11 章に Phase B 完了後 cleanup / retention を追加し、未採用 `data/indexes/institutional_documents_V<N>/` の削除、実験用 index を本番相当として使い続けないこと、predictions JSONL の保持/削除、HF cache は共有 cache として scan/delete で対象確認すること、`du -sh` による前後記録を明記する。8 章の品質基準にも cleanup 検証を追加する。"
+    },
+    {
+      "id": "DR3-002",
+      "severity": "Should Fix",
+      "category": "並列",
+      "title": "#135 直列 5.5 日の業務影響と許容条件が明文化されていない",
+      "description": "設計方針書は #135 と GPU 競合するため直列推奨と述べているが、Issue #137 半日 + #135 5 日の直列化が業務上許容される前提、また並行可能な作業境界が未定義だった。後続作業者が GPU ジョブを並列起動して評価や学習の信頼性を落とす余地が残る。",
+      "evidence": "設計方針書 4 章の設計判断 #5 は `5 日 + 半日 → 連続` とだけ記載し、7 章は `M3 Ultra GPU 競合のため直列推奨` とだけ記載していた。Issue 本文は #135 本格再学習と GPU 競合があり本 Issue 先行が efficient と説明している。",
+      "suggested_fix": "7 章に、#137 の採用 model が #135 の入力条件であるため半日の遅延は許容する前提、並行できるのは GPU/Metal を使わないデータ整理・レビュー準備に限ること、MLX 学習ジョブは #137 採否確定後に開始することを追記する。"
+    }
+  ],
+  "must_fix_count": 0,
+  "should_fix_count": 2,
+  "nice_to_have_count": 0,
+  "申し送り": "Stage 3 の Should Fix 2 件は設計方針書へ反映済み。CI/テスト観点では採用前の invariant test は skip 維持、採用後は定数置換で active 化、V4 のみ第 3 invariant 追加という設計で妥当。pipeline_factory は cfg.repo.repo_id を validate して index load するため、variant config の repo.repo_id と eval/build 対象を一致させる運用が引き続き重要。"
+}

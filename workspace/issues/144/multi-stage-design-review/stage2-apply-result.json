@@ -1,0 +1,45 @@
+{
+  "stage": 2,
+  "applied_at": "2026-04-28",
+  "applier": "claude-opus",
+  "target_file": "workspace/design/issue-144-ruri-v2-build-design-policy.md",
+  "applied_findings": [
+    {
+      "id": "DR2-001",
+      "severity": "Should Fix",
+      "status": "applied",
+      "summary": "§3.3 派生方針表に `embedding.normalize | true | true | 既存 baseline (override 不要、cp で継承)` 行を追加。Issue 本文 Task 2 固定パラメータ表 (8 行) と Design 派生方針表が完全 1:1 対応する形に修正。",
+      "diff_location": "§3.3 派生方針表 (embedding.batch_size の直下)"
+    },
+    {
+      "id": "DR2-002",
+      "severity": "Should Fix",
+      "status": "applied",
+      "summary": "§9 完了条件に 2 行追加: (1) Option A 失敗時のフォールバック判別経過を Issue にコメント記録 (§3.4 / §8 連携)、(2) V4 採用判定不変の確認 (V2 NC ≤ V4 NC 6.03% を `reports/institutional_retrieval_ab.md` で明示、§1.3 / §5.2 連携)。Issue 本文「受入条件」最後 2 項目との対応を完全化。併せて V2 採用低確率分岐の発火条件 (V2 NC < V4 NC) を明示。",
+      "diff_location": "§9 完了条件 (Lint/Format/Test 行の直後)"
+    },
+    {
+      "id": "DR2-003",
+      "severity": "Should Fix",
+      "status": "applied",
+      "summary": "§3.3 派生方針表の `chunking.max_chars` / `chunking.overlap_chars` 行から `(推定)` 表記を削除し、出典列に `configs/institutional_docs.yaml:65` / `:66` の確定値出典を明示。読み手が不要な base 値再確認を実施するノイズを排除。",
+      "diff_location": "§3.3 派生方針表 (chunking.max_chars / chunking.overlap_chars 行)"
+    }
+  ],
+  "deferred_findings": [
+    {
+      "id": "DR2-004",
+      "severity": "Nice to Have",
+      "reason": "#148 への参照追加は文脈完整性に資するが、§10 関連リスト現状 (#137 / #142 / #135) で本 Issue の依存関係は十分に伝わる。設計書本文には反映せず本 stage2-apply-result に記録のみ。"
+    },
+    {
+      "id": "DR2-005",
+      "severity": "Nice to Have",
+      "reason": "§2.2 不変条件表の line range 厳密化は技術的に正確だが、§3.4 Step 6 注記で `:84-107` と既に記述されており、運用上の実害は軽微。設計書本文には反映せず。"
+    }
+  ],
+  "summary": "Must Fix 0 件 / Should Fix 3 件 (DR2-001, DR2-002, DR2-003) を全件設計方針書に反映完了。Nice to Have 2 件 (DR2-004, DR2-005) は本 Issue スコープ外として記録のみ実施し、設計書には反映せず。Stage 2 整合性レビューで Issue 本文⇔設計書の DRY 対応強化と base 値表記の正確性向上を達成。",
+  "applied_count": 3,
+  "deferred_count": 2,
+  "overall_status": "all_should_fix_applied"
+}

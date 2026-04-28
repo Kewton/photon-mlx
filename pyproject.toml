@@ -1,0 +1,18 @@
+[tool.pytest.ini_options]
+# DR3-003: testpaths lists every directory previously surfaced by implicit
+# pytest discovery from the repo root.  ``bench/tests`` and ``evals/tests``
+# are not part of the documented quality-gate command in CLAUDE.md, but they
+# were collected by ``pytest --collect-only`` at the repo root before this
+# change; preserving them here avoids silently dropping pre-existing tests.
+testpaths = [
+    "tests",
+    "baseline_reporag/tests",
+    "photon_mlx/tests",
+    "torch_ref/tests",
+    "bench/tests",
+    "evals/tests",
+]
+markers = [
+    "integration: integration tests requiring real PhotonModel + checkpoint",
+    "slow: tests taking >5 seconds",
+]

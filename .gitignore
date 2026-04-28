@@ -9,6 +9,8 @@ __pycache__/
 data/raw/
 data/processed/
 data/indexes/
+# Issue #135: PHOTON retrain JP corpus (institutional documents) — never commit
+data/training/
 
 # Checkpoints
 checkpoints/
@@ -31,3 +33,6 @@ logs/eval/
 
 # Scratch / UAT test files
 test-uat*
+
+# Issue #126: chunker A/B variant configs (not committed)
+configs/_experiments/

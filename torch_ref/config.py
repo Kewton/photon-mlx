@@ -35,6 +35,12 @@ class ModelConfig:
     tie_word_embeddings: bool = False
     dropout: float = 0.0
     bias: bool = False
+    # Issue #140 / S7-001: σ threshold for the start-up embedding-norm sanity
+    # check inside ``PhotonInference.__init__``. When ``std(token_embed.weight)``
+    # exceeds this value we emit a WARNING (random-init suspect; see Issue
+    # #135). Default 0.3 is a placeholder calibrated against random init; a
+    # follow-up Issue will re-tune once a trained checkpoint is available.
+    embedding_random_init_threshold: float = 0.3
 
     def __post_init__(self) -> None:
         if self.rope_scaling not in ROPE_SCALING_CHOICES:
@@ -52,6 +58,23 @@ class ModelConfig:
                 "set rope_scaling='ntk' to apply the scale factor.",
                 self.rope_scale_factor,
             )
+        # Issue #140 DR4-002: validate embedding_random_init_threshold.
+        # ``bool`` is rejected before ``int``/``float`` because Python's
+        # ``bool`` is an ``int`` subclass and silent True/False would mask
+        # configuration mistakes.
+        threshold = self.embedding_random_init_threshold
+        if isinstance(threshold, bool) or not isinstance(threshold, (int, float)):
+            raise ValueError(
+                "embedding_random_init_threshold must be a non-negative "
+                f"finite number, got type {type(threshold).__name__}"
+            )
+        threshold_f = float(threshold)
+        if not math.isfinite(threshold_f) or threshold_f < 0.0:
+            raise ValueError(
+                "embedding_random_init_threshold must be a non-negative "
+                f"finite number, got {threshold!r}"
+            )
+        self.embedding_random_init_threshold = threshold_f
 
     @classmethod
     def rope_scaling_from(cls, m: Any) -> tuple[str, float]:
@@ -156,7 +179,60 @@ class TrainingConfig:
     log_every_steps: int = 20
     train_corpus: str = ""
     val_corpus: str = ""
+    # Issue #135 / Phase 4-1: optional mixed-corpus training.
+    # When ``train_corpora_mix`` is set, the trainer uses
+    # ``photon_mlx.data.iterate_mixed_batches`` instead of the legacy
+    # single ``train_corpus`` path. ``val_split`` carves a held-out
+    # fraction from the train mixture (DR1-005: simpler than a separate
+    # ``val_corpora_mix`` dict — train and val share the same ratio).
+    train_corpora_mix: dict[str, float] | None = None
+    val_split: float = 0.0
     early_stopping: EarlyStoppingConfig = field(default_factory=EarlyStoppingConfig)
+
+    def __post_init__(self) -> None:
+        # DR1-003 strict validation: invalid mixes must fail at config
+        # construction so the trainer is never built around a broken spec.
+        if self.train_corpora_mix is not None:
+            mix = self.train_corpora_mix
+            if not isinstance(mix, dict) or not mix:
+                raise ValueError(
+                    "train_corpora_mix must be a non-empty dict, got "
+                    f"{type(mix).__name__}"
+                )
+            total = 0.0
+            for path, weight in mix.items():
+                if isinstance(weight, bool) or not isinstance(weight, (int, float)):
+                    raise TypeError(
+                        f"train_corpora_mix weight must be a real number, "
+                        f"got {type(weight).__name__} for {path!r}"
+                    )
+                if not math.isfinite(float(weight)):
+                    raise ValueError(
+                        f"train_corpora_mix weight must be finite, "
+                        f"got {weight!r} for {path!r}"
+                    )
+                if weight <= 0.0:
+                    raise ValueError(
+                        f"train_corpora_mix weight must be > 0, "
+                        f"got {weight} for {path!r}"
+                    )
+                total += float(weight)
+            if abs(total - 1.0) > 1e-6:
+                raise ValueError(
+                    f"train_corpora_mix weights must sum to 1.0 (±1e-6), "
+                    f"got {total} (DR1-003)"
+                )
+
+        if not isinstance(self.val_split, (int, float)) or isinstance(
+            self.val_split, bool
+        ):
+            raise TypeError(
+                f"val_split must be a real number, got {type(self.val_split).__name__}"
+            )
+        if self.val_split < 0.0 or self.val_split >= 1.0:
+            raise ValueError(
+                f"val_split must be in [0, 1), got {self.val_split} (DR1-005)"
+            )
 
 
 @dataclass

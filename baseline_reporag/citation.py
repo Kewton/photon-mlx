@@ -6,6 +6,29 @@ from dataclasses import dataclass
 from .generation.evidence_pack import EvidencePack
 from .ingestion.store import Chunk
 
+# Issue #154 Bug 2: phrases that mark an answer as a legitimate refusal
+# ("we don't have evidence to answer"). When present, the answer must be
+# graded as no-citation regardless of any formal ``[C:N]`` markers — baseline
+# was producing refusals like ``根拠が不足しています ... [C:1]`` and the
+# regex-only check was treating them as cited, unfairly penalising PHOTON
+# which honestly omits the marker on refusals.
+REFUSAL_PATTERNS: tuple[str, ...] = (
+    "根拠が不足しています",
+    "根拠不足",
+    "情報がありません",
+    "情報はありません",
+    "わかりません",
+    "判断できません",
+    "特定できません",
+)
+
+
+def is_refusal_answer(answer: str) -> bool:
+    """True if *answer* contains any known refusal / abstain phrase."""
+    if not answer:
+        return False
+    return any(p in answer for p in REFUSAL_PATTERNS)
+
 
 @dataclass
 class CitationResult:
@@ -13,6 +36,7 @@ class CitationResult:
     cited_chunks: list[Chunk]
     wrong_citation_indices: list[int]  # [C:N] indices absent from the pack
     no_citation: bool
+    is_refusal: bool = False
 
 
 def resolve_citations(answer: str, pack: EvidencePack) -> CitationResult:
@@ -44,4 +68,5 @@ def resolve_citations(answer: str, pack: EvidencePack) -> CitationResult:
         cited_chunks=cited_chunks,
         wrong_citation_indices=wrong_indices,
         no_citation=len(indices) == 0,
+        is_refusal=is_refusal_answer(answer),
     )

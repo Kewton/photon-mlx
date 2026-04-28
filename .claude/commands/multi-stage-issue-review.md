@@ -199,12 +199,15 @@ Output file: workspace/issues/{issue_number}/issue-review/stage4-apply-result.js
 
 ---
 
-### 2回目イテレーション自動スキップ判定
+### Stage 5-8 は常に実行する (Issue #140 / S7-001 follow-up)
 
-Stage 4完了後、1回目イテレーションの Must Fix 件数を確認し、**2回目イテレーション（Stage 5-8）の実行要否を判定**します。
+Stage 4完了後は **常に Stage 5-8 (Codex クロスレビュー) を実行** する。Issue #140 までは「1回目 Must Fix が 0 件なら Stage 5-8 を自動スキップ」する判定があったが、Codex 担当 Stage を **必須** 化したことに伴い **廃止**。Codex の独立クロスレビューは「opus 単独レビューが見落とした実装と設計のギャップ (silent bug、scaffolding 残存、属性名誤り 等)」を発見する責務を持ち、件数 0 でも実施することに価値がある。
 
-- **Must Fix 合計が 0件** → Stage 5-8 をスキップし、Phase Final に進む
-- **Must Fix が 1件以上** → Stage 5-8 を通常通り実行する
+**Codex 担当 Stage は必須**: Stage 5-8 を `--skip-stage=5,6,7,8` 等で明示的に skip した場合は **WARNING** を出し、最終 summary report に skipped 状態と reviewer 検証結果 (`reviewer="codex"` 確認) を **completion report に記録** すること。本フェーズは段階的厳格化の **第 1 段階** であり、現時点で skip 自体は禁止しない (raise / exit 1 への昇格は次回 Issue で扱う)。
+
+skill 完了報告には以下を必ず含める:
+- Stage 別 finding 数 (Must Fix / Should Fix / Nice to Have)
+- reviewer フィールド検証結果 (Stage 5, 7 の各 review-result.json で `reviewer="codex"` であること)
 
 ---
 
@@ -339,7 +342,7 @@ gh issue view {issue_number}
 | 2 | 指摘事項反映（1回目） | - | X | 完了 |
 | 3 | 影響範囲レビュー（1回目） | X | - | 完了 |
 | 4 | 指摘事項反映（1回目） | - | X | 完了 |
-| 5-8 | 2回目イテレーション | X | X | 完了/スキップ |
+| 5-8 | 2回目イテレーション | X | X | 完了 (reviewer=codex 検証済) |
 
 ## 次のアクション
 
@@ -376,8 +379,8 @@ workspace/issues/{issue_number}/
 以下をすべて満たすこと：
 
 - 仮説検証完了（仮説がない場合はスキップ記録）
-- 全8ステージ完了（またはスキップ指定分を除く）
-  - **2回目イテレーション自動スキップ**: 1回目のMust Fix合計0件の場合、Stage 5-8は自動スキップ
+- 全8ステージ完了（Codex 担当 Stage 5-8 は **必須** - Issue #140 / S7-001 follow-up で auto-skip 廃止）
+- Stage 5/7 の `review-result.json` に `reviewer="codex"` が記録されている (Claude による上書き検出)
 - 各ステージのMust Fix指摘が対応済み
 - GitHubのIssueが更新されている
 - サマリーレポート作成完了

@@ -1,0 +1,17 @@
+{
+  "stage": 8,
+  "reviewer": "codex",
+  "issue_number": "143",
+  "applied_findings": [
+    "S7-001",
+    "S7-002",
+    "S7-003",
+    "S7-004",
+    "S7-005",
+    "S7-006"
+  ],
+  "skipped_findings": [],
+  "applied_count": 6,
+  "issue_updated": true,
+  "updated_body_excerpt": "## 背景\n\n#137 A/B 実験 (5-variant retrieval test、PR #142 マージ済 / Issue #137 CLOSED) で、V0 baseline の NC rate が以下のように乖離した:\n\n| 計測 | 計測時期 | V0 NC rate "
+}

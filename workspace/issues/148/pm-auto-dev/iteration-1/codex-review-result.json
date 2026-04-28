@@ -1,0 +1,68 @@
+{
+  "reviewer": "codex",
+  "issue_number": 148,
+  "review_focus": [
+    "潜在バグ",
+    "セキュリティ脆弱性",
+    "設計遵守"
+  ],
+  "files_reviewed": [
+    "workspace/design/issue-148-rebaseline-design-policy.md",
+    "baseline_reporag/photon_pipeline.py",
+    "baseline_reporag/tests/test_photon_pipeline_checkpoint_load.py",
+    "tests/test_pipeline_factory_yaml_invariants.py",
+    "configs/institutional_docs_photon.yaml",
+    "docs/deployment.md",
+    "docs/troubleshooting.md"
+  ],
+  "findings": [
+    {
+      "id": "CB-001",
+      "severity": "high",
+      "category": "潜在バグ",
+      "file": "baseline_reporag/photon_pipeline.py",
+      "line": 579,
+      "title": "PHOTON_CHECKPOINT_ROOT 相対の checkpoint_path が解決されない",
+      "description": "docs/deployment.md:173-177 は `checkpoint_path: \"mulmoclaude_step600\"  # relative to PHOTON_CHECKPOINT_ROOT` と案内しているが、実装は `Path(raw).expanduser().resolve(strict=True)` を直接呼ぶため、相対パスは current working directory から解決される。`PHOTON_CHECKPOINT_ROOT=/data/photon_checkpoints` かつ `checkpoint_path: \"mulmoclaude_step600\"` の通常手順では `/data/photon_checkpoints/mulmoclaude_step600` ではなく `<cwd>/mulmoclaude_step600` を探して fail する。",
+      "suggestion": "`raw` が相対パスの場合は `root / raw` を resolve し、絶対パスの場合だけそのまま resolve する。あわせて test に `PHOTON_CHECKPOINT_ROOT` 配下の相対 checkpoint_path 成功ケースを追加する。"
+    },
+    {
+      "id": "CB-002",
+      "severity": "medium",
+      "category": "潜在バグ",
+      "file": "baseline_reporag/photon_pipeline.py",
+      "line": 375,
+      "title": "checkpoint 必須エントリの検証が file ではなく exists になっている",
+      "description": "設計方針書 DR3-001 は `weights.npz` と `state.json` を含む checkpoint directory を要求しているが、実装は `(ckpt_path / required_file).exists()` だけを確認している。`weights.npz/` や `state.json/` が directory や symlink でも通過し、`load_checkpoint` の内部で遅延失敗するため、directory 形状を事前に fail-fast する設計とズレる。",
+      "suggestion": "`exists()` ではなく `is_file()` を使い、必要なら symlink policy も明確にする。test に `weights.npz` が directory のケースを追加し、`_load_photon_checkpoint` が呼ばれないことを確認する。"
+    },
+    {
+      "id": "CB-003",
+      "severity": "high",
+      "category": "設計遵守",
+      "file": "configs/institutional_docs_photon.yaml",
+      "line": 185,
+      "title": "Phase A 評価で PHOTON_ALLOW_RANDOM_INIT=1 を許すコメントが true baseline 方針と矛盾",
+      "description": "設計方針書は checkpoint load 失敗時を fail-fast 既定とし、Stage 4 で `PHOTON_ALLOW_RANDOM_INIT=1` は unit test / CI の negative-path 検証専用、Phase A eval では未設定にする条件を追加している。一方で config コメントは `Phase A 評価環境でチェックポイントが手元にない場合は PHOTON_ALLOW_RANDOM_INIT=1` と案内しており、S7-001 の random-init eval 再発を運用手順として許してしまう。",
+      "suggestion": "Phase A では checkpoint が無ければ評価を開始しない旨に修正し、`PHOTON_ALLOW_RANDOM_INIT=1` の案内は unit/local negative-path test 専用に限定する。docs/deployment.md と docs/troubleshooting.md の `dev/eval` 表現も同じ方針に揃える。"
+    },
+    {
+      "id": "CB-004",
+      "severity": "medium",
+      "category": "セキュリティ脆弱性",
+      "file": "baseline_reporag/photon_pipeline.py",
+      "line": 549,
+      "title": "model_id 検証エラーが raw 入力値を例外文に含めている",
+      "description": "Stage 4 の secrets 方針では private HF org / R&D codename / token / raw config 値を public artifact や log に出さないことになっているが、`_validate_repo_id` は `got {value!r}` などで raw `model_id` を ValueError に埋め込む。private slug、誤って貼られた token 風文字列、改行入り payload が server/UI/CI log に露出する可能性がある。既存 `_validate_tokenizer_id` は raw 値を出さない設計なので、model_id 側だけ弱い。",
+      "suggestion": "例外文から raw `value` を除き、key 名、許可形式、拒否理由、型名または長さ程度に留める。必要な詳細は private debug log でも redaction 済み表現にする。test で unsafe model_id が例外文に含まれないことを固定する。"
+    }
+  ],
+  "summary": {
+    "critical": 0,
+    "high": 2,
+    "medium": 2,
+    "low": 0,
+    "total": 4
+  },
+  "verdict": "needs_fix"
+}

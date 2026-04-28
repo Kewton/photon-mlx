@@ -1,0 +1,100 @@
+{
+  "stage": 2,
+  "focus": "整合性",
+  "reviewer": "opus",
+  "reviewed_at": "2026-04-27",
+  "summary": "全体として Stage 1 反映は正しく行われ、設計書 ↔ 実コード ↔ Issue 受入条件の主要構造は概ね整合している。ただし (1) §10 完了条件の本文「12 項目」と実列挙 14 項目の数値矛盾、(2) DR1-003 で「暫定二段構えを PR 前に解消」と決めたのに §3-1 の _DOMAIN_TEMPLATES literal に post-#137 のコメント済キーが残っている内部矛盾、(3) 設計 §3-1 selectbox 例の label 文字列 ('Base profile') と実コード ('Config template') の不一致、(4) DR1-001 guard test 配置先である test_pipeline_factory_yaml_invariants.py が現状 INSTITUTIONAL_* pin = None で skipif 状態であり「pin 値と一致を assert」は機能しない実コード状況、を Must Fix 相当として指摘。Should Fix は test 設計の helper 単体 test 欠落・Issue 本文側の dict type 表記不一致など。Must Fix 4 件 / Should Fix 3 件 / Nice to Have 2 件。",
+  "findings": [
+    {
+      "id": "DR2-001",
+      "severity": "Must Fix",
+      "category": "設計書内部",
+      "title": "§3-1 _DOMAIN_TEMPLATES literal に post-#137 コメント済キーが残存し、DR1-003 確定運用ルールと矛盾",
+      "description": "Stage 1 反映で §3-1 に追加された DR1-003 (YAGNI) 確定運用ルールは『PR 着手時に pre/post #137 を git diff で確定し、不採用側のキー記述を設計書から削除して PR を出す』『暫定二段構えはレビュー前に解消する』と明記している (L119-121)。しかし §3-1 の _DOMAIN_TEMPLATES Python literal (L103-114) には pre-#137 の 3 キーに加えて post-#137 用の 2 キー (batch_size, max_input_chars) がコメントアウト形で併記されたままになっている。設計レビュー Stage 2 時点で確定運用ルールが既に明文化されている以上、設計書本文も pre/post いずれかに確定するか、確定前は Python literal 側のコメント済キーを削除し『PR 着手時に DR1-003 ルールに従い後段で merge する』とテキスト記述だけで残すのが整合的。現状のままだと『DR1-003 で削除しろと言いつつ、設計書自体が削除されていない見本を提示している』状態となり、実装者が二段構えのまま PR を作る恐れがある。",
+      "evidence": "workspace/design/issue-115-wizard-jp-prompt-design-policy.md L103-114 (literal の post-#137 コメント) と L119-121 (DR1-003 確定運用ルール) の内部矛盾。",
+      "recommendation": "現時点で main の configs/institutional_docs.yaml (本ブランチのコピーは batch_size=64 / max_input_chars 行なし → pre-#137 状態) を確認した結果に基づき、§3-1 literal を pre-#137 の 3 キーのみに整理し、post-#137 用コメントは『#137 merge 後は本 Issue とは別 follow-up Issue で 5 キー化する』という註記 1 行に置き換える。あるいは『PR 着手時に再確認してこの literal を確定形に書き直す』ことを TODO コメントとして明示する。"
+    },
+    {
+      "id": "DR2-002",
+      "severity": "Must Fix",
+      "category": "設計書↔実コード",
+      "title": "DR1-001 guard test の配置先 (test_pipeline_factory_yaml_invariants.py) が現状 skipif 状態で『_DOMAIN_TEMPLATES と yaml の完全一致』を CI guard できない",
+      "description": "設計書 §3-3 / §10 の DR1-001 対応では『tests/test_pipeline_factory_yaml_invariants.py (もしくは tests/test_photon_app_components.py) に test_domain_template_matches_institutional_yaml を追加し yaml と _DOMAIN_TEMPLATES の値完全一致を assert する』としている。しかし実コード tests/test_pipeline_factory_yaml_invariants.py L36-37 では INSTITUTIONAL_RERANKER_MODEL_ID / INSTITUTIONAL_EMBEDDING_MODEL_ID が None で、L55-58 / L71-74 の institutional pin test は @pytest.mark.skipif で skip される設計になっている (Issue #133 採用判断待ち)。ここに『_DOMAIN_TEMPLATES と institutional_docs.yaml の一致』を追加する場合、(a) pin 定数を読まず yaml.safe_load(institutional_docs.yaml) 結果と直接照合する形にしないと既存ファイルの skipif 思想と衝突する、(b) test_photon_app_components.py に置く方が wizard 機能の guard として責務的にも自然。設計書はこの選択を曖昧にしているため、実装段階で『どちらに配置すべきか・skipif との関係はどうするか』で確実に手戻る。",
+      "evidence": "tests/test_pipeline_factory_yaml_invariants.py L34-78 (INSTITUTIONAL_* pin = None + 全 institutional test が skipif) と 設計書 §3-3 L336 / §10 項目 13 の guard test 配置記述。",
+      "recommendation": "設計書 §3-3 / §10 の DR1-001 記述を以下のように確定する: (1) 配置先を tests/test_photon_app_components.py に確定 (test_pipeline_factory_yaml_invariants.py は INSTITUTIONAL_* pin 値が None の間 skipif である責務と重なる)、(2) 比較方法を『yaml.safe_load で institutional_docs.yaml を直接 parse し、pin 定数経由ではなく yaml dict から該当パスの値を抽出して _DOMAIN_TEMPLATES['institutional_docs'] と完全一致を assert する』と明記、(3) これにより #133 pin 採用前後どちらでも CI guard が常に有効化される旨を §8 リスク表に追記。"
+    },
+    {
+      "id": "DR2-003",
+      "severity": "Must Fix",
+      "category": "設計書↔Issue",
+      "title": "§10 完了条件の本文『12 項目』と実列挙 14 項目・Issue 受入条件 13 項目の三者不整合",
+      "description": "設計書 §10 L425 は『Issue #115 受入条件 12 項目（最終 body 参照）を全て満たすこと』と書いているが、その直下の番号付きリストは項目 1〜14 まで列挙されている。一方 Issue 最終本文 L77-91 の受入条件チェックリストは 13 項目 ([ ] が 13 個)。三者の項数が異なるため、レビュー時に『どれが正解か』が判定できない。特に設計書 §10 の項目 13 (DR1-001 CI guard) は Stage 1 反映で追加された新規項目だが、Issue 本文側にはまだ反映されていないため、設計書だけが先行する形となっている。この数値整合は『受入条件をどう数えるか』のレビューで実装者を確実に混乱させる。",
+      "evidence": "設計書 §10 L425 『受入条件 12 項目』と L427-440 の 14 項目列挙、final-issue-body.md L77-91 の 13 項目 ([ ] チェックボックス数)。",
+      "recommendation": "(1) Issue 本文側に『DR1-001 CI guard 項目』を追加して 14 項目に揃えるか、(2) 設計書 §10 項目 13 (DR1-001) を必須項目から『推奨項目』に下げて受入条件は Issue と同じ 13 項目に揃えるか、いずれかに確定する。本文の『12 項目』記述も 13 or 14 に修正し、Issue 本文 / 設計書 §10 リスト数 / §10 本文記述の三者を一致させる。Stage 1 反映で項目を追加するなら Issue 本文も同期して update する運用ルールを明文化する。"
+    },
+    {
+      "id": "DR2-004",
+      "severity": "Must Fix",
+      "category": "設計書↔実コード",
+      "title": "§3-1 selectbox 例の label 文字列 ('Base profile') が実コード ('Config template') と一致しない",
+      "description": "設計書 §3-1 L162-178 の selectbox サンプルコードは label を 'Base profile' としているが、app/photon_app.py L1234-1238 の実コードは 'Config template' を label として使用している。本 Issue の変更は『options に 1 行追加するだけ』であり label 文字列は不変だが、設計書が誤った label を提示しているため、実装者がこの diff snippet をそのまま貼り付けると wizard UI の表示文言が変わってしまう。callsite 不変の主張に反する微妙な差分が混入する。",
+      "evidence": "設計書 §3-1 L162-178 (label='Base profile') と app/photon_app.py:1234-1238 実コード (label='Config template')。",
+      "recommendation": "§3-1 の Before/After サンプルコード両方を 'Config template' に修正する。あるいは Before snippet を実コードの完全コピーに差し替え、After は『options リストの末尾に \"institutional_docs\" を 1 行追加するのみ・他は不変』と明記する。"
+    },
+    {
+      "id": "DR2-005",
+      "severity": "Should Fix",
+      "category": "テスト設計",
+      "title": "DR1-005 で約束した『helper 単体 test』が §3-3 新規 test 一覧に含まれていない",
+      "description": "Stage 1 反映で §3-2 に追加された DR1-005 (SRP) 対応は『_resolve_system_prompt(question) helper を切り出し、test pyramid (helper 単体 → build_messages 統合) を明確化する』と謳っている (L249)。しかし §3-3 新規 test 一覧 (L329-336) には _resolve_system_prompt の単体 test が登場せず、TestBuildMessagesLanguageBranching (3 tests) は build_messages 経由の golden snapshot + substring assert のみ。helper 切り出しと test pyramid の主張が test 一覧で裏付けられておらず、結果として『helper を切り出すが test は build_messages 統合のみ』となり SRP 改善のメリットが test レベルで実現されない。",
+      "evidence": "設計書 §3-2 L249 (DR1-005 helper + pyramid 主張) と §3-3 L329-336 (test 一覧、helper 単体 test なし)。",
+      "recommendation": "§3-3 test 一覧に『TestResolveSystemPrompt (3 tests): _resolve_system_prompt(question) を直接呼び (1) 英語入力で _SYSTEM そのまま、(2) 日本語入力で _SYSTEM + _JP_INSTITUTIONAL_HINT 連結、(3) 空文字列で _SYSTEM そのまま — を独立 assert する』を追加する。あるいは DR1-005 の test pyramid 主張を撤回し『helper 切り出しは可読性のみで test 単体は build_messages 統合 test に集約』と明記する (どちらでも内部整合は取れる)。"
+    },
+    {
+      "id": "DR2-006",
+      "severity": "Should Fix",
+      "category": "用語命名",
+      "title": "Issue 本文 L11 の _DOMAIN_TEMPLATES 型注釈が dict[str, dict[str, Any]] で設計書 §3-1 の dict[str, dict[tuple[str, ...], Any]] と不一致",
+      "description": "Issue 最終本文 L11 は `_DOMAIN_TEMPLATES: dict[str, dict[str, Any]]` と書いているが、設計書 §3-1 L103 では `_DOMAIN_TEMPLATES: dict[str, dict[tuple[str, ...], Any]]` (BEST_PRACTICE_KEYS と同じ tuple-key 構造、_deep_set 互換) としている。設計書の方が正しい (実装上 _deep_set がそのまま再利用可能)。Issue 本文の表記は実装すると _deep_set と非互換になる。本 Issue は受入条件で『シグネチャ不変』を強調しているが、新設定数の型注釈について Issue 本文と設計書が乖離していると、実装者が Issue 本文を信じて str-key dict で実装した場合、設計判断 #1 や _deep_set の再利用根拠が崩れる。",
+      "evidence": "final-issue-body.md L11 と 設計書 §3-1 L103 / §11 L446-448 (BEST_PRACTICE_KEYS と同じ tuple-key 形式踏襲の根拠)。",
+      "recommendation": "Issue 本文 L11 の型注釈を `dict[str, dict[tuple[str, ...], Any]]` に修正するか、本 Issue は設計書 §3-1 を実装の単一参照源とする旨を Issue 本文に明記して Issue 側の型注釈を削除する (現状 Issue は概要表記、設計書が詳細仕様の役割分担を明文化)。"
+    },
+    {
+      "id": "DR2-007",
+      "severity": "Should Fix",
+      "category": "依存関係",
+      "title": "§3-1 が『#137 が先 merge された後』としつつ、Issue 本文「並列開発」L101-105 の方針 (D-2 を #137 完了待たずに reranker 据え置きで先行) との温度差",
+      "description": "設計書 §3-1 L98-101 は『#137 が先 merge された後は採用 model_id (BAAI/bge-m3, BAAI/bge-reranker-v2-m3) と batch_size=32 / max_input_chars=8192 を反映する』と書いている。一方 Issue 本文 L101-105 の『並列開発』節は『D-2 (wizard template) は #133/#137 reranker/embedding 採用前提で先行する場合は retrieval.reranker.model_id を据え置き (cross-encoder/...) とし、#133/#137 完了後に follow-up Issue で更新する』と明記している。両者は矛盾はしないが、設計書は『#137 先 merge 状態』を前提にした記述比重が大きく、Issue 本文の『据え置きで先行 → follow-up Issue で更新』という運用方針との温度差がある。DR1-003 確定運用ルールでも『PR 着手時に確定→不採用側削除』と書いており、Issue 本文の『follow-up Issue 化』方針と微妙にズレる (DR1-003 では本 Issue 内で確定する形)。",
+      "evidence": "設計書 §3-1 L98-101 / DR1-003 (L119-121) と final-issue-body.md L101-105 (並列開発節)。",
+      "recommendation": "設計書 §3-1 と DR1-003 の運用ルールを Issue 本文「並列開発」節と整合させる。具体的には『本 Issue は pre-#137 (3 キー据え置き) で先行する。#137 が本 Issue より先に merge された場合のみ DR1-003 ルールに従い post-#137 (5 キー) に切り替える。同時 merge / 後続 merge では follow-up Issue に委ねる』と一本化し、設計書 §3-1 と Issue L97-105 / L100-105 の表現を同じ trichotomy で揃える。"
+    },
+    {
+      "id": "DR2-008",
+      "severity": "Nice to Have",
+      "category": "用語命名",
+      "title": "『source of truth』『canonical config』『pin 値』の使い分けが揺れている",
+      "description": "設計書内で institutional_docs.yaml の参照方式を表す語として『source of truth』 (§3-1 L98 / §3-1 L128 / §4 L356)、『canonical config』 (§3-1 L128 / §3-1 L154)、『pin 値』 (§4 L357 / §8 L404 / Issue 本文 L14, L73, L79) が混在している。意味は概ね同一だが、(1) source of truth = institutional_docs.yaml 自体、(2) pin 値 = test_pipeline_factory_yaml_invariants.py の INSTITUTIONAL_* 定数、と微妙に対象が異なるため読み手に混乱を生む。DR1-001 guard test の議論ではどちらを参照するかが test 実装に直結する (現状 pin 値は None で skipif、yaml は実値あり) ため、用語統一が望ましい。",
+      "evidence": "設計書 §3-1 L98, L128, L154 / §4 L356-357 / §8 L404 と Issue 本文 L14, L73, L79。",
+      "recommendation": "用語を以下に統一する: (1)『source of truth = configs/institutional_docs.yaml の値』(2)『pin 値 = tests/test_pipeline_factory_yaml_invariants.py の INSTITUTIONAL_* 定数 (#133 採用判断後に有効化される invariant 定数)』(3)『canonical config』は『source of truth と同義』として §3-1 のどこかに 1 行で対応関係を明記する。"
+    },
+    {
+      "id": "DR2-009",
+      "severity": "Nice to Have",
+      "category": "テスト設計",
+      "title": "T-C6 拡張 test (test_institutional_docs_template_merges_3_keys) の base_yaml_text 設計が既存 T-C6 の規模感と乖離",
+      "description": "設計書 §3-3 L334 の T-C6 拡張 test は『base_yaml_text に意図的に異なる 3 値を渡し、生成 YAML が source of truth へ上書きされる』ことを assert する。一方、実コード tests/test_photon_app_components.py の既存 T-C6 5 test は base_yaml_text に 'model: {}\\n' や 'model:\\n  architecture: photon_decoder\\n' のような最小限の YAML を使い、wizard 内部で cfg_path.read_text() を呼ばずに済む形になっている。新規 test も同じ最小 YAML 流儀で 3 キーパス全てに『異なる値』を仕込むと 3 キー分のネスト辞書を base_yaml_text に書く必要があり、既存 T-C6 の最小化方針から拡大する。設計書ではこの test の実装スタイル (base_yaml_text の規模) が明示されていないため、実装段階で『5-10 行の YAML literal を test に embed する』形になり test ファイルが冗長化する懸念がある。",
+      "evidence": "設計書 §3-3 L334 と tests/test_photon_app_components.py 既存 T-C6 5 test の base_yaml_text 規模。",
+      "recommendation": "§3-3 T-C6 拡張 test の節に『base_yaml_text には pre-#137 3 キー (embedding.model_id / symbol_graph.enabled / reranker.model_id) を意図的に異なる値で書いた最小 YAML literal を embed し、生成 YAML を yaml.safe_load → 該当パス取得で _DOMAIN_TEMPLATES の値と一致 assert する』と実装スタイルを明記する。あるいは base_yaml_text=None で実 institutional_docs.yaml を読み込み、wizard が source of truth と等価な YAML を生成することを no-op assert で確認する形に簡略化する選択肢を併記する。"
+    }
+  ],
+  "must_fix_count": 4,
+  "should_fix_count": 3,
+  "nice_to_have_count": 2,
+  "good_points": [
+    "Stage 1 反映 (DR1-001 〜 DR1-006) は §3-1 / §3-2 / §3-3 / §10 / §11 へ忠実に反映されており、各 finding ID を引用形でトレース可能。例: DR1-002 (1 ループ集計) は §3-2 docstring の Note 節に分母非対称の理由まで明記されている。",
+    "callsite 不変の主張 (build_messages シグネチャ維持・pipeline.py L201 / photon_pipeline.py L1005 の 2 callsite 不変) が実コードでも grep で確認でき、設計書 §3-2 設計判断 #3 と整合している。",
+    "_DOMAIN_TEMPLATES の tuple-key 構造 (`tuple[str, ...]` キー) が既存 BEST_PRACTICE_KEYS (app/components/wizard.py L38-44) と完全に同じ形式で _deep_set 再利用可能であり、設計書 §11 L446-448 で根拠が明記されている (Issue 本文 L11 の表記不一致は別途指摘 DR2-006)。",
+    "test_prompt.py の既存 3 test class (TestBuildMessages / TestFormatHintFewShot / TestFlattenMessagesForPlainLM) と test_photon_pipeline.py の TestBuildMessagesSessionSummary は実コードで確認でき、設計書 §3-3 L342-345 の『既存 test 不変』記述と整合する。",
+    "_JP_INSTITUTIONAL_HINT を private 命名のまま test 側で substring assert する DR1-006 方針 (§3-3 L340) は、test 文面追従コストを抑えつつ private 境界を維持する妥当な妥協点であり、命名規則と test 設計が両立している。"
+  ]
+}

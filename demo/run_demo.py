@@ -35,7 +35,11 @@ def main() -> None:
         print(f"Available: {[s.id for s in SCENARIOS]}")
         return
 
-    from baseline_reporag.config import load_config
+    from baseline_reporag.config import (
+        is_symbol_graph_enabled,
+        load_config,
+        validate_repo_id,
+    )
     from baseline_reporag.generation.generator import Generator
     from baseline_reporag.indexing.embedding import EmbeddingIndex
     from baseline_reporag.indexing.lexical import LexicalIndex
@@ -46,16 +50,27 @@ def main() -> None:
     from baseline_reporag.pipeline import RepoRAGPipeline
 
     cfg = load_config(args.config)
-    repo_id = cfg.repo.repo_id
+    # CB-005: same allowlist as the CLI / pipeline factory. Fail-fast if
+    # the config carries ``../outside`` or an absolute path.
+    repo_id = validate_repo_id(cfg.repo.repo_id)
     idx_dir = Path(cfg.paths.data_root) / "indexes" / repo_id
     run_id = f"demo_{scenario.id}_{time.strftime('%Y%m%d')}"
+
+    # Issue #109: skip SymbolGraph.load when the feature is disabled
+    # (non-Python repositories).  graph=None is safe: expand_with_graph
+    # falls back to file-neighbors only.
+    graph: SymbolGraph | None = (
+        SymbolGraph.load(idx_dir / "symbol_graph.json")
+        if is_symbol_graph_enabled(cfg)
+        else None
+    )
 
     pipeline = RepoRAGPipeline(
         config=cfg,
         store=ChunkStore(idx_dir / "chunks.db"),
         lexical=LexicalIndex.load(idx_dir / "lexical.pkl"),
         embedding=EmbeddingIndex.load(idx_dir / "embedding"),
-        graph=SymbolGraph.load(idx_dir / "symbol_graph.json"),
+        graph=graph,
         sessions=SessionManager(log_dir=Path(cfg.paths.log_root) / "sessions"),
         generator=Generator(
             model_id=cfg.model.model_id,

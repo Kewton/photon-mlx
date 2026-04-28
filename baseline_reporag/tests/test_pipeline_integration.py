@@ -353,3 +353,149 @@ class TestCitationPostprocess:
         log_payload = pipeline.logger.log_turn.call_args[0][0]
         assert "citation_postprocessed" in log_payload
         assert log_payload["citation_postprocessed"] is True
+
+
+# ---------------------------------------------------------------------------
+# Issue #109: graph=None type compatibility at pipeline layer
+# ---------------------------------------------------------------------------
+
+
+@patch(
+    "baseline_reporag.pipeline.expand_with_graph",
+    side_effect=_mock_expand_with_graph,
+)
+@patch(
+    "baseline_reporag.pipeline.hybrid_search",
+    side_effect=_mock_hybrid_search,
+)
+class TestGraphNoneTypeCompatibility:
+    """Issue #109: ``graph=None`` must not cause assembly / type errors.
+
+    Actual ``graph is None`` branching is covered in
+    ``test_graph_expansion.py``. This test only verifies that the
+    pipeline can be built and a turn completes when ``graph=None`` is
+    plumbed through (``expand_with_graph`` is still patched).
+    """
+
+    def test_pipeline_accepts_graph_none(
+        self,
+        mock_search: MagicMock,
+        mock_expand: MagicMock,
+    ) -> None:
+        cfg_data = {
+            "repo": {"repo_id": "test_repo", "repo_commit": "abc123"},
+            "retrieval": {
+                "lexical_top_k": 10,
+                "embedding_top_k": 10,
+                "fused_top_k": 8,
+                "rerank_top_k": 8,
+                "weights": {"lexical": 0.5, "embedding": 0.5},
+                "graph_expansion": {"max_hops": 1, "max_nodes": 16},
+                "neighborhood_expansion": {"before": 1, "after": 1},
+                "query_expansion": {"enabled": False},
+                "reranker": {"enabled": False},
+                "file_type_boost": 0.0,
+            },
+            "evidence_pack": {"max_chunks": 16, "max_tokens": 16000},
+            "model": {"model_id": "test-model"},
+        }
+        config = Config(cfg_data)
+
+        mock_store = MagicMock()
+        mock_store.get_many.return_value = _make_test_chunks()
+
+        mock_gen = MagicMock()
+        mock_gen.generate.return_value = "Answer with [C:1]."
+
+        sessions = SessionManager()
+
+        pipeline = RepoRAGPipeline(
+            config=config,
+            store=mock_store,
+            lexical=MagicMock(),
+            embedding=MagicMock(),
+            graph=None,  # Issue #109: symbol-graph disabled path.
+            sessions=sessions,
+            generator=mock_gen,
+            logger=MagicMock(),
+        )
+        result = pipeline.query("test question", session_id="s1")
+        assert result.answer.endswith("[C:1].")
+
+
+# ---------------------------------------------------------------------------
+# Issue #143: seed propagation from pipeline.query into Generator.generate.
+#
+# Contract (work-plan §Step 2.2 / DR3-002):
+# - ``RepoRAGPipeline.query(seed=None)`` (default) MUST call the generator
+#   with the same single-positional-arg shape as before so the existing
+#   17+ MagicMock tests in this file (``mock_gen.generate.return_value =
+#   ...``) keep passing without TypeError on extra kwargs.
+# - ``RepoRAGPipeline.query(seed=42)`` MUST call ``generator.generate``
+#   with ``seed=42`` keyword propagated.
+# ---------------------------------------------------------------------------
+
+
+@patch(
+    "baseline_reporag.pipeline.expand_with_graph",
+    side_effect=_mock_expand_with_graph,
+)
+@patch(
+    "baseline_reporag.pipeline.hybrid_search",
+    side_effect=_mock_hybrid_search,
+)
+class TestSeedPropagation:
+    """RepoRAGPipeline.query forwards the seed kwarg to Generator.generate."""
+
+    def test_query_without_seed_uses_legacy_call_shape(
+        self,
+        mock_search: MagicMock,
+        mock_expand: MagicMock,
+    ) -> None:
+        """``seed=None`` (default) -> generator.generate called WITHOUT seed kwarg.
+
+        Backwards-compat invariant for the 17+ existing MagicMock tests.
+        """
+        mock_gen = MagicMock()
+        mock_gen.generate.return_value = "Answer with [C:1]."
+        pipeline = _build_test_pipeline(generator=mock_gen)
+        pipeline.query("test question", session_id="s1")
+        call = mock_gen.generate.call_args
+        assert "seed" not in call.kwargs, (
+            f"seed kwarg leaked into legacy path: {call.kwargs}"
+        )
+
+    def test_query_with_seed_propagates_to_generator(
+        self,
+        mock_search: MagicMock,
+        mock_expand: MagicMock,
+    ) -> None:
+        """``seed=42`` -> generator.generate(messages, seed=42)."""
+        mock_gen = MagicMock()
+        mock_gen.generate.return_value = "Answer with [C:1]."
+        pipeline = _build_test_pipeline(generator=mock_gen)
+        pipeline.query("test question", session_id="s1", seed=42)
+        call = mock_gen.generate.call_args
+        assert call.kwargs.get("seed") == 42, (
+            f"seed=42 did not propagate; kwargs={call.kwargs}"
+        )
+
+    def test_query_with_seed_zero_propagates(
+        self,
+        mock_search: MagicMock,
+        mock_expand: MagicMock,
+    ) -> None:
+        """``seed=0`` MUST propagate (DR3-002: ``if seed:`` is a silent bug).
+
+        Falsy-but-valid seed: ``if seed:`` would silently drop the call,
+        leaving the eval nondeterministic. The implementation must use
+        ``if seed is not None:``.
+        """
+        mock_gen = MagicMock()
+        mock_gen.generate.return_value = "Answer with [C:1]."
+        pipeline = _build_test_pipeline(generator=mock_gen)
+        pipeline.query("test question", session_id="s1", seed=0)
+        call = mock_gen.generate.call_args
+        assert call.kwargs.get("seed") == 0, (
+            f"seed=0 silently dropped; kwargs={call.kwargs}"
+        )

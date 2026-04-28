@@ -1,11 +1,67 @@
 from __future__ import annotations
 
 import json
+from typing import Literal
 
 # Marker used by rule 4 in _SYSTEM. Kept as a module-level constant so
 # post-processing (see baseline_reporag.pipeline.apply_citation_postprocess)
 # and _SYSTEM share the exact same string.
 ABSTAIN_MARKER = "根拠が不足しています"
+
+_JA_HIRAGANA = (0x3040, 0x309F)
+_JA_KATAKANA = (0x30A0, 0x30FF)
+_JA_CJK_UNIFIED = (0x4E00, 0x9FFF)
+_JA_RATIO_THRESHOLD = 0.30
+_EN_RATIO_THRESHOLD = 0.50
+
+
+def detect_language(question: str) -> Literal["ja", "en", "other"]:
+    """Detect the language of ``question`` for prompt routing.
+
+    Returns:
+        ``"ja"``  if Japanese script (hiragana / katakana / CJK unified)
+                  ratio is >= 30% of the total character count.
+        ``"en"``  if ASCII alphabetic ratio is >= 50% of the non-space
+                  character count (and not classified as ``"ja"``).
+        ``"other"`` for empty / whitespace-only / symbol-only / emoji-only
+                  inputs and any other case (also avoids ``ZeroDivisionError``
+                  when ``non_space_len == 0``).
+
+    Note: the ``ja`` denominator is ``total`` while ``en`` uses
+    ``non_space_len`` — this asymmetry is intentional. Japanese has no
+    inter-word space so all characters contribute, while excluding
+    inter-word spaces from the English denominator stabilizes the ratio
+    on short questions.
+    """
+    if not question:
+        return "other"
+
+    total = len(question)
+    ja_count = 0
+    en_count = 0
+    non_space_len = 0
+    for ch in question:
+        cp = ord(ch)
+        if (
+            _JA_HIRAGANA[0] <= cp <= _JA_HIRAGANA[1]
+            or _JA_KATAKANA[0] <= cp <= _JA_KATAKANA[1]
+            or _JA_CJK_UNIFIED[0] <= cp <= _JA_CJK_UNIFIED[1]
+        ):
+            ja_count += 1
+        if not ch.isspace():
+            non_space_len += 1
+            if ch.isascii() and ch.isalpha():
+                en_count += 1
+
+    if ja_count / total >= _JA_RATIO_THRESHOLD:
+        return "ja"
+    if non_space_len == 0:
+        # Whitespace-only input — avoid ZeroDivisionError on the ``en`` test.
+        return "other"
+    if en_count / non_space_len >= _EN_RATIO_THRESHOLD:
+        return "en"
+    return "other"
+
 
 _SYSTEM = f"""\
 You are a senior software engineer assistant specialized in code repository analysis.
@@ -152,6 +208,31 @@ _FORMAT_HINT = f"""\
 """
 
 
+# The conditional clause "制度文書を根拠に回答する場合は…" is intentional:
+# this prompt is shared across every profile, so unconditionally forcing
+# 条文 citation would produce nonsense answers for Japanese questions
+# against ordinary code-repository corpora.
+_JP_INSTITUTIONAL_HINT = """\
+
+Additional rules for Japanese questions about institutional documents:
+- 制度文書を根拠に回答する場合は、可能な範囲で条文番号 (第◯条/第◯項/第◯号) を引用すること。
+- 制度文書に含まれる法令名・文書名は、根拠 chunk に正式名称がある場合は省略せず記載すること。
+- 質問が該当条文を求めており、根拠 chunk に該当条文が無い場合は「該当条文なし」と明記すること。
+"""
+
+
+def _resolve_system_prompt(question: str) -> str:
+    """Return the system prompt for ``question``.
+
+    Helper extracted from :func:`build_messages` so the language-routing
+    rule has a single source of truth and can be unit-tested independently
+    of the message-assembly logic.
+    """
+    if detect_language(question) == "ja":
+        return _SYSTEM + _JP_INSTITUTIONAL_HINT
+    return _SYSTEM
+
+
 def build_messages(
     question: str,
     evidence_text: str,
@@ -169,8 +250,10 @@ def build_messages(
     hint = _FORMAT_HINT if include_few_shot else _FORMAT_HINT_SHORT
     parts.append(f"## Instructions\n{hint}")
 
+    system_content = _resolve_system_prompt(question)
+
     return [
-        {"role": "system", "content": _SYSTEM},
+        {"role": "system", "content": system_content},
         {"role": "user", "content": "\n\n".join(parts)},
     ]
 

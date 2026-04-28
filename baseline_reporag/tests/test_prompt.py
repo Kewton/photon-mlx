@@ -3,9 +3,12 @@ from __future__ import annotations
 import json
 import re
 
+import pytest
+
 from baseline_reporag.generation.prompt import (
     _FORMAT_HINT,
     build_messages,
+    detect_language,
     flatten_messages_for_plain_lm,
 )
 
@@ -70,6 +73,135 @@ class TestFormatHintFewShot:
     def test_format_hint_token_budget(self) -> None:
         """_FORMAT_HINT が 1500 トークン（約 6000 文字）以内であること。"""
         assert len(_FORMAT_HINT) <= 6000
+
+
+class TestDetectLanguage:
+    """Issue #115: detect_language() classifies questions for prompt routing.
+
+    Returns "ja" / "en" / "other". The thresholds are 30% Japanese-script
+    chars (hiragana / katakana / CJK unified) over total length, or 50%
+    ASCII-alphabetic chars over non-space length, otherwise "other".
+    """
+
+    @pytest.mark.parametrize(
+        "ja_question",
+        [
+            "制度文書において第10条の内容は何ですか？",
+            "ひらがなだけのしつもんです",
+            "カタカナダケノシツモンデス",
+            "条文 第3条 第2項 を教えてください",
+            "What is 第5条? 教えてください",  # mixed but >=30% ja chars
+        ],
+    )
+    def test_japanese_questions_return_ja(self, ja_question: str) -> None:
+        assert detect_language(ja_question) == "ja"
+
+    @pytest.mark.parametrize(
+        "en_question",
+        [
+            "What is the main router?",
+            "How is authentication implemented?",
+            "Where can I find the config loader?",
+            "Explain the retrieval pipeline.",
+            "Show me an example of a FastAPI endpoint.",
+        ],
+    )
+    def test_english_questions_return_en(self, en_question: str) -> None:
+        assert detect_language(en_question) == "en"
+
+    def test_empty_string_returns_other(self) -> None:
+        assert detect_language("") == "other"
+
+    def test_whitespace_only_returns_other_no_zero_division(self) -> None:
+        # Whitespace-only must not raise ZeroDivisionError.
+        assert detect_language("     ") == "other"
+
+    def test_symbols_only_returns_other(self) -> None:
+        assert detect_language("!@#$%^&*()_+") == "other"
+
+    def test_emoji_only_returns_other(self) -> None:
+        # Emoji are non-ASCII and non-Japanese script — fall through.
+        assert detect_language("🎉🚀✨") == "other"
+
+    def test_digits_only_returns_other(self) -> None:
+        # Digits are non-alpha; should not pass either threshold.
+        assert detect_language("12345 67890") == "other"
+
+
+class TestResolveSystemPrompt:
+    """Issue #115 / DR1-005: _resolve_system_prompt() returns the per-question
+    system prompt, augmenting _SYSTEM with _JP_INSTITUTIONAL_HINT only for
+    Japanese inputs. Tested independently from build_messages so the
+    helper-level contract is locked down (test pyramid)."""
+
+    def test_english_returns_system_unchanged(self) -> None:
+        from baseline_reporag.generation.prompt import (
+            _SYSTEM,
+            _resolve_system_prompt,
+        )
+
+        assert _resolve_system_prompt("What is the main router?") == _SYSTEM
+
+    def test_japanese_concatenates_jp_hint(self) -> None:
+        from baseline_reporag.generation.prompt import (
+            _JP_INSTITUTIONAL_HINT,
+            _SYSTEM,
+            _resolve_system_prompt,
+        )
+
+        out = _resolve_system_prompt("制度文書の第3条について教えてください")
+        assert out == _SYSTEM + _JP_INSTITUTIONAL_HINT
+
+    def test_empty_string_returns_system_unchanged(self) -> None:
+        from baseline_reporag.generation.prompt import (
+            _SYSTEM,
+            _resolve_system_prompt,
+        )
+
+        assert _resolve_system_prompt("") == _SYSTEM
+
+
+class TestBuildMessagesLanguageBranching:
+    """Issue #115: build_messages() adapts the system prompt to the question
+    language without changing its signature."""
+
+    def test_english_question_system_prompt_is_unchanged(self) -> None:
+        """Golden snapshot: English question must produce a system message
+        that exactly equals the canonical _SYSTEM (no Japanese hint)."""
+        from baseline_reporag.generation.prompt import _SYSTEM
+
+        msgs = build_messages(
+            question="What is the main router?",
+            evidence_text="[C:1] app/main.py\ndef main(): pass",
+        )
+        assert msgs[0]["role"] == "system"
+        assert msgs[0]["content"] == _SYSTEM
+
+    def test_japanese_question_system_prompt_includes_jp_hint(self) -> None:
+        """Japanese question must append the institutional-doc hint
+        to the system prompt."""
+        msgs = build_messages(
+            question="制度文書の第3条について教えてください",
+            evidence_text="[C:1] doc.md\n第3条 内容",
+        )
+        sys_content = msgs[0]["content"]
+        # DR1-006: substring assert on a stable phrase, do not import
+        # the private constant from production code.
+        assert "制度文書を根拠に回答する場合は" in sys_content
+
+    def test_japanese_hint_uses_conditional_phrasing(self) -> None:
+        """Hint must be conditional ("制度文書を根拠に回答する場合は…")
+        rather than unconditionally forcing 条文 citation on all Japanese
+        questions."""
+        msgs = build_messages(
+            question="この関数の使い方を教えてください",
+            evidence_text="[C:1] foo.py\ndef bar(): pass",
+        )
+        sys_content = msgs[0]["content"]
+        # The conditional clause must be present — guarantees no
+        # unconditional 条文 citation directive.
+        assert "制度文書を根拠に回答する場合は" in sys_content
+        assert "可能な範囲で条文番号" in sys_content
 
 
 class TestFlattenMessagesForPlainLM:

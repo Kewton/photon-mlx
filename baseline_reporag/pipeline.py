@@ -94,7 +94,7 @@ class RepoRAGPipeline:
         store: ChunkStore,
         lexical: LexicalIndex,
         embedding: EmbeddingIndex,
-        graph: SymbolGraph,
+        graph: SymbolGraph | None,
         sessions: SessionManager,
         generator: Generator,
         logger: RunLogger,
@@ -115,6 +115,8 @@ class RepoRAGPipeline:
         question: str,
         session_id: str = "",
         repo_id: str = "",
+        *,
+        seed: int | None = None,
     ) -> QueryResult:
         cfg = self.cfg
         prof = TurnProfiler()
@@ -131,7 +133,7 @@ class RepoRAGPipeline:
         # --- Query expansion (computed once, shared by retrieval + reranker) ---
         qe_cfg = cfg.retrieval.query_expansion
         if qe_cfg.get("enabled", False):
-            _queries = expand_query(question)
+            _queries = expand_query(question, mapping=qe_cfg.get("domain_map"))
             expansion_terms: str | None = _queries[1] if len(_queries) > 1 else None
         else:
             expansion_terms = None
@@ -148,6 +150,7 @@ class RepoRAGPipeline:
                 lexical_weight=cfg.retrieval.weights.lexical,
                 embedding_weight=cfg.retrieval.weights.embedding,
                 expanded_queries=[expansion_terms] if expansion_terms else [],
+                repo_id=repo_id,
             )
 
         # --- Reranking (noise filter + optional cross-encoder) ---
@@ -203,7 +206,17 @@ class RepoRAGPipeline:
                 evidence_text=evidence_text,
                 history_text=session.history_text(max_turns=4),
             )
-            answer = self.generator.generate(messages)
+            # Issue #143: only forward ``seed`` when an eval explicitly
+            # asked for it.  Interactive/CLI/server callers leave it at
+            # ``None`` and we MUST keep the legacy single-positional-arg
+            # call shape so the 17+ existing MagicMock tests keep passing
+            # without spurious ``seed=None`` kwargs leaking through.
+            # DR3-002: ``if seed is not None`` (NOT ``if seed:``); seed=0
+            # is a valid deterministic seed and must propagate.
+            if seed is not None:
+                answer = self.generator.generate(messages, seed=seed)
+            else:
+                answer = self.generator.generate(messages)
 
         # --- Citation ---
         with prof.phase("citation"):

@@ -10,7 +10,9 @@
 | **Storage** | ~10 GB (model + indexes) | 20 GB+ |
 
 > The Qwen2.5-Coder-14B-Instruct-4bit model loads approximately 8 GB into memory.
-> Sentence-transformers embedding model and cross-encoder reranker require additional ~1 GB.
+> Sentence-transformers embedding model and cross-encoder reranker require additional memory:
+> - **Global default profile** (`configs/baseline.yaml`, `all-MiniLM-L6-v2` + `ms-marco-MiniLM-L-6-v2`): ~1 GB
+> - **Institutional profile** (`configs/institutional_docs.yaml`, `BAAI/bge-m3` + `BAAI/bge-reranker-v2-m3` post-#137): **~5-6 GB** (bge-m3 ~2.3 GB + bge-reranker-v2-m3 ~2.3 GB resident).
 
 ---
 
@@ -53,6 +55,13 @@ python scripts/build_symbol_graph.py --config configs/baseline.yaml
 
 Constructs import/call/inheritance edges for graph-expanded retrieval.
 
+> **Note (Issue #109)**: Symbol graph is **Python-centric**. Non-Python
+> corpora (e.g. 制度文書 markdown) can set
+> `indexing.symbol_graph.enabled: false` in the YAML to skip both
+> `build_symbol_graph.py` and the runtime `SymbolGraph.load()`. In that
+> mode `expand_with_graph` still returns file-neighbors, only the
+> graph-neighbor branch is skipped.
+
 ### 6. Start the server
 
 ```bash
@@ -78,7 +87,9 @@ The main configuration file is `configs/baseline.yaml`.
 | Section | Parameter | Default | Description |
 |---------|-----------|---------|-------------|
 | `model.model_id` | LLM model | `mlx-community/Qwen2.5-Coder-14B-Instruct-4bit` | Auto-downloaded on first run |
-| `retrieval.reranker.model_id` | Reranker | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Auto-downloaded on first run |
+| `retrieval.reranker.model_id` | Reranker (global default) | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Auto-downloaded on first run |
+| `retrieval.reranker.model_id` (institutional) | Reranker for institutional profile | `BAAI/bge-reranker-v2-m3` | Used by `configs/institutional_docs.yaml` (#137) |
+| `indexing.embedding.model_id` (institutional) | Embedding for institutional profile | `BAAI/bge-m3` | Used by `configs/institutional_docs.yaml` (#137), `max_input_chars=8192` |
 | `retrieval.weights` | Fusion weights | lexical: 0.45, embedding: 0.45, graph: 0.10 | Hybrid retrieval blending |
 | `retrieval.rerank_top_k` | Rerank cutoff | 12 | Number of chunks after reranking |
 | `evidence_pack.max_chunks` | Max evidence chunks | 16 | Reduce to save memory |
@@ -93,6 +104,81 @@ The main configuration file is `configs/baseline.yaml`.
 
 Both the LLM and reranker models are downloaded automatically from Hugging Face on first use.
 They are cached in `~/.cache/huggingface/`. Ensure network access is available for the first run.
+
+---
+
+## PHOTON Checkpoint Distribution
+
+PHOTON pipeline (`provider: "photon"` in YAML) は学習済 checkpoint の物理配置と環境変数の整合が必要。
+本セクションは Issue #135 採用 checkpoint (`photon_institutional_retrain_20260428/step_003000`、val_loss 0.4777) の配備運用を記録する。
+
+### 採用 checkpoint の配置 (2026-04-28 整理済)
+
+```
+$REPO/checkpoints/photon_institutional_retrain_20260428/
+├── best/         (1.4 GB) ← step_003000 と同内容、念のため保持
+└── step_003000/  (1.4 GB) ← ★採用、configs/institutional_docs_photon.yaml が参照
+
+合計: ~2.8 GB
+```
+
+**配置先の決定根拠** (worktree cleanup 耐性):
+- 学習は `feature/issue-135-photon-retrain` worktree 内 (`./checkpoints/`) で実施。
+- そのまま参照すると worktree cleanup で消失するリスクがあるため、**develop worktree の `./checkpoints/` 配下にコピー**して長期保管する運用に変更。
+- 中間 step (step_001000, _001500, _002000, _002500, final) は disk space 節約のため削除済 (~7 GB 解放)。再現性は `logs/train_photon_institutional_retrain_20260428/train_log.jsonl` で担保。
+
+### 環境変数の設定
+
+```bash
+# 本マシン (M3 Ultra Mac Studio) では develop worktree の絶対パスを使用
+export PHOTON_CHECKPOINT_ROOT=/Users/maenokota/share/work/github_kewton/photon-mlx-develop/checkpoints
+```
+
+config 側 (`configs/institutional_docs_photon.yaml`) は相対パスで参照:
+```yaml
+model:
+  checkpoint_path: "photon_institutional_retrain_20260428/step_003000"
+```
+
+`baseline_reporag/photon_pipeline.py::_resolve_checkpoint_path` (Issue #148 Phase A0) が
+`$PHOTON_CHECKPOINT_ROOT/$checkpoint_path` を `Path.resolve(strict=True)` で解決し、root containment と
+weights.npz/state.json の存在を fail-loud で検証する。
+
+### Random-init 安全装置
+
+`PHOTON_CHECKPOINT_ROOT` 未設定 or 不正パスで起動した場合、`_load_photon_checkpoint` は **RuntimeError で fail-fast**。
+unit/CI の negative-path テスト用 escape として `PHOTON_ALLOW_RANDOM_INIT=1` のみ許可するが、
+production/eval では設定禁止 (S7-001 random-init eval の再発防止)。
+
+### 旧 checkpoint (mulmoclaude 600-step) の温存
+
+| 用途 | 場所 | 内容 |
+|------|------|------|
+| **再学習 resume 起点として保持** | `$REPO/checkpoints/step_000600/` | mulmoclaude 600-step (val_loss 1.6238) |
+| 過去 step (step_000100 〜 step_001600 等) | 同上 | 学習途上のスナップショット、研究用 |
+
+これらは Issue #135 の resume_from を再現する場合のみ必要なので、disk space 圧迫時は最小限 (step_000600 のみ) に削減してよい。
+
+### Phase 3 (将来) — External Storage への移行
+
+Production deploy 時には設計方針書 §11 リスク表「派生学習物 (corpus / checkpoint) は public 配布対象外」に準じ、
+private S3 / GCS / HuggingFace Private Hub にアップして、各環境は `download_checkpoint.sh` 等で取得する運用に切り替える予定。
+
+```bash
+# 例: huggingface_hub 経由 (Phase 3 で実装予定)
+huggingface-cli download <org>/photon-institutional-retrain-20260428 \
+  --local-dir ./checkpoints/photon_institutional_retrain_20260428 \
+  --include "step_003000/*"
+```
+
+詳細は Phase 3 設計時に別 Issue で議論。
+
+### 配備時のチェックリスト
+
+- [ ] `PHOTON_CHECKPOINT_ROOT` を環境変数に設定 (.envrc / docker-compose.yml / k8s ConfigMap)
+- [ ] `$PHOTON_CHECKPOINT_ROOT/photon_institutional_retrain_20260428/step_003000/` に `weights.npz`, `state.json`, `integrity.json` の 3 ファイル存在
+- [ ] `state.json` の `best_val_loss` が `0.47774723892817733` 付近 (整合性確認)
+- [ ] `python -m baseline_reporag.cli --config configs/institutional_docs_photon.yaml` で smoke test、PHOTON 起動 log で `Loaded PHOTON checkpoint from ...` を確認
 
 ---
 
@@ -137,6 +223,36 @@ Or use a simple cron job:
 # Weekly log rotation (Sunday 00:00)
 0 0 * * 0 cd /path/to/photon-mlx && mkdir -p logs/archive && mv logs/*.jsonl logs/archive/ 2>/dev/null
 ```
+
+---
+
+## PHOTON Environment Variables (Issue #148)
+
+When running the PHOTON provider (`model.provider: photon`), the following
+environment variables control checkpoint loading behaviour.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PHOTON_CHECKPOINT_ROOT` | `checkpoints/` (repo-relative) | Root directory under which `cfg.model.checkpoint_path` must reside. Set to an absolute path when checkpoints live outside the repository. Example: `export PHOTON_CHECKPOINT_ROOT=/data/photon_checkpoints` |
+| `PHOTON_ALLOW_RANDOM_INIT` | `0` (fail-fast) | Set to `1` to continue with random-init weights when checkpoint loading fails. A WARNING is logged. **Restricted to unit/CI negative-path tests only.** Do **not** set this in Phase A evaluation or production — the random-init model produces garbage answers and reproduces the S7-001 defect. For Phase A eval, place a valid checkpoint before starting. |
+
+### PHOTON checkpoint setup
+
+1. Place the checkpoint directory (containing `weights.npz` and `state.json`) under the allowed root:
+   ```bash
+   export PHOTON_CHECKPOINT_ROOT=/data/photon_checkpoints
+   mkdir -p /data/photon_checkpoints/mulmoclaude_step600
+   cp weights.npz state.json /data/photon_checkpoints/mulmoclaude_step600/
+   ```
+
+2. Set `model.checkpoint_path` in the PHOTON YAML config:
+   ```yaml
+   model:
+     checkpoint_path: "mulmoclaude_step600"  # relative to PHOTON_CHECKPOINT_ROOT
+   ```
+
+3. The checkpoint path must remain within `PHOTON_CHECKPOINT_ROOT`. Symlinks
+   that escape the root are rejected with a `RuntimeError`.
 
 ---
 
@@ -282,3 +398,42 @@ baseline プロジェクトは `N/A (baseline_rag)`、working_memory OFF は `N/
 - 同時実行数は 1（`MAX_CONCURRENT_EVAL=1`）、wall-clock timeout 3600s
 
 Eval ジョブの状態は `.cache/photon_app_state.json` の `eval_jobs` dict に永続化される。起動時の subprocess は `shell=False`、結果 JSON は `reports/eval_runs/<job_id>.json`、ログは `logs/eval/<job_id>.log`（両方 gitignore 済み）。進捗は `PROGRESS done=N total=M p50_ms=X nc=Y` 形式のログ行から自動抽出。正常終了時に `reports/eval_runs/<job_id>.done` マーカーファイルが作成される。
+
+---
+
+## Breaking changes / Migration (Issue #109)
+
+### Markdown chunker の導入
+
+Issue #109 で `.md` ファイルは見出し（H1-H3）・条文（`第N条`/`第N節`）・コードフェンス（バッククォートのみ）を尊重する専用 chunker (`_chunk_markdown`) で分割されるようになった。これにより:
+
+- `Chunk.section_header` が空文字列から `"H1 > H3"` 形式に変わる（評価値に影響する可能性あり、Gate 2 v4 Static NC ±1pp 以内を許容帯としてモニタ）
+- `chunk_id` は `{repo_id}::{rel_path}::{start_line}-{end_line}` のまま維持されるが、境界位置が変わるため旧 chunk_id との互換性はなし
+
+**移行手順（既存 index を使っている repo 向け）**:
+
+```bash
+rm -rf data/indexes/<repo_id>/
+python scripts/ingest_repo.py --repo <path> --repo-id <repo_id> --config configs/<profile>.yaml
+python scripts/build_indexes.py --repo-id <repo_id> --config configs/<profile>.yaml
+# Python repo のみ（非 Python は enabled=false で skip される）
+python scripts/build_symbol_graph.py --repo-id <repo_id> --config configs/<profile>.yaml
+```
+
+### `indexing.symbol_graph.enabled: false` の新運用パターン
+
+制度文書（法令・規程など）のように Python シンボルが存在しないリポジトリでは symbol graph が無価値なため、以下の設定で build/load を完全に skip できる:
+
+```yaml
+indexing:
+  symbol_graph:
+    enabled: false
+```
+
+Skip される箇所:
+
+- `scripts/build_symbol_graph.py` は `Skipped: indexing.symbol_graph.enabled=false` を stdout に出して早期 return（`symbol_graph.json` は生成されない）
+- `baseline_reporag/pipeline_factory.py` は `SymbolGraph.load` を呼ばず `graph=None` を pipeline に渡す
+- `expand_with_graph` は `graph=None` の場合 graph-neighbors の展開を skip し、file-neighbors（`store.get_neighbors`）のみを返す
+
+この経路で pipeline を組み立てても retrieval / generation のインターフェースに変化はなく、既存 CLI / server も設定を変えるだけで動く。

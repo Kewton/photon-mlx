@@ -1,0 +1,9 @@
+{
+  "issue_number": "143",
+  "focus_area": "設計原則",
+  "stage": 1,
+  "stage_name": "通常レビュー",
+  "design_doc_path": "workspace/design/issue-143-eval-reproducibility-design-policy.md",
+  "issue_review_summary": "workspace/issues/143/issue-review/summary-report.md",
+  "output_path": "workspace/issues/143/multi-stage-design-review/stage1-review-result.json"
+}

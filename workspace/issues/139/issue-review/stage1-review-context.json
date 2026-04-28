@@ -1,0 +1,19 @@
+{
+  "issue_number": "139",
+  "focus_area": "通常",
+  "iteration": 1,
+  "stage": 1,
+  "stage_name": "通常レビュー（1回目）",
+  "hypothesis_verification_path": "workspace/issues/139/issue-review/hypothesis-verification.md",
+  "original_issue_path": "workspace/issues/139/issue-review/original-issue.json",
+  "review_focus": [
+    "整合性: 現在のコードベース・既存テスト・既存ドキュメントとの一致",
+    "正確性: 仕様記載の事実誤認・数値誤り・リンク切れ",
+    "実装可能性: 受入条件が実装可能かつ検証可能か",
+    "粒度: タスク分割が妥当か (1 PR で完結する単位か)",
+    "依存関係: 前提となる Issue / commit が確かに満たされているか"
+  ],
+  "must_fix_criteria": "実装着手前に修正しないと工数見積が崩れる / 受入条件が verifiable でない / 事実誤認で実装方針自体が歪む",
+  "should_fix_criteria": "曖昧で実装者が複数解釈できる / 設計判断が読み手に委ねられている",
+  "nice_to_have_criteria": "表記揺れ / 些細な誤字 / 補足情報があると親切"
+}

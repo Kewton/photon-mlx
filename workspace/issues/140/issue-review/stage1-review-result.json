@@ -1,0 +1,100 @@
+{
+  "stage": 1,
+  "focus": "通常（1回目）",
+  "reviewer": "opus",
+  "iteration": 1,
+  "findings": [
+    {
+      "id": "S1-001",
+      "severity": "Must Fix",
+      "title": "Stage 番号の致命的な事実誤認 (multi-stage-design-review は Stage 7-8 を持たない)",
+      "description": "Issue 本文の「背景」「ゴール 1」「Task 1」で繰り返し『Stage 7-8 を Codex 必須化』と記述しているが、`.claude/commands/multi-stage-design-review.md` の現状は **4 ステージのみ** (Stage 1-2 = opus、Stage 3-4 = Codex) であり、Stage 5-8 は存在しない。仮説検証レポート H1/H2 でも Rejected と判定されている。一方 `multi-stage-issue-review.md` は 8 ステージ構成で Stage 5-8 が Codex 担当。Issue は **二つの skill を混同**している。このまま実装に進むと『存在しない Stage の必須化』という空振り変更になる。\n\n【推奨修正】\n- `/multi-stage-design-review` 側の対象は **Stage 3-4 (Codex 担当)** に修正\n- `/multi-stage-issue-review` 側の対象は **Stage 5-8 (Codex 担当)** に修正\n- どちらの skill が今回の必須化対象かを明示。両方が対象なら 2 つに分けて記述する。",
+      "issue_section": "背景 / ゴール / Task 1",
+      "suggested_fix": "Issue 本文を以下に変更:\n- 背景: 『#135 の S7-001 ... 設計レビュー Stage 7 (Codex クロスレビュー) で初めて発見された』 → 『#135 の S7-001 ... `/multi-stage-issue-review` の Stage 7 (Codex 影響範囲レビュー 2回目) で初めて発見された』に修正。Issue review skill は 8 ステージ構成 (Stage 5-8 が Codex)、design review skill は 4 ステージ構成 (Stage 3-4 が Codex) であることを明記。\n- ゴール 1 / Task 1: 『Codex Stage 7+ 必須化』→『Codex 担当 Stage の必須化（multi-stage-design-review の Stage 3-4 / multi-stage-issue-review の Stage 5-8）』。Task 1 の『現状: Stage 1-6 が opus 単独、Stage 7-8 が Codex』の段は現行 skill 構成に合わせて両方の skill ごとに別記する。"
+    },
+    {
+      "id": "S1-002",
+      "severity": "Must Fix",
+      "title": "Task 4 サンプルコードの属性名が実装と不一致 (`embed_tokens` ではなく `token_embed`)",
+      "description": "Task 4 のコード例は `model.embed_tokens.weight` を参照しているが、`photon_mlx/model.py:120` の実装は `self.token_embed = nn.Embedding(...)` であり、正しい属性名は `model.token_embed.weight`。仮説検証レポート H6 でも Rejected。このまま実装すると `AttributeError` で落ちる。",
+      "issue_section": "Task 4",
+      "suggested_fix": "Task 4 サンプルコードの該当行を以下に修正:\n```python\nembed_weight = model.token_embed.weight  # photon_mlx/model.py:120\n```\nコメントの『例』表現も削除し、`token_embed` が PhotonModel の確定 API である旨を明記する。"
+    },
+    {
+      "id": "S1-003",
+      "severity": "Must Fix",
+      "title": "影響ファイルのパス誤り (`.claude/agents/...` ではなく `.claude/commands/...`)",
+      "description": "Issue 本文 Task 1 の『現状』および『影響ファイル』に `.claude/agents/multi-stage-design-review.md`、`.claude/agents/pm-auto-issue2dev.md` と記載されているが、実際のリポジトリ構成では skill 定義は `.claude/commands/` 配下にある (例: `.claude/commands/multi-stage-design-review.md`、`.claude/commands/pm-auto-issue2dev.md`、`.claude/commands/multi-stage-issue-review.md`)。このまま実装に進むと存在しないパスを編集対象として扱うリスクがある。",
+      "issue_section": "Task 1 / 影響ファイル",
+      "suggested_fix": "影響ファイル一覧を以下に置換:\n- `.claude/commands/multi-stage-design-review.md`\n- `.claude/commands/multi-stage-issue-review.md`\n- `.claude/commands/pm-auto-issue2dev.md`\n- `docs/code_review_checklist.md` (新規)\n- `CLAUDE.md` (リンク追加)\n- `photon_mlx/inference.py`\n- `photon_mlx/tests/test_inference.py`"
+    },
+    {
+      "id": "S1-004",
+      "severity": "Must Fix",
+      "title": "norm 閾値 0.3 の校正データが不足 (PHOTON checkpoint は現状 random-init)",
+      "description": "Task 4 で『訓練済み weight: norm ≈ 0.02 σ ≈ 0.04、random-init: σ ≈ 0.5、threshold 0.3』と記載されているが、PHOTON は現状ほぼ全モデルが random-init (Issue #135 で再学習中)。よって『訓練済み σ ≈ 0.04』は実測値ではなく経験則の借用。本 Issue を実装する時点で、閾値 0.3 を裏付ける trained checkpoint が存在しない。仮説検証レポートの『申し送り 4』とも一致。\n\nこのまま threshold をハードコードすると、(a) #135 の本格再学習後に閾値が合わずに偽陽性/偽陰性が発生、(b) test を固定値で書くと再校正のたびに test 修正が必要になる。",
+      "issue_section": "Task 4",
+      "suggested_fix": "Task 4 に以下の校正方針を追記する:\n1. 閾値はハードコードせず `PhotonConfig` (または `WorkingMemoryConfig` 相当) の field として exposing し、設定ファイル経由で校正可能にする。\n2. 初期値はあくまで暫定値で、Issue #135 の trained checkpoint で再校正する旨を Task 受入条件に明示。\n3. test は『trained checkpoint で WARNING が出ない / 故意の random-init モデルで WARNING が出る』という挙動 test に留め、閾値の絶対値を assert しない。\n4. 校正データが揃うまでは『WARNING ログ出力』のみで、エラー昇格 (raise) はしない。"
+    },
+    {
+      "id": "S1-005",
+      "severity": "Must Fix",
+      "title": "Task 2 の完了判定基準『Codex Stage 7-8 finding 数 >= 0』が事実上ザル",
+      "description": "Task 2 で『Phase 3 完了判定に \"Codex Stage 7-8 finding 数 >= 0\" を含める (0 件は OK、未実施は NG)』とあるが、`>= 0` はあらゆる整数が満たすので機能しない。意図は『Codex stage が **実施されたこと** (= 結果ファイル存在 & reviewer フィールド = \"codex\") の確認』であるはず。`multi-stage-design-review.md` line 222 / `multi-stage-issue-review.md` line 304 でも reviewer フィールド検証が既に運用上の要件として記載されており、それを Phase 3 完了判定に取り込むべき。",
+      "issue_section": "Task 2",
+      "suggested_fix": "Task 2 の完了判定を以下に再定義:\n- Phase 3 (multi-stage design review) 完了時に以下を確認:\n  1. `stage3-review-result.json` および `stage4-review-result.json` が存在する\n  2. 両ファイルの `reviewer` フィールドが `\"codex\"` である\n  3. completion report に Stage 別 (Stage 1-4) の Must Fix / Should Fix / Nice to Have 件数を記載する\n- 同等の判定を Phase 1 (multi-stage issue review) にも適用 (Stage 5/7 の reviewer = codex 確認)。"
+    },
+    {
+      "id": "S1-006",
+      "severity": "Should Fix",
+      "title": "scaffolding 命名禁止の例外定義が不足 (tests/, bench/ など)",
+      "description": "Task 3 の checklist は『production code path に scaffolding が残ること』を禁止対象としているが、`baseline_reporag/photon_pipeline.py:451` には現状 `_StubTokenizer` が存在し (#138 修正後も fallback として残置)、`bench/issue61_prune_batch.py`、`photon_mlx/tests/conftest.py` では正当な利用がある。CI で grep する際の **除外パターン (allowlist)** を明示しないと、本 Issue 実装で既存コードを誤検知して大規模変更を誘発する。仮説検証レポート『申し送り 5』でも指摘。",
+      "issue_section": "Task 3",
+      "suggested_fix": "Task 3 の checklist に以下を追加:\n- 適用範囲: `baseline_reporag/`, `photon_mlx/`, `torch_ref/` の production import path のみ\n- 除外: `*/tests/**`, `bench/**`, `scripts/dev/**`, `demo/**`, conftest.py\n- `baseline_reporag/photon_pipeline.py::_StubTokenizer` は現時点で fallback として残存しているため、本 Issue では『新規追加禁止』のルールを適用し、既存分は #138 や別 Issue で別途扱う旨を注釈する。\n- CI grep の具体コマンド例を checklist に併記 (例: `git grep -nE '(_Stub|_Mock|_Dummy|_Placeholder)' baseline_reporag/ photon_mlx/ torch_ref/ ':!*/tests/**'`)。"
+    },
+    {
+      "id": "S1-007",
+      "severity": "Should Fix",
+      "title": "テスト方針が Task 4 のみ言及で他 Task 分が欠落",
+      "description": "受入条件に『既存 tests + 新規 tests 全パス』とあるが、Task 1/Task 2/Task 3 については具体的な test 観点が示されていない。例:\n- Task 1: skill description の文言 (e.g. 『必須』『skip 不可』) が含まれることの assertion は手動 review か、それとも自動 lint / 文字列存在 test を入れるか？\n- Task 2: pm-auto-issue2dev の Phase 3 完了判定に reviewer フィールド検証が組み込まれることの test (mock JSON 経由など)\n- Task 3: docs/code_review_checklist.md の存在 / CLAUDE.md からのリンク存在の test、CI grep スクリプトの test\n\nテスト粒度が不明だと TDD 実装フェーズで方針がぶれる。",
+      "issue_section": "受入条件",
+      "suggested_fix": "受入条件に Task 別テスト観点を追加:\n- Task 1: skill description の必須キーワード存在を確認する `pytest` または `ruff`-level の lint test\n- Task 2: completion report テンプレートに Stage 別 finding 数表が含まれる sample を test fixture で固定\n- Task 3: `docs/code_review_checklist.md` 存在 + CLAUDE.md からのリンク存在 + CI grep スクリプトの自己 test\n- Task 4: 上記 S1-004 で示した挙動 test (trained / random-init で WARNING 有無が切り替わる)"
+    },
+    {
+      "id": "S1-008",
+      "severity": "Should Fix",
+      "title": "ロールバック方針 / 後方互換性の言及がない",
+      "description": "Task 1-2 は skill / プロセスの厳格化であり、既存 Issue で `--skip-stage=3,4` や `--skip-stage=5,6,7,8` を運用している場合がある (実際 `multi-stage-design-review.md` line 18, `multi-stage-issue-review.md` line 19 に使用例あり)。必須化により従来の skip 運用が壊れた場合のロールバック手順や、過渡期の互換性方針 (warning のみ → 段階的に raise に昇格、など) が記載されていない。",
+      "issue_section": "影響ファイル / 受入条件",
+      "suggested_fix": "Issue に以下のセクションを追加:\n## 後方互換性 / ロールバック\n- 既存の `--skip-stage` フラグ自体は保持し、Codex stage を skip した場合は WARNING を出す段階を 1 リリース挟む。\n- pm-auto-issue2dev / pm-auto-design2dev の Phase 完了判定では『Codex stage 未実施を WARNING、completion report に明示』を初期実装とし、強制 NG 化は次回 Issue で実施する選択肢を残す。\n- Task 4 の embedding norm WARNING も log のみ。raise への昇格は #135 trained checkpoint で校正完了後に別 Issue で扱う。\n- ロールバック: skill 文言修正と Phase 完了判定はファイル単位で revert 可能。Task 4 は `_check_weight_initialization` 呼び出しを 1 行コメントアウトで回避可能にする。"
+    },
+    {
+      "id": "S1-009",
+      "severity": "Should Fix",
+      "title": "Task 2 が pm-auto-issue2dev のみで pm-auto-design2dev / pm-auto-dev に触れていない",
+      "description": "`/pm-auto-design2dev` も `/multi-stage-design-review` を呼び出すルートにあり (skill 一覧参照)、`/pm-auto-dev` も Phase 内で skill 連鎖を持つ可能性がある。Codex stage 必須化の運用は pm-auto-issue2dev だけでは不十分で、design review を経由する全エントリポイントで一貫している必要がある。",
+      "issue_section": "Task 2 / 影響ファイル",
+      "suggested_fix": "Task 2 のスコープを以下に拡張:\n- `.claude/commands/pm-auto-issue2dev.md` Phase 3\n- `.claude/commands/pm-auto-design2dev.md` の対応する Phase\n- (任意) `.claude/commands/pm-auto-dev.md` 内で design review を呼ぶフローがあれば該当箇所\n影響ファイル一覧にもこれらを追加。"
+    },
+    {
+      "id": "S1-010",
+      "severity": "Nice to Have",
+      "title": "S7-001 finding ID の命名体系説明が不足",
+      "description": "Issue タイトルおよび背景で『S7-001』を Stage 7 由来として暗黙に扱っているが、本リポジトリには複数の番号体系 (`DR3-001` (Design Review Stage 3), `S5-NNN` (Issue Review Stage 5), `S7-NNN` (Issue Review Stage 7), `CB-001` (Codex review Codex Bug?) など) が存在する。S7-001 が `multi-stage-issue-review` Stage 7 由来であることを背景に明記すると、後続レビュー / 設計者の混乱を防げる。",
+      "issue_section": "背景",
+      "suggested_fix": "背景の冒頭に finding ID 命名体系の脚注を追加:\n> 注: `S7-001` は `multi-stage-issue-review` Stage 7 (Codex 影響範囲レビュー 2回目) の最初の finding。`DRN-NNN` は `multi-stage-design-review` Stage N の finding を指す。"
+    },
+    {
+      "id": "S1-011",
+      "severity": "Nice to Have",
+      "title": "受入条件のチェックボックスが粒度不揃い",
+      "description": "受入条件の最後の『既存 tests + 新規 tests 全パス』は他 4 項目に比べて粒度が荒く、ruff / format も含むのか不明。CLAUDE.md 品質チェック表 (テスト / ruff check / ruff format) と整合させるべき。",
+      "issue_section": "受入条件",
+      "suggested_fix": "受入条件の末尾を以下に置換:\n- [ ] `python -m pytest torch_ref/tests/ photon_mlx/tests/ baseline_reporag/tests/ tests/ -v` 全パス (CLAUDE.md 品質チェック表に準拠、既知 pre-existing failure 2 件を除く)\n- [ ] `ruff check .` 警告 0 件\n- [ ] `ruff format --check .` 差分なし"
+    }
+  ],
+  "must_fix_count": 5,
+  "should_fix_count": 4,
+  "nice_to_have_count": 2,
+  "summary": "Issue #140 は『S7-001 再発防止のためのプロセス強化』という方向性は妥当だが、(1) `/multi-stage-design-review` (4 stages) と `/multi-stage-issue-review` (8 stages) の混同による Stage 番号の事実誤認、(2) Task 4 サンプルコードの属性名誤り (`embed_tokens` → `token_embed`)、(3) 影響ファイルのパス誤り (`.claude/agents/` → `.claude/commands/`)、(4) norm 閾値の校正データ不足、(5) Phase 完了判定基準の論理不備、という 5 件の Must Fix を含んでいる。これらを修正しない限り実装段階で空振り変更や AttributeError が発生する。Should Fix としては test 方針/ロールバック方針/scaffolding 例外定義/対象 skill スコープの不足を、Nice to Have では命名体系と受入条件の粒度を指摘した。"
+}

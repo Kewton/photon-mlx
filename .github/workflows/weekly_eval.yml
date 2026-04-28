@@ -17,6 +17,19 @@ jobs:
           python-version: '3.12'
       - name: Install dependencies
         run: pip install -r requirements.txt
+      - name: Run real-weight integration test
+        # Issue #145: pin the production checkpoint load path against
+        # silent random-init regressions (S7-001 follow-up).
+        # fail-fast (no ``continue-on-error``) so this step blocks downstream
+        # eval from running on a broken load chain. Stale logs from prior
+        # runs are avoided by namespacing artefacts with GITHUB_RUN_ID.
+        run: |
+          set -o pipefail
+          mkdir -p logs
+          LOG_BASENAME="logs/integration_test_${GITHUB_RUN_ID:-local}"
+          python -m pytest tests/integration/test_photon_real_weights.py -v \
+            --junitxml="${LOG_BASENAME}.xml" 2>&1 \
+            | tee "${LOG_BASENAME}.log"
       - name: Run static eval
         run: |
           python -m scripts.run_baseline_eval \
@@ -28,15 +41,20 @@ jobs:
             --config configs/baseline.yaml \
             --max-sessions 30
       - name: Check thresholds
+        # NOTE: glob の repo_id (fastapi_fastapi) は configs/baseline.yaml の
+        # repo.repo_id と同期して保つこと。別 corpus (例: institutional_documents)
+        # の log は別 job で扱う (Issue #124)。
         run: |
           python scripts/ci_eval_check.py \
-            --static-log logs/baseline_eval_*.jsonl \
-            --mt-log logs/mt_eval_*.jsonl
+            --static-log logs/baseline_eval_fastapi_fastapi_*.jsonl \
+            --mt-log logs/mt_eval_fastapi_fastapi_*.jsonl
       - name: Upload results
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: eval-results-${{ github.run_number }}
           path: |
-            logs/baseline_eval_*.jsonl
-            logs/mt_eval_*.jsonl
+            logs/baseline_eval_fastapi_fastapi_*.jsonl
+            logs/mt_eval_fastapi_fastapi_*.jsonl
+            logs/integration_test_*.log
+            logs/integration_test_*.xml

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from baseline_reporag.config import Config, deep_merge
+import pytest
+
+from baseline_reporag.config import Config, deep_merge, is_symbol_graph_enabled
 
 
 class TestDeepMerge:
@@ -90,3 +92,51 @@ class TestConfigToDict:
         cfg = Config({"items": [{"id": 1}, {"id": 2}]})
         d = cfg.to_dict()
         assert d == {"items": [{"id": 1}, {"id": 2}]}
+
+
+class TestIsSymbolGraphEnabled:
+    """Issue #109: ``indexing.symbol_graph.enabled`` flag honoring."""
+
+    def test_explicit_true(self):
+        cfg = Config({"indexing": {"symbol_graph": {"enabled": True}}})
+        assert is_symbol_graph_enabled(cfg) is True
+
+    def test_explicit_false(self):
+        cfg = Config({"indexing": {"symbol_graph": {"enabled": False}}})
+        assert is_symbol_graph_enabled(cfg) is False
+
+    def test_missing_symbol_graph_block_defaults_true(self):
+        cfg = Config({"indexing": {"other_key": 1}})
+        assert is_symbol_graph_enabled(cfg) is True
+
+    def test_missing_indexing_block_defaults_true(self):
+        cfg = Config({"repo": {"repo_id": "x"}})
+        assert is_symbol_graph_enabled(cfg) is True
+
+    def test_plain_dict_compatible(self):
+        cfg = {"indexing": {"symbol_graph": {"enabled": False}}}
+        assert is_symbol_graph_enabled(cfg) is False
+
+    def test_plain_dict_default_true(self):
+        assert is_symbol_graph_enabled({}) is True
+
+    # CB-003: non-bool values must raise rather than silently pass through.
+    def test_quoted_string_false_raises(self):
+        cfg = Config({"indexing": {"symbol_graph": {"enabled": "false"}}})
+        with pytest.raises((TypeError, ValueError)):
+            is_symbol_graph_enabled(cfg)
+
+    def test_quoted_string_true_raises(self):
+        cfg = Config({"indexing": {"symbol_graph": {"enabled": "true"}}})
+        with pytest.raises((TypeError, ValueError)):
+            is_symbol_graph_enabled(cfg)
+
+    def test_integer_value_raises(self):
+        cfg = Config({"indexing": {"symbol_graph": {"enabled": 1}}})
+        with pytest.raises((TypeError, ValueError)):
+            is_symbol_graph_enabled(cfg)
+
+    def test_list_value_raises(self):
+        cfg = {"indexing": {"symbol_graph": {"enabled": [True]}}}
+        with pytest.raises((TypeError, ValueError)):
+            is_symbol_graph_enabled(cfg)

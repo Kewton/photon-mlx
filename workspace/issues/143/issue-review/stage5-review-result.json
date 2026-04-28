@@ -1,0 +1,67 @@
+{
+  "stage": 5,
+  "focus": "通常（2回目）",
+  "reviewer": "codex",
+  "issue_number": "143",
+  "summary": "Stage 1/3 の 20 件は Stage 4 後の Issue 本文に概ね反映済み。ただし Codex の独立確認では、seed 固定 API の本文内矛盾、既存 run.seed/run.deterministic の未使用、--runs 集計 schema 未定義、run_baseline_eval.py の --repo-id silent bug が残っている。",
+  "findings": [
+    {
+      "id": "S5-001",
+      "severity": "Must Fix",
+      "category": "silent_bug/API設計",
+      "title": "eval だけ seed 固定する設計が本文内で矛盾し、現コードに存在しない `Generator(seed=...)` / `pipeline.query(..., seed=...)` を前提にしている",
+      "description": "Issue 本文は Task 1 で `Generator.generate(..., seed: int | None = 42)` を提示し、S3-003 では pipeline/photon_pipeline の既存呼び出しは seed を渡さず Generator の default seed=42 に委譲するとしている。一方 S3-004 では interactive 経路を現状維持するため `Generator(seed=None)` をデフォルトとし、eval scripts だけ `Generator(seed=42)` または `pipeline.query(..., seed=42)` で固定すると書いている。現コードの `Generator.__init__` に seed 引数は無く、`RepoRAGPipeline.query` / `PhotonRAGPipeline.query` にも seed 引数は無い。このままだと、worker が default seed=None を採れば eval が固定されず、default seed=42 を採れば CLI/server まで固定化される。",
+      "evidence": "Issue body L68-L84: `seed: int | None = 42` と `Generator(seed=None)` / `pipeline.query(..., seed=42)` が併存。`baseline_reporag/generation/generator.py:17-23` は `model_id/max_new_tokens/temperature/top_p` のみ、`baseline_reporag/pipeline.py:113-118` は `question/session_id/repo_id` のみ、`baseline_reporag/photon_pipeline.py:1050-1055` も seed なし。",
+      "suggested_fix": "Task 1 に、実コードへ追加する API を明記する。例: `Generator.generate(..., *, seed: int | None = None)`、`RepoRAGPipeline.query(..., seed: int | None = None)`、`PhotonRAGPipeline.query(..., seed: int | None = None)` を追加し、eval scripts だけ `seed=cfg.run.seed if cfg.run.deterministic else None` を渡す。interactive CLI/server は query のデフォルト `seed=None` で現状維持する。PHOTON fallback の Qwen 生成にも同じ seed を伝播する。"
+    },
+    {
+      "id": "S5-002",
+      "severity": "Should Fix",
+      "category": "scaffolding",
+      "title": "既存 config の `run.seed` / `run.deterministic` が未使用のまま残り、Task 1 の hard-coded `SEED = 42` と二重管理になる",
+      "description": "`configs/baseline.yaml` と `configs/institutional_docs.yaml` には既に `run.seed: 42` / `run.deterministic: true` が存在するが、現コードはこの値を読んでいない。Issue 本文の Task 1 サンプルも `SEED = 42` を直接書いており、設定ファイルで seed を変更しても eval scripts の実挙動に反映されない silent bug を温存する。",
+      "evidence": "`configs/baseline.yaml:7-10` と `configs/institutional_docs.yaml:20-23` に run seed/deterministic がある一方、`rg -n \"cfg\\.run\\.seed|run\\.seed|deterministic\" baseline_reporag scripts` では eval/generator 経路での参照が見つからない。`scripts/run_baseline_eval.py:40-46` / `scripts/run_multi_turn_eval.py:41-55` は config load 後に seed を読まない。",
+      "suggested_fix": "`cfg.run.seed` と `cfg.run.deterministic` を Task 1 の source of truth として明記し、eval scripts は hard-coded `SEED = 42` ではなく config から seed を取得する。`configs/baseline.yaml` も影響ファイルに追加する。"
+    },
+    {
+      "id": "S5-003",
+      "severity": "Should Fix",
+      "category": "API前提",
+      "title": "`PYTHONHASHSEED` を script 内で設定しても現在の Python プロセスの hash seed は固定されない",
+      "description": "Task 1 の process 起動時 seed サンプルは script 内で `os.environ['PYTHONHASHSEED'] = str(SEED)` を設定しているが、Python の hash randomization はインタプリタ起動時に決まるため、実行中プロセスでは効果がない。`random.seed` / `np.random.seed` と同列に書くと、hash 順序まで固定できたと誤解される。",
+      "evidence": "Issue body L45-L55: `SEED = 42` の後に `os.environ['PYTHONHASHSEED'] = str(SEED)` を設定している。対象 scripts (`scripts/run_baseline_eval.py`, `scripts/run_multi_turn_eval.py`) は通常の Python プロセス内で実行されるため、この設定は既に起動済みの interpreter の hash seed を変更できない。",
+      "suggested_fix": "Task 1 のサンプルから in-process の `PYTHONHASHSEED` 固定を外すか、「`PYTHONHASHSEED=42 python ...` のように起動前 env として指定する必要がある」と明記する。script 内では `TOKENIZERS_PARALLELISM`、`random.seed`、`np.random.seed`、generate 直前の `mx.random.seed` に限定する。"
+    },
+    {
+      "id": "S5-004",
+      "severity": "Must Fix",
+      "category": "silent_bug",
+      "title": "`run_baseline_eval.py --repo-id` が pipeline 構築前に `cfg.repo.repo_id` へ反映されず、override 時に別 index を読んで空 retrieval になり得る",
+      "description": "`scripts/run_multi_turn_eval.py` は Issue #154 follow-up として `repo_id = args.repo_id or cfg.repo.repo_id` の後、`build_pipeline(cfg)` 前に `cfg.repo.repo_id = repo_id` を反映している。一方 `scripts/run_baseline_eval.py` は repo_id override を計算するだけで config を更新せず、そのまま pipeline を構築し、query 時だけ override repo_id を渡す。これにより index load は YAML default repo のまま、retrieval filter は override repo になるため、クロス repo 評価で結果が空または誤った baseline になり得る。Issue #143 は run_baseline_eval.py を触るため、同時に修正対象として明記すべき。",
+      "evidence": "`scripts/run_baseline_eval.py:40-46` は `repo_id = args.repo_id or cfg.repo.repo_id` の後に `pipeline = build_pipeline(cfg)`、`scripts/run_baseline_eval.py:88-92` は query に override repo_id を渡す。対照的に `scripts/run_multi_turn_eval.py:41-55` は `cfg.repo.repo_id = repo_id` を build 前に実行している。",
+      "suggested_fix": "Task 1 または影響ファイル欄に「`run_baseline_eval.py` は `run_multi_turn_eval.py` と同様に `--repo-id` を `build_pipeline(cfg)` 前に `cfg.repo.repo_id` へ反映する」を追加し、受入条件に `--repo-id` override の regression test を追加する。"
+    },
+    {
+      "id": "S5-005",
+      "severity": "Must Fix",
+      "category": "受入条件/出力schema",
+      "title": "Task 3 の `--runs N` は run index / seed / per-run 集計 schema が未定義で、現 aggregator の pooled 集計では `mean ± std` を出せない",
+      "description": "Issue 本文は `--runs N` と報告書の `mean ± std` 列追加だけを指定しているが、現 `run_baseline_eval.py` の predictions JSONL には run を識別するフィールドが無く、現 `aggregate_institutional_baseline.py` は渡された全 records を単一母集団として pooled NC rate / latency を計算するだけで run 別 mean/std を計算しない。複数 run を同一 JSONL に append しても、どの eval_id がどの run か判別できず、欠損 run や seed の混在も検出できない。",
+      "evidence": "`scripts/run_baseline_eval.py:93-104` の pred は `eval_id/category/question/answer/cited_chunk_ids/no_citation/latency...` のみで `run_index/run_seed/run_id` が無い。`scripts/aggregate_institutional_baseline.py:102-149` は全 records から `nc_rate` と latency percentile を一回だけ計算し、run grouping や std 計算を持たない。",
+      "suggested_fix": "Task 3 に schema を追加する。例: `--runs N` は predictions に `run_index`, `run_seed`, `run_id` を必須出力し、aggregator は `run_index` ごとに eval_id set の完全一致を検証してから NC rate / latency を per-run 計算し、`mean`, `std`, `min`, `max`, `n_runs`, `seeds` を report に出す。固定 seed 決定性検証では同じ seed=cfg.run.seed を N 回、seed sensitivity では seed range を明示する。"
+    },
+    {
+      "id": "S5-006",
+      "severity": "Should Fix",
+      "category": "整合性/出力schema",
+      "title": "multi-turn の `--runs` と `aggregate_institutional_baseline.py` の schema が噛み合っていない",
+      "description": "Issue 本文は `scripts/run_multi_turn_eval.py (seed 固定 + --runs)` と `scripts/aggregate_institutional_baseline.py (multi-run aggregation)` を同じ Task 3 の影響範囲に含めている。しかし現 aggregator は static predictions 前提で `eval_id` / `category` を必須としており、multi-turn predictions は `session_id` / `turn_id` 形式で `eval_id` / `category` を出さない。このままでは MT の multi-run 集計を同 aggregator で扱うのか、別 summary で扱うのかが不明。",
+      "evidence": "`scripts/aggregate_institutional_baseline.py:40-51` REQUIRED_FIELDS は `eval_id` と `category` を必須にしている。`scripts/run_multi_turn_eval.py:101-112` の pred は `session_id`, `turn_id`, `question`, `answer`, `cited_chunk_ids`, `no_citation`, latency fields で、`eval_id/category` が無い。",
+      "suggested_fix": "Task 3 に MT 用の方針を明記する。例: static aggregator は static 専用として `run_baseline_eval.py` の `--runs` を集計し、MT は `run_multi_turn_eval.py` の `.summary.json` に `run_index/run_seed` と per-run NC/follow-up latency を追加する。あるいは aggregator を `record_type=static|multi_turn` 対応に拡張し、MT schema の必須 fields を別定義にする。"
+    }
+  ],
+  "must_fix_count": 3,
+  "should_fix_count": 3,
+  "nice_to_have_count": 0,
+  "overall_assessment": "approve_with_changes"
+}

@@ -952,16 +952,16 @@ def _launch_eval_job(
 
     Issue #82 Wave 4 (W4-T3).  Path composition goes through
     ``eval_panel.make_eval_paths`` so result_json/log_file/marker_file are
-    all confined to ``reports/eval_runs/`` and ``logs/eval/``.  The
-    config is taken from ``proj.photon_config_path`` when the project is
-    PHOTON-enabled, else from ``proj.config_path``.
+    all confined to ``reports/eval_runs/`` and ``logs/eval/``.  The active
+    YAML is resolved via :func:`_resolve_active_config_path` so chat and
+    eval honour the same wizard-generated PHOTON config when present.
     """
 
     job_id = _eval_panel.sanitize_job_id()
     result_json, log_file, marker_file = _eval_panel.make_eval_paths(
         job_id, PROJECT_ROOT
     )
-    config_path = proj.photon_config_path or proj.config_path
+    config_path = _resolve_active_config_path(proj)
     try:
         cmd = _eval_panel.build_eval_job_cmd(
             eval_type=eval_type,
@@ -1231,9 +1231,16 @@ def page_projects():
                 "生成し、photon_config_path に自動設定します。"
             ),
         )
+        # Domain templates are appended automatically so adding a new
+        # entry to ``_DOMAIN_TEMPLATES`` propagates to the UI for free.
+        _BASE_PROFILE_OPTIONS = [
+            "photon_small",
+            "photon_tiny",
+            "photon_long_context",
+        ]
         wiz_base_profile = st.selectbox(
             "Config template",
-            options=["photon_small", "photon_tiny", "photon_long_context"],
+            options=_BASE_PROFILE_OPTIONS + list(_wizard._DOMAIN_TEMPLATES.keys()),
             key="wizard_base_profile",
         )
         wiz_recgen = st.checkbox(
@@ -1371,6 +1378,11 @@ def page_projects():
                         st.warning(w)
             except ValueError as exc:
                 st.error(f"wizard YAML 生成に失敗しました: {exc}")
+                return
+
+            repo_id_error = _wizard.validate_generated_repo_id(generated_yaml, repo_id)
+            if repo_id_error is not None:
+                st.error(repo_id_error)
                 return
 
             save_dir.mkdir(parents=True, exist_ok=True)
@@ -1582,6 +1594,29 @@ def page_chat():
         st.rerun()
 
 
+def _resolve_active_config_path(proj: Project) -> str:
+    """Return the YAML config path that the chat / eval paths should load.
+
+    ``proj.photon_config_path`` (the wizard-generated PHOTON YAML — domain
+    template + best-practice merge + repo_id validation) takes priority
+    over ``proj.config_path`` so chat and eval stay consistent. Empty /
+    missing ``photon_config_path`` falls back to ``config_path``.
+    """
+    return proj.photon_config_path or proj.config_path
+
+
+def _pipeline_cache_key(project_name: str, config_path: str) -> str:
+    """Compose a session-state cache key that invalidates on config change.
+
+    Including the resolved config path in the key means that if the wizard
+    later regenerates ``photon_config_path`` (or the user toggles between
+    PHOTON / baseline YAMLs for the same project), the next ``_run_query``
+    call will not reuse a stale pipeline that was built against the previous
+    config.
+    """
+    return f"pipeline_{project_name}_{config_path}"
+
+
 def _run_query(proj: Project, question: str, session_key: str) -> tuple[str, dict]:
     """Run a query through the pipeline via ``build_pipeline(cfg)``.
 
@@ -1602,10 +1637,14 @@ def _run_query(proj: Project, question: str, session_key: str) -> tuple[str, dic
         "turn_id": 0,
     }
 
-    pipeline_key = f"pipeline_{proj.name}"
+    # The wizard-generated PHOTON YAML (proj.photon_config_path) takes
+    # priority over the bare config_path; cache key embeds the resolved
+    # path so swapping configs invalidates the cached pipeline.
+    config_path = _resolve_active_config_path(proj)
+    pipeline_key = _pipeline_cache_key(proj.name, config_path)
 
     try:
-        cfg = load_config(proj.config_path)
+        cfg = load_config(config_path)
     except Exception as exc:
         _logger.exception("Failed to load config for %s", proj.name)
         return f"エラー: config load failed ({type(exc).__name__}: {exc})", dict(
@@ -1628,6 +1667,17 @@ def _run_query(proj: Project, question: str, session_key: str) -> tuple[str, dic
                 f"エラー: pipeline build failed ({type(exc).__name__}: {exc})",
                 dict(metadata_default),
             )
+        # CB-002: evict stale cached pipelines for the same project so a
+        # config-path swap does not leak the previous pipeline (each
+        # PhotonRAGPipeline pins MLX weights in memory).
+        prefix = f"pipeline_{proj.name}_"
+        stale_keys = [
+            k
+            for k in list(st.session_state.keys())
+            if isinstance(k, str) and k.startswith(prefix) and k != pipeline_key
+        ]
+        for k in stale_keys:
+            del st.session_state[k]
         st.session_state[pipeline_key] = pipeline
 
     pipeline = st.session_state[pipeline_key]

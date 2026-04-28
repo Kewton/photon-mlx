@@ -1,0 +1,95 @@
+{
+  "stage": 2,
+  "iteration": 1,
+  "applied_count": 14,
+  "skipped_count": 0,
+  "applied": [
+    {
+      "finding_id": "S1-001",
+      "applied": true,
+      "section": "C-3 / 受入条件",
+      "summary": "C-3 を対象 corpus=fastapi_fastapi、eval script=scripts/run_multi_turn_eval.py、測定指標=MT no-citation rate (base 6.7%)、判定=+5pp 以内 (11.7% 以下) に書き換え。受入条件 6 番目も同表現に統一。"
+    },
+    {
+      "finding_id": "S1-002",
+      "applied": true,
+      "section": "B-1",
+      "summary": "ハイパーパラメータ初期値 (lr=3e-5, micro_batch=2, grad_accum=16, warmup_ratio=0.0, min_lr=3e-6) を固定。lr-finder 確定手順、cosine schedule reset 方針、resume_from 仕様を追記。"
+    },
+    {
+      "finding_id": "S1-003",
+      "applied": true,
+      "section": "A-1 / 影響ファイル",
+      "summary": "sessions 数 ≥ 2,000、eval set との session_id 重複禁止、新規 scripts/generate_institutional_training_corpus.py、出力 schema (JSONL with turn_sep)、photon_mlx/data.py 拡張を追記。影響ファイルに data.py / 新 script を追加。"
+    },
+    {
+      "finding_id": "S1-004",
+      "applied": true,
+      "section": "ゴール / C-2",
+      "summary": "C-2 採用基準を「最低条件 (Turn 5-6 NC < 6% AND follow-up p50 ≤ 13.6s) を満たす checkpoint のうち Turn 5-6 NC が最小」の単一指標最適化に書き換え。ゴールの latency 表記も -30% 以上 vs baseline = 13.6s 以下に統一。"
+    },
+    {
+      "finding_id": "S1-005",
+      "applied": true,
+      "section": "B-1 / B-2 / 想定 compute コスト",
+      "summary": "10-20K step 根拠 (320M token = mulmoclaude 30 倍) を追記。eval 対象は 10K/15K/20K の 3 点のみと明記。想定 compute コストに checkpoint disk (1 個 ~750MB, ピーク 7.5-15GB, 採用後 ~2.3GB) を追記。"
+    },
+    {
+      "finding_id": "S1-006",
+      "applied": true,
+      "section": "影響ファイル",
+      "summary": "影響ファイルに photon_mlx/data.py (iterate_batches 拡張 / iterate_mixed_batches 新設) を追加。"
+    },
+    {
+      "finding_id": "S1-007",
+      "applied": true,
+      "section": "背景 / B-1 / リスク",
+      "summary": "背景に「既存 mulmoclaude checkpoint の取扱」サブセクションを新設し、想定パス (checkpoints/photon_mulmoclaude/step_600/, val_loss=0.4525)、resume_from 利用方針、optimizer state / LR scheduler 取扱、checkpoint 紛失時の risk を明記。リスク表に「mulmoclaude 600 step checkpoint 紛失」を追加。"
+    },
+    {
+      "finding_id": "S1-008",
+      "applied": true,
+      "section": "ゴール",
+      "summary": "「baseline の latency 優位 (-44.9%)」を「現行 PHOTON の baseline に対する latency 優位 -44.9% を維持」に修正。"
+    },
+    {
+      "finding_id": "S1-009",
+      "applied": true,
+      "section": "C-2",
+      "summary": "統計的決定ルール「Turn 5-6 NC が境界帯 (5-7%) の場合、+2 run 実施し 4-run 平均で再判定」を追記。eval noise (±1.67pp) も併記。"
+    },
+    {
+      "finding_id": "S1-010",
+      "applied": true,
+      "section": "D / 影響ファイル",
+      "summary": "新 checkpoint ディレクトリ命名規則 (photon_institutional_<step>_<yyyymmdd>/)、configs/institutional_docs_photon.yaml の model.provider / paths.checkpoint_root 更新、pipeline_factory smoke test、reports/institutional_photon_mt_eval_v2.md の 3 値比較表、reports/gate2_post_retrain_eval.md (新規) を追記。"
+    },
+    {
+      "finding_id": "S1-011",
+      "applied": true,
+      "section": "D / 受入条件",
+      "summary": "git LFS / external storage の判定基準 (1.5GB 超なら external) を明記。受入条件に「採用 checkpoint が指定保管先に存在し、CI/CD で取得可能」を追加。"
+    },
+    {
+      "finding_id": "S1-012",
+      "applied": true,
+      "section": "リスクと緩和策",
+      "summary": "catastrophic forgetting を「発生抑制」(mix ratio 50/50 維持、英語コード loss 別 metric) と「検出選別」(1K step 毎 FastAPI MT eval + dynamic 最良選定) の 2 行に分割。"
+    },
+    {
+      "finding_id": "S1-013",
+      "applied": true,
+      "section": "受入条件",
+      "summary": "受入条件 1 番目を 5 項目チェックリスト (sessions 数、JP token 比、cross_reference 比率、eval 重複ゼロ、人手 spot-check) に書き換え。"
+    },
+    {
+      "finding_id": "S1-014",
+      "applied": true,
+      "section": "並列開発",
+      "summary": "#133 を CPU/GPU phase 別に書き分け (Day 4-5 eval phase は CPU rerank A/B 同時可、Day 3-4 学習 phase は GPU 占有で直列)。"
+    }
+  ],
+  "skipped": [],
+  "issue_updated": true,
+  "github_issue_url": "https://github.com/Kewton/photon-mlx/issues/135"
+}

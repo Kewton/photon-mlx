@@ -1,0 +1,62 @@
+{
+  "stage": 5,
+  "focus": "通常 (2回目)",
+  "reviewer": "codex",
+  "iteration": 2,
+  "findings": [
+    {
+      "id": "S5-001",
+      "severity": "Must Fix",
+      "category": "正確性",
+      "title": "PHOTON_ALLOW_RANDOM_INIT の負経路条件が実コードと不一致",
+      "description": "Issue 本文では \"checkpoint_path 未設定\" や \"checkpoint 不在\" を PHOTON_ALLOW_RANDOM_INIT=1 で WARNING + 続行できる負経路としているが、実コードでは env が効くのは baseline_reporag/photon_pipeline.py:392-413 の _load_photon_checkpoint 例外だけ。checkpoint_path 未設定は line 414-419 の WARNING のみで env を参照せず、存在しない path や shape 不正は _resolve_checkpoint_path / shape validation が try ブロック外なので env=1 でも RuntimeError になる。",
+      "current_text": "(c) PHOTON_ALLOW_RANDOM_INIT bypass のネガティブテスト — checkpoint_path 未設定時に WARNING ログが出る + production-safe path では RuntimeError が出ることを assert ... / env 未設定 + checkpoint 不在 → RuntimeError、env=1 + checkpoint 不在 → WARNING + 続行",
+      "suggested_change": "(c) を「valid shape だが load に失敗する checkpoint を cfg.model.checkpoint_path に設定し、env 未設定では RuntimeError、PHOTON_ALLOW_RANDOM_INIT=1 では WARNING + 続行」に修正する。別項目として「checkpoint_path 未設定は env と無関係に WARNING のみ」を pin する。",
+      "rationale": "このままだと実装者が存在しない checkpoint_path で env bypass を期待するテストを書き、実コードの仕様と矛盾して失敗する。random-init 再発防止の負経路は正しい分岐で固定する必要がある。"
+    },
+    {
+      "id": "S5-002",
+      "severity": "Must Fix",
+      "category": "scope",
+      "title": "ゴールの E2E 範囲が採用方針 B と矛盾している",
+      "description": "ゴールは「実 tokenizer + 実 retrieval を通る end-to-end query test」としているが、採用方針 B と受入条件では _build_photon_deps 直接呼び出しを default 推奨し、tokenizer は HF download を避けて local fixture 置換可としている。これは production checkpoint load 経路の integration test であり、実 tokenizer / 実 retrieval / pipeline.query まで含む E2E は候補方針 A の follow-up に分離されている。",
+      "current_text": "実 PhotonModel + 実 (or 実用最小) checkpoint + 実 tokenizer + 実 retrieval を通る end-to-end query test を 1 件以上追加",
+      "suggested_change": "本 Issue のゴールを「実 PhotonModel + test 内生成 checkpoint + production load path (_build_photon_deps -> _load_photon_checkpoint -> photon_mlx.trainer.load_checkpoint) を通す integration test」に書き換え、実 tokenizer / 実 retrieval / pipeline.query E2E は候補方針 A の follow-up scope と明記する。",
+      "rationale": "Issue のゴールと受入条件がずれていると、実装完了判定が割れる。方針 B を採用するなら、検証対象を checkpoint load path と PhotonInference smoke に絞るのが SMART。"
+    },
+    {
+      "id": "S5-003",
+      "severity": "Should Fix",
+      "category": "API互換性",
+      "title": "integrity strict 検証案が trainer.load_checkpoint のシグネチャと混線している",
+      "description": "Issue 本文の (a) は load_checkpoint(verify_integrity=True) と書いているが、production load path が呼ぶ photon_mlx.trainer.load_checkpoint(model, path) は verify_integrity 引数を受け取らない。verify_integrity は photon_mlx.checkpoint.load_checkpoint(model, path, verify_integrity=False) 側の引数であり、trainer wrapper 経由では strict presence を指定できない。",
+      "current_text": "(a) checkpoint integrity hash 検証 ... `load_checkpoint(verify_integrity=True)` 引数追加で簡潔",
+      "suggested_change": "(a) を「production path では trainer.load_checkpoint が checkpoint.load_checkpoint(strict=False) を呼び、integrity.json が存在すれば検証される。strict presence まで assert する場合は photon_mlx.checkpoint.load_checkpoint(..., verify_integrity=True) を直接呼ぶか、trainer/_load_photon_checkpoint に verify_integrity plumbing を追加する」に修正する。",
+      "rationale": "実装者が trainer.load_checkpoint に存在しない引数を渡すと TypeError になる。採用 API を明確に分ければ、production path 検証と strict integrity 検証を混同しない。"
+    },
+    {
+      "id": "S5-004",
+      "severity": "Should Fix",
+      "category": "実装可能性",
+      "title": "最小 PhotonConfig の寸法例が既存 tiny fixture と一致していない",
+      "description": "本文は vocab=256, hidden=64, layers=2 程度の抽象例だけを示しているが、既存の photon_mlx/tests/test_training.py::_tiny_cfg などは base_embed_dim=16, hidden_size=64, intermediate_size=128, num_attention_heads=4, num_key_value_heads=4, head_dim=16, chunk_sizes=[4,4], encoder/decoder_layers_per_level=[1,1] を使っている。baseline YAML 経由では _build_photon_deps が cfg.model.num_heads を読むため、test config 側のキー名も明示した方がよい。",
+      "current_text": "最小 config (vocab=256, hidden=64, layers=2 等) / configs/photon_test_minimal.yaml ... candidate B の vocab=256 / hidden=64 / layers=2 想定",
+      "suggested_change": "configs/photon_test_minimal.yaml の想定値を既存 _tiny_cfg に寄せて、base_embed_dim: 16, hidden_size: 64, intermediate_size: 128, num_heads: 4, head_dim: 16, tokenizer.vocab_size: 256, hierarchy.chunk_sizes: [4, 4], encoder_layers_per_level: [1, 1], decoder_layers_per_level: [1, 1] と明記する。",
+      "rationale": "寸法例が曖昧だと、実装者が production default の head_dim=64 や num_attention_heads 系キーを混ぜ、想定外に重いモデルや config wire の誤読を作る可能性がある。既存 fixture と同型にすれば実装リスクが下がる。"
+    },
+    {
+      "id": "S5-005",
+      "severity": "Should Fix",
+      "category": "関連Issue",
+      "title": "関連 Issue との衝突条件が Issue 本文に残っていない",
+      "description": "#138 tokenizer mismatch は local fixture の vocab_size を cfg.tokenizer.vocab_size 以下に揃える必要がある。#140 の embedding random-init WARNING は PhotonInference 起動時に出るため、最小 1-step checkpoint でも caplog で意図的に扱う方がよい。#143 eval reproducibility と #156 refusal-aware は、この Issue が品質 eval ではなく load-path integration test である限り直接 scope 外だが、その前提を明記しておくと後続実装で評価指標を混ぜ込むリスクを避けられる。",
+      "current_text": "関連には #138 のみ記載。#143 / #156 / #140 との実装時衝突条件は未記載。",
+      "suggested_change": "関連または受入条件に「#138: fake tokenizer.vocab_size は expected_vocab_size と一致」「#140: random-init WARNING は caplog で許容/抑制方針を明示」「#143/#156: 本 Issue では quality eval / citation grading を実施しないため scope 外」を追記する。",
+      "rationale": "今回のテストは PHOTON 周辺の過去バグ再発防止に近い位置へ入るため、既存の tokenizer invariant や warning 診断層と衝突しやすい。scope 外の評価系 Issue も明示して、integration test が品質評価へ膨らまないようにする。"
+    }
+  ],
+  "must_fix_count": 2,
+  "should_fix_count": 3,
+  "nice_to_have_count": 0,
+  "summary": "Stage 1/3 の Must Fix (S1-001/S1-002/S3-001/S3-002) は本文上おおむね反映済みで、依存記述の更新、架空 API の削除、_load_photon_checkpoint 実体名固定、tests/__init__.py 要検証は確認できた。一方、2回目通常レビューでは実コードとの突き合わせで 5 件を検出した。Must Fix は PHOTON_ALLOW_RANDOM_INIT の負経路条件が実コードと異なる点、および本 Issue のゴールが採用方針 B の実際の検証範囲と矛盾している点。Should Fix は integrity strict API の混線、最小 config 寸法の曖昧さ、#138/#140/#143/#156 との衝突条件明記。random-init detector 代替案は (b)+(c) が現実的だが、(c) は valid-shaped corrupt checkpoint など load_checkpoint 例外を発生させる条件に修正する必要がある。tests/integration 配置は repo 横断 integration として許容範囲だが、pyproject testpaths と直接実行確認で discovery を pin する前提。"
+}
