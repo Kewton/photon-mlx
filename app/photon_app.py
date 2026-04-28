@@ -97,23 +97,63 @@ def _atomic_write_text(path: Path, data: str) -> None:
     os.replace(tmp, path)
 
 
+# 除外パターン: backup / training-only / eval matrix
+# (UI から ingest 用に選んでも意味の無い config をフィルタする)
+_USER_CONFIG_EXCLUDE_SUFFIXES = (".wave6_backup",)
+_USER_CONFIG_EXCLUDE_PREFIXES = ("eval_",)
+_USER_CONFIG_EXCLUDE_STEMS = (
+    # training-only configs (ingest 用途では使わない)
+    "institutional_docs_photon_retrain",
+)
+
+
+def _discover_user_configs(configs_dir: Path | None = None) -> list[str]:
+    """Discover ``configs/*.yaml`` files suitable for ingest UI selection.
+
+    Returns project-relative paths (e.g. ``configs/baseline.yaml``) sorted
+    alphabetically. Excludes:
+
+    - ``*.wave6_backup`` (historical backups)
+    - ``eval_*.yaml`` (eval-matrix configs not meant for ingest)
+    - ``*_retrain.yaml`` (training-only configs)
+    """
+    base = configs_dir if configs_dir is not None else PROJECT_ROOT / "configs"
+    if not base.is_dir():
+        return []
+    out: list[str] = []
+    for path in sorted(base.glob("*.yaml")):
+        name = path.name
+        if any(name.endswith(suffix) for suffix in _USER_CONFIG_EXCLUDE_SUFFIXES):
+            continue
+        if any(name.startswith(prefix) for prefix in _USER_CONFIG_EXCLUDE_PREFIXES):
+            continue
+        if path.stem in _USER_CONFIG_EXCLUDE_STEMS:
+            continue
+        try:
+            rel = path.relative_to(PROJECT_ROOT)
+        except ValueError:
+            rel = path
+        out.append(str(rel))
+    return out
+
+
 # Driver executed in a child ``python -c`` to chain the 4 index-build
 # phases with argv-list subprocess.run calls (shell=False). No user input
 # is interpolated into this string — every user value arrives via sys.argv.
 _INDEX_PIPELINE_DRIVER = """
 import subprocess, sys
+
 repo_dir, repo_id, embed_model, config_path = sys.argv[1:5]
 
 def run(argv, phase):
     print(f'>>> {phase}: ' + ' '.join(argv), flush=True)
     subprocess.run(argv, check=True)
 
-# Phase 0: resolve commit SHA
-out = subprocess.run(
-    ['git', '-C', repo_dir, 'rev-parse', 'HEAD'],
-    check=True, capture_output=True, text=True,
-)
-commit = out.stdout.strip()
+# Phase 0: resolve commit (git SHA for git repos, synthesized
+# 'manual-<mtime>' id for non-git directories like 制度文書 corpora).
+# Shared with scripts/ingest_repo.py so all 3 phases agree on the same id.
+from scripts.ingest_repo import resolve_commit
+commit = resolve_commit(repo_dir, 'HEAD')
 print(f'Phase 1: Ingest (commit={commit})', flush=True)
 run(
     [
@@ -1054,6 +1094,25 @@ def page_index():
         help="インデックスの識別子。英数字とアンダースコアのみ",
     )
 
+    config_choices = _discover_user_configs()
+    if not config_choices:
+        st.error("configs/*.yaml が見つかりません")
+        return
+    default_config = "configs/baseline.yaml"
+    default_index = (
+        config_choices.index(default_config) if default_config in config_choices else 0
+    )
+    config_path = st.selectbox(
+        "Config",
+        options=config_choices,
+        index=default_index,
+        help=(
+            "ingestion / retrieval / generation の設定。制度文書 (markdown 中心) は "
+            "configs/institutional_docs.yaml、コードベース (Python など) は "
+            "configs/baseline.yaml が無難。Embedding モデルは下の選択で override されます。"
+        ),
+    )
+
     embedding_models = {
         "all-MiniLM-L6-v2 (軽量・英語向け)": "sentence-transformers/all-MiniLM-L6-v2",
         "multilingual-e5-small (多言語対応)": "intfloat/multilingual-e5-small",
@@ -1061,7 +1120,7 @@ def page_index():
         "all-MiniLM-L12-v2 (英語・高精度)": "sentence-transformers/all-MiniLM-L12-v2",
     }
     embedding_label = st.selectbox(
-        "Embedding モデル",
+        "Embedding モデル (config の値を override)",
         options=list(embedding_models.keys()),
         index=1,  # multilingual-e5-small をデフォルト
         help="ベクトル検索に使う embedding モデル。日本語を含む場合は multilingual 推奨",
@@ -1098,7 +1157,6 @@ def page_index():
             # config_path) arrive as argv and are never interpolated into a
             # shell string.
             driver = _INDEX_PIPELINE_DRIVER
-            config_path = "configs/baseline.yaml"
             cmd_argv = [
                 sys.executable,
                 "-u",
