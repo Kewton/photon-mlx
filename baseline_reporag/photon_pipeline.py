@@ -351,8 +351,8 @@ def _build_photon_deps(cfg: Config) -> dict[str, Any]:
     tokenizer = _load_hf_tokenizer(tokenizer_id, photon_cfg.tokenizer.vocab_size)
     model = PhotonModel(photon_cfg)
 
-    # Issue #148 Phase A0 / DR-1: load checkpoint weights when
-    # ``cfg.model.checkpoint_path`` is set.  The allowed root is
+    # Issue #148 Phase A0 / DR-1 (#135 S7-001 のフル実装): load checkpoint
+    # weights when ``cfg.model.checkpoint_path`` is set.  The allowed root is
     # ``PHOTON_CHECKPOINT_ROOT`` (env var) or ``checkpoints/`` (default).
     # Security invariants (§6):
     # - root containment validated by ``_resolve_checkpoint_path``
@@ -417,6 +417,7 @@ def _build_photon_deps(cfg: Config) -> dict[str, Any]:
             "random-init weights. Set checkpoint_path or PHOTON_CHECKPOINT_ROOT "
             "for production inference."
         )
+
 
     # Issue #64 / Codex CB-001: extract working memory policy once, pass it
     # into PhotonInference alongside the Issue #63 drift_level_weights below.

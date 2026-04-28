@@ -1,0 +1,10 @@
+{
+  "issue_number": "135",
+  "focus_area": "設計原則",
+  "stage": 1,
+  "stage_name": "通常レビュー（設計原則）",
+  "design_doc_path": "workspace/design/issue-135-photon-retrain-design-policy.md",
+  "issue_body_path": "workspace/issues/135/issue-review/final-issue-body.md",
+  "hypothesis_verification_path": "workspace/issues/135/issue-review/hypothesis-verification.md",
+  "output_path": "workspace/issues/135/multi-stage-design-review/stage1-review-result.json"
+}

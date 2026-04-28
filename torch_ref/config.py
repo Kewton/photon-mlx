@@ -179,7 +179,60 @@ class TrainingConfig:
     log_every_steps: int = 20
     train_corpus: str = ""
     val_corpus: str = ""
+    # Issue #135 / Phase 4-1: optional mixed-corpus training.
+    # When ``train_corpora_mix`` is set, the trainer uses
+    # ``photon_mlx.data.iterate_mixed_batches`` instead of the legacy
+    # single ``train_corpus`` path. ``val_split`` carves a held-out
+    # fraction from the train mixture (DR1-005: simpler than a separate
+    # ``val_corpora_mix`` dict — train and val share the same ratio).
+    train_corpora_mix: dict[str, float] | None = None
+    val_split: float = 0.0
     early_stopping: EarlyStoppingConfig = field(default_factory=EarlyStoppingConfig)
+
+    def __post_init__(self) -> None:
+        # DR1-003 strict validation: invalid mixes must fail at config
+        # construction so the trainer is never built around a broken spec.
+        if self.train_corpora_mix is not None:
+            mix = self.train_corpora_mix
+            if not isinstance(mix, dict) or not mix:
+                raise ValueError(
+                    "train_corpora_mix must be a non-empty dict, got "
+                    f"{type(mix).__name__}"
+                )
+            total = 0.0
+            for path, weight in mix.items():
+                if isinstance(weight, bool) or not isinstance(weight, (int, float)):
+                    raise TypeError(
+                        f"train_corpora_mix weight must be a real number, "
+                        f"got {type(weight).__name__} for {path!r}"
+                    )
+                if not math.isfinite(float(weight)):
+                    raise ValueError(
+                        f"train_corpora_mix weight must be finite, "
+                        f"got {weight!r} for {path!r}"
+                    )
+                if weight <= 0.0:
+                    raise ValueError(
+                        f"train_corpora_mix weight must be > 0, "
+                        f"got {weight} for {path!r}"
+                    )
+                total += float(weight)
+            if abs(total - 1.0) > 1e-6:
+                raise ValueError(
+                    f"train_corpora_mix weights must sum to 1.0 (±1e-6), "
+                    f"got {total} (DR1-003)"
+                )
+
+        if not isinstance(self.val_split, (int, float)) or isinstance(
+            self.val_split, bool
+        ):
+            raise TypeError(
+                f"val_split must be a real number, got {type(self.val_split).__name__}"
+            )
+        if self.val_split < 0.0 or self.val_split >= 1.0:
+            raise ValueError(
+                f"val_split must be in [0, 1), got {self.val_split} (DR1-005)"
+            )
 
 
 @dataclass

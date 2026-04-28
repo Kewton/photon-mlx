@@ -1,0 +1,47 @@
+{
+  "stage": 8,
+  "iteration": 2,
+  "applied_count": 6,
+  "skipped_count": 0,
+  "applied": [
+    {
+      "finding_id": "S7-001",
+      "applied": true,
+      "section": "D. 採用判定とロールアウト / 影響ファイル / 受入条件",
+      "summary": "PHOTON runtime が `model.checkpoint_path` の leaf directory を `load_checkpoint()` で読み込む方針を追加し、`baseline_reporag/photon_pipeline.py` と smoke test を影響範囲に追加した。"
+    },
+    {
+      "finding_id": "S7-002",
+      "applied": true,
+      "section": "B-2 checkpoint 保存 / D. 採用判定とロールアウト / reports",
+      "summary": "training output root と eval/adopt checkpoint leaf を分離し、reports/config/runtime には `weights.npz` / `state.json` を直接含む leaf path を書く方針を追記した。比較表にも `checkpoint_path`, `cumulative_step`, `resume_base_step`, `additional_updates` を追加した。"
+    },
+    {
+      "finding_id": "S7-003",
+      "applied": true,
+      "section": "影響ファイル / 受入条件",
+      "summary": "`train_corpora_mix` / `val_corpora_mix` の config regression test と ratio validation を `torch_ref/config.py` / `torch_ref/tests/test_model.py` の影響範囲に追加した。"
+    },
+    {
+      "finding_id": "S7-004",
+      "applied": true,
+      "section": "CI/CD 事前確認 / 受入条件 / 影響ファイル",
+      "summary": "pytest 全体実行の責務を明確化し、CI 必須にする場合の `.github/workflows/tests.yml` 追加、またはローカル実行ログ添付のいずれかを受入条件に追記した。"
+    },
+    {
+      "finding_id": "S7-005",
+      "applied": true,
+      "section": "並列開発 / リスクと緩和策",
+      "summary": "open な #137 を明示し、#137 先行完了後に #135 Day 3 学習へ進む順序、同時実行禁止、GPU/HF cache/index/config 競合リスクを追記した。"
+    },
+    {
+      "finding_id": "S7-006",
+      "applied": true,
+      "section": "想定 compute コスト / リスクと緩和策 / 並列開発",
+      "summary": "65,536 tokens/step 前提で Day 3 lr-finder による sec/step 実測と ETA 再見積もりを追加し、5 日超過時の grad_accum=4 / 10K early stop / 夜間実行切替を追記した。"
+    }
+  ],
+  "skipped": [],
+  "issue_updated": true,
+  "github_issue_url": "https://github.com/Kewton/photon-mlx/issues/135"
+}

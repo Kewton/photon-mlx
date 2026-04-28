@@ -7,7 +7,7 @@ import logging
 import os
 import shutil
 import time
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +15,12 @@ import mlx.core as mx
 import mlx.nn as nn
 import mlx.optimizers
 
-from .data import iterate_batches
+from .checkpoint import (
+    CheckpointState,
+    load_checkpoint as _ckpt_load,
+    save_checkpoint as _ckpt_save,
+)
+from .data import iterate_batches, iterate_mixed_batches
 from .loss import photon_loss
 from .model import PhotonModel
 
@@ -42,56 +47,41 @@ class TrainState:
     val_losses: list[float] = field(default_factory=list)
 
 
+def _to_checkpoint_state(state: TrainState) -> CheckpointState:
+    return CheckpointState(
+        step=state.step,
+        best_val_loss=state.best_val_loss,
+        best_step=state.best_step,
+        patience_counter=state.patience_counter,
+        train_losses=list(state.train_losses),
+        val_losses=list(state.val_losses),
+    )
+
+
+def _from_checkpoint_state(state: CheckpointState) -> TrainState:
+    return TrainState(
+        step=state.step,
+        best_val_loss=state.best_val_loss,
+        best_step=state.best_step,
+        patience_counter=state.patience_counter,
+        train_losses=list(state.train_losses),
+        val_losses=list(state.val_losses),
+    )
+
+
 def save_checkpoint(
     model: PhotonModel,
     state: TrainState,
     path: str | Path,
 ) -> None:
-    path = Path(path)
-    path.mkdir(parents=True, exist_ok=True)
-    # Save model weights
-    weights = dict(model.parameters())
-    mx.savez(str(path / "weights.npz"), **_flatten(weights))
-    # Save state atomically: tmp file + os.replace so a crash mid-write
-    # doesn't leave a partial state.json behind.
-    state_path = path / "state.json"
-    tmp_path = path / "state.json.tmp"
-    tmp_path.write_text(
-        json.dumps(
-            {
-                "step": state.step,
-                "best_val_loss": state.best_val_loss,
-                "best_step": state.best_step,
-                "patience_counter": state.patience_counter,
-                "train_losses": state.train_losses[-100:],
-                "val_losses": state.val_losses[-100:],
-            }
-        ),
-        encoding="utf-8",
-    )
-    os.replace(tmp_path, state_path)
+    _ckpt_save(model, _to_checkpoint_state(state), path)
 
 
 def load_checkpoint(
     model: PhotonModel,
     path: str | Path,
 ) -> TrainState:
-    path = Path(path)
-    weights = mx.load(str(path / "weights.npz"))
-    model.load_weights(list(weights.items()))
-    state_data = json.loads((path / "state.json").read_text(encoding="utf-8"))
-    if not isinstance(state_data, dict):
-        raise ValueError(
-            f"state.json must decode to a dict, got {type(state_data).__name__}"
-        )
-    # Filter to known TrainState fields (forward compat: future schema
-    # additions or hand-edited keys won't crash an older trainer).
-    known = {f.name for f in fields(TrainState)}
-    unknown = set(state_data) - known
-    if unknown:
-        _logger.warning("Ignoring unknown state.json keys: %s", sorted(unknown))
-    filtered = {k: v for k, v in state_data.items() if k in known}
-    return TrainState(**filtered)
+    return _from_checkpoint_state(_ckpt_load(model, path))
 
 
 def _save_named_checkpoint(
@@ -135,20 +125,6 @@ def load_model(
     _state = load_checkpoint(model, checkpoint_path)
     mx.eval(model.parameters())
     return model
-
-
-def _flatten(tree: Any, prefix: str = "") -> dict[str, mx.array]:
-    """Flatten nested dict/list to dot-separated keys."""
-    flat: dict[str, mx.array] = {}
-    if isinstance(tree, dict):
-        for k, v in tree.items():
-            flat.update(_flatten(v, f"{prefix}{k}."))
-    elif isinstance(tree, list):
-        for i, v in enumerate(tree):
-            flat.update(_flatten(v, f"{prefix}{i}."))
-    elif isinstance(tree, mx.array):
-        flat[prefix.rstrip(".")] = tree
-    return flat
 
 
 def _build_lr_schedule(
@@ -255,8 +231,17 @@ def train(
     checkpoint_dir: str | Path,
     log_dir: str | Path,
     resume_from: str | Path | None = None,
+    *,
+    approved_roots: list[str | Path] | None = None,
 ) -> TrainState:
-    """Full training loop driven by cfg.training."""
+    """Full training loop driven by cfg.training.
+
+    ``approved_roots`` is forwarded to ``iterate_mixed_batches`` when
+    ``cfg.training.train_corpora_mix`` is set; production runs leave it
+    ``None`` so the loader falls back to the production allow-list
+    (``data/training/`` + ``data/processed/``). Tests pass tmp paths
+    here to bypass the production guard without disabling DR4-002.
+    """
     h_cfg = cfg.hierarchy
 
     # Training config (use defaults if not provided)
@@ -293,15 +278,49 @@ def train(
     max_grad_norm = t_cfg.max_grad_norm
 
     # Data
-    print("Loading training data...")
-    train_batches = iterate_batches(t_cfg.train_corpus, context_length, batch_size)
-    print(f"  {len(train_batches)} train batches")
+    if t_cfg.train_corpora_mix is not None:
+        # Issue #135 / Phase 4: mixed-corpus path. iterate_mixed_batches
+        # builds an independent sequence pool per corpus, weighted-samples
+        # at sequence level, and (when val_split > 0) returns a (train, val)
+        # tuple drawn from the same shuffled mixture so train/val share
+        # the train_corpora_mix ratio (DR1-005). Strict validation
+        # (DR1-003 / DR4-002) lives in iterate_mixed_batches; cfg-side
+        # checks already ran in TrainingConfig.__post_init__.
+        print("Loading mixed training data...")
+        result = iterate_mixed_batches(
+            t_cfg.train_corpora_mix,
+            context_length=context_length,
+            batch_size=batch_size,
+            vocab_size=cfg.tokenizer.vocab_size,
+            val_split=t_cfg.val_split,
+            approved_roots=approved_roots,
+        )
+        if t_cfg.val_split > 0.0:
+            train_batches, val_batches = result  # type: ignore[misc]
+        else:
+            train_batches = result  # type: ignore[assignment]
+            # Legacy single val_corpus is allowed alongside a mix when
+            # val_split=0 — e.g. an external val set held out from the
+            # training mixture entirely.
+            val_batches = (
+                iterate_batches(
+                    t_cfg.val_corpus, context_length, batch_size, shuffle=False
+                )
+                if t_cfg.val_corpus
+                else []
+            )
+        print(f"  {len(train_batches)} train batches (mixed)")
+        print(f"  {len(val_batches)} val batches")
+    else:
+        print("Loading training data...")
+        train_batches = iterate_batches(t_cfg.train_corpus, context_length, batch_size)
+        print(f"  {len(train_batches)} train batches")
 
-    print("Loading validation data...")
-    val_batches = iterate_batches(
-        t_cfg.val_corpus, context_length, batch_size, shuffle=False
-    )
-    print(f"  {len(val_batches)} val batches")
+        print("Loading validation data...")
+        val_batches = iterate_batches(
+            t_cfg.val_corpus, context_length, batch_size, shuffle=False
+        )
+        print(f"  {len(val_batches)} val batches")
 
     if not train_batches:
         raise ValueError("No training batches. Check corpus and context_length.")

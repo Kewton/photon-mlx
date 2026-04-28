@@ -1,0 +1,112 @@
+{
+  "stage": 2,
+  "focus": "整合性",
+  "reviewer": "claude-opus",
+  "issue_number": 135,
+  "design_doc": "workspace/design/issue-135-photon-retrain-design-policy.md",
+  "findings": [
+    {
+      "id": "DR2-001",
+      "severity": "Must Fix",
+      "category": "Issue整合",
+      "title": "Issue 本文が val_corpora_mix を維持しているのに対し設計方針書 DR1-005 で同 field を完全廃止しており、両ドキュメント間で TrainingConfig schema が乖離",
+      "description": "Issue 本文 (`workspace/issues/135/issue-review/final-issue-body.md`) は L50 / L53 / L81 / L121 / L137 / L142 / L177 で `val_corpora_mix: dict[str, float] | None` の追加を 7 箇所にわたり明文化している (例: 受入条件 #2 / `torch_ref/config.py` 改修方針 / 新 yaml の hyperparam 列挙)。一方、設計方針書では DR1-005 (Stage 1) を採択した結果、§3.1 図 (L93)、§4 (L147)、§5 トレードオフ (L174 のみ未修正)、§6.3 (L348-377)、§6.4 (L385-401)、§8 (L511) で `val_corpora_mix` を廃止し `val_split: float = 0.05` に置換している。Issue 本文と設計方針書のどちらの schema を実装が信用すべきか曖昧で、(a) /tdd-impl 段階で受入条件 #2 (L177) 通りに `val_corpora_mix` を導入すると設計判断 #1 / DR1-005 と矛盾する、(b) 設計方針書通りに `val_split` のみ導入すると Issue 受入条件 (CI で `val_corpora_mix` の YAML load 保持を assert する規定) を満たせない。",
+      "suggested_fix": "本 Stage 2 の整合性反映 (apply-review 段階) で、Issue 本文 7 箇所の `val_corpora_mix` 表記を `val_split (DR1-005 反映: train pool 内 sequence-level split)` に書換える。具体的には final-issue-body.md L50 後半 / L53 / L81 / L121 / L137 / L142 / L177 を一括修正し、受入条件 #2 (L177) は『defaults が `None` / `val_split=0.05`、YAML の `train_corpora_mix` と `val_split` が保持される、不正 ratio reject、既存 config 後方互換』へ変更する。同時に設計方針書 §5 設計判断 #1 トレードオフ末尾 (L174) の『`val_corpora_mix` で同じ比率を使う/未指定なら従来 `val_corpus` 単一 corpus に fallback』という記述も DR1-005 反映後の文言 (`val_split=0.05` が指定されていれば train pool 内から sequence-level split、未指定 = 0.0 なら従来 `val_corpus` 単一 corpus に fallback) に修正する。",
+      "affected_section": "Issue 本文 L50/L53/L81/L121/L137/L142/L177、設計方針書 §5 設計判断 #1 トレードオフ (L174)"
+    },
+    {
+      "id": "DR2-002",
+      "severity": "Must Fix",
+      "category": "Issue整合",
+      "title": "Issue 本文の PHOTON checkpoint load が photon_mlx.trainer.load_checkpoint を直接呼ぶ記述で、設計方針書 DR1-002 の photon_mlx.checkpoint 抽出 / trainer 直 import 禁止と矛盾",
+      "description": "Issue 本文 L122 は `_build_photon_deps()` が `photon_mlx.trainer.load_checkpoint(model, checkpoint_path)` を呼ぶ、と明示している。一方、設計方針書 §4 / §6.5 / §10 (DR1-002 反映後) は `photon_mlx/checkpoint.py` を新設し `_build_photon_deps` は `from photon_mlx.checkpoint import load_checkpoint as _load_ckpt` を呼ぶ、`photon_mlx.trainer` への直接 import は禁止 (Dependency Inversion 違反 + lazy MLX import 規約弱体化のため)、と境界規約を明文化している。Issue 本文の現行記述のまま実装を進めると、(a) baseline_reporag → photon_mlx の import 表面が trainer (TrainState / mlx.optimizers / cosine_decay / loss を top-level で参照) まで広がり、設計方針書 §6.5 末尾の境界規約に違反、(b) `pipeline_factory.py` の docstring (lines 24-26) が謳う 'contracts/config 以外を baseline_reporag は触らない' 方針も棄却される。",
+      "suggested_fix": "Issue 本文 L122 を以下のいずれかに修正: (a) `photon_mlx.trainer.load_checkpoint` の表記を `photon_mlx.checkpoint.load_checkpoint` に置換、または (b) 『`load_checkpoint` は `photon_mlx/checkpoint.py` に物理移管し、trainer は `from .checkpoint import load_checkpoint` で再 export。`_build_photon_deps` は `photon_mlx.checkpoint` のみを import する (trainer 直 import 禁止)』を追記。Issue 本文 L138 / L186 (受入条件) でも同様に表記統一。これにより Issue 本文と設計方針書 §6.5 の境界規約が一致する。",
+      "affected_section": "Issue 本文 L122 / L138 / L186 (受入条件 PHOTON runtime checkpoint load)"
+    },
+    {
+      "id": "DR2-003",
+      "severity": "Must Fix",
+      "category": "テスト整合",
+      "title": "設計方針書の test_data.py 配置宣言が既存ファイル配置と乖離 (test_data.py は実在せず既存 data tests は test_training.py 内 TestData クラス)",
+      "description": "設計方針書 §8 (L508-509) と §10 (L557) は `iterate_mixed_batches` 用 unit test の配置を `photon_mlx/tests/test_data.py` (新規 or 拡張) と宣言している。しかし repo 上には `test_data.py` は存在せず (`ls photon_mlx/tests/` で確認: __init__.py / conftest.py / test_blocks.py / test_config.py / test_forward.py / test_generate.py / test_inference.py / test_optimize.py / test_safe_recgen.py / test_session.py / test_training.py のみ)、既存の `test_pack_sequences` / `test_create_batches` / `test_load_jsonl` の 3 件は `photon_mlx/tests/test_training.py:89-110` の `TestData` クラス内に同居している。設計方針書はこの事実を反映しておらず、(a) 新規 `test_data.py` を作成すれば既存 27+ tests と同居せず分割管理になる (設計判断 #1 で言及される '既存 27+ tests' の配置の実体を曖昧化)、(b) 既存 `TestData` クラスの拡張で済ませる場合、§8 の 'test_data.py 5-6 件 + signature snapshot 1 件' の配置宣言と矛盾する。Issue 本文 L175 は既存配置を正しく示しており (`photon_mlx/tests/test_training.py:23` 系既存 unit test)、設計方針書側だけが乖離している。",
+      "suggested_fix": "設計方針書 §8 (L508 / L509) と §10 (L557) の配置宣言を以下に修正: 『新規 `photon_mlx/tests/test_data.py` を作成し、`iterate_mixed_batches` 関連 unit test (5-6 件) と `iterate_batches` signature snapshot test (1 件) を集約する。既存 `photon_mlx/tests/test_training.py` の `TestData` クラス (test_pack_sequences / test_create_batches / test_load_jsonl) は移動せず in-place 維持し、import 経路 (`from photon_mlx.data import ...`) は不変』。または『既存 `photon_mlx/tests/test_training.py::TestData` クラスを拡張する』選択肢を採るなら §8 / §10 の表記を `photon_mlx/tests/test_training.py (TestData クラス拡張)` に変更する。前者を推奨 (新関数の責務分離と test 配置を一致させる SOLID 観点)。",
+      "affected_section": "§8 テスト戦略 (L508-509) / §10 影響範囲表 (L557)"
+    },
+    {
+      "id": "DR2-004",
+      "severity": "Should Fix",
+      "category": "内部整合",
+      "title": "リスク表 S7-006 / DR1-010 の compute 原理計算 batch_size=4 が他箇所の micro_batch=2 / grad_accum=16 と内部矛盾",
+      "description": "設計方針書 §11 リスク表 L594 の S7-006 / DR1-010 (compute 原理計算) は『M3 Ultra で PHOTON 階層が ~3-6 sec/step (batch_size=4 / context_length=2048 / 累計 65,536 tokens/step) と仮定すると…』と記述している。一方、§5 設計判断 (Issue 本文 L67-77) では `micro_batch=2` / `grad_accum=16` / `effective batch=32`、1 optimizer step = `2 * 16 * 2048 = 65,536 tokens` と全箇所で統一。`batch_size=4` という数値は本書の他のどこにも現れず (§6.2 API契約 L294-302、§5 設計判断 #1 L167、§5 (b) micro_batch / grad_accum 説明)、原理計算行のみが孤立している。`micro_batch=2` で sec/step を測ると forward+backward が 1 micro 分の遅延しか持たない一方、`grad_accum=16` 経由で optimizer step は 16 倍遅くなるため、'sec/step' の意味 (= micro vs optimizer) も曖昧。",
+      "suggested_fix": "§11 L594 の `batch_size=4` を `micro_batch_size=2 (effective batch_size = 2 * 16 = 32)` に修正し、'~3-6 sec/step' が **optimizer step (= 16 micro-step を集約した 1 optimizer update)** あたりの時間であることを明記。例: 『optimizer step あたり ~3-6 sec (16 micro × forward+backward = ~190-380 ms/micro / micro_batch=2 / context_length=2048 / 累計 65,536 tokens/step) と仮定すると…』。これにより Day 3 lr-finder で `elapsed_s` を集計する単位 (optimizer step? micro-step?) も一意に決まる。",
+      "affected_section": "§11 リスク表 L594 (S7-006 / DR1-010 行)"
+    },
+    {
+      "id": "DR2-005",
+      "severity": "Should Fix",
+      "category": "Codex反映",
+      "title": "S5-001 で確定した『lr=3e-5 → min_lr=3e-6 cosine』表記が DR1-009 / S7-006 リスク行で『lr=3e-5』のみ残り min_lr 言及が脱落",
+      "description": "S5-001 反映で『warmup_ratio=0.0 + min_lr=3e-6 のとき初回 update から lr=3e-5 起点で min_lr=3e-6 へ cosine decay』が確定し、§5 設計判断 #3 (L191-198) / §11 S5-001 関連リスク (L590) / §8 test_resume_from_continual_learning (L510) では一貫して『lr=3e-5 → min_lr=3e-6』と表記。一方、§4 Config 行 (L149) は `lr=3e-5 / warmup_ratio=0.0 / min_lr=3e-6 / max_steps=10000-20000` と min_lr を明記する一方、`photon_mlx/trainer.py:154-183` の `_build_lr_schedule` の挙動依存条件 (= warmup_steps=0 ∧ min_lr>0 → cosine_decay(init=lr, end=min_lr) パスを取る) を §5 設計判断 #3 のみで明文化しており、L590 リスク行の検証範囲 (warmup_ratio=0.0 時 lr=3e-5 起点で cosine decay) には『min_lr=3e-6 まで』が抜けている。実装段階で min_lr を 0 や別値に設定すると `_build_lr_schedule` は L182 (`else: return lr`) フォールバックで定数 LR になり、設計意図 (cosine decay) と乖離する。",
+      "suggested_fix": "§11 リスク表 L590 の文言『warmup_ratio=0.0 時に lr=3e-5 起点で cosine decay すること』を『warmup_ratio=0.0 ∧ min_lr=3e-6 (≠ 0) のとき、`_build_lr_schedule` が `cosine_decay(init=3e-5, end=3e-6)` パス (trainer.py:178-181) を取り、初回 update から lr=3e-5 起点で min_lr=3e-6 へ cosine decay すること、`min_lr=0` だと L182-183 のフォールバックで定数 LR になる事実を併記』へ修正。§8 L510 test の assert にも 'min_lr=3e-6 が yaml に記述されている' 前提条件を 1 行追加。",
+      "affected_section": "§11 リスク表 L590 / §8 テスト戦略 L510"
+    },
+    {
+      "id": "DR2-006",
+      "severity": "Should Fix",
+      "category": "API整合",
+      "title": "iterate_mixed_batches signature の epochs 引数が他箇所に伝播していない",
+      "description": "設計方針書 §5 設計判断 #1 L167 の signature 案では `iterate_mixed_batches(corpus_paths: dict[str, float], *, context_length, batch_size, seed, val_split=0.0, epochs=1)` と `epochs=1` を含む。一方、§6.2 API契約 (L294-302) の signature では `epochs` 引数が脱落し `corpus_paths / context_length / batch_size / seed / shuffle` のみ。実装契約 docstring (L313-335) でも epochs に関する記述がなく、設計判断 #1 の意図 ('epochs を iterator で round-robin 化できる、と設計原則上望ましい' という DR1-006 議論の名残) が API 契約に残されていない。trainer.py の `while state.step < max_steps` ループは epochs を使わず batch_idx % len(train_batches) で round-robin するため (trainer.py:340)、`epochs` を defining しても参照されない。Issue 本文では `epochs` 引数への言及なし。",
+      "suggested_fix": "§5 設計判断 #1 L167 から `epochs=1` を削除し、§6.2 API契約と表記統一する。または §6.2 docstring に『epochs 概念は持たず、trainer.py の `while state.step < max_steps` ループが `batch_idx % len(train_batches)` で round-robin する (DR1-006 議論で list 戻り型を選んだため、epochs 自前管理は trainer 側に残す)』を 1 行追記し、両者の不整合を明示的に解消する。",
+      "affected_section": "§5 設計判断 #1 L167 / §6.2 API契約 L294-335"
+    },
+    {
+      "id": "DR2-007",
+      "severity": "Should Fix",
+      "category": "ドキュメント整合",
+      "title": "reports/institutional_photon_mt_eval.md (旧、#113 実測根拠) と新 _v2.md の関係 (置換 / 並列保持) が設計方針書で明示されていない",
+      "description": "設計方針書 §1 メタデータ L24 と §2.1 で『#113 の実測 (`reports/institutional_photon_mt_eval.md`) で確定した仮説 C を解消するため』と旧 report を引用する一方、§4 (L154) / §10 (L571) では `reports/institutional_photon_mt_eval_v2.md` を **新規** として追加。両 report の関係 (旧 .md は履歴として保持、_v2.md は新値で上書きせず並列保持、旧 .md からは _v2.md への cross-link を冒頭に追加、等) が明示されておらず、Issue 本文 L125 / L152 / L183 でも『旧 PHOTON 値・新 PHOTON 値・baseline 値を 1 表で並べる』と記述するのみで、旧 .md の扱いに触れない。一方、`reports/gate2_judgment_v4_final.md` (旧) と `reports/gate2_judgment_v5_post_retrain.md` (新) の関係は §10 (L573) と Issue 本文 L129 で『v4 は履歴として保持、v5 を新規作成し冒頭で v4 → v5 cross-link』と明文化済み。同じパターンを mt_eval にも適用すべきだが現状は欠落。",
+      "suggested_fix": "設計方針書 §10 L571 の `reports/institutional_photon_mt_eval_v2.md` 行責務に『旧 `reports/institutional_photon_mt_eval.md` (#113) は履歴として保持、_v2.md は冒頭で旧 report への cross-link を持ち、両 report は並列保持』を追加。Issue 本文 L152 にも同様の記述を追記。これにより `reports/gate2_judgment_v4_final.md` と _v5 の関係 (§10 L573) と統一されたパターンを取れる。",
+      "affected_section": "§10 影響範囲表 L571、Issue 本文 L152"
+    },
+    {
+      "id": "DR2-008",
+      "severity": "Should Fix",
+      "category": "API整合",
+      "title": "iterate_mixed_batches API 契約が val_split 引数を持つ一方、§6.4 trainer 分岐は (train_batches, val_batches) を tuple で受け取る前提で関数戻り値型と矛盾",
+      "description": "設計方針書 §6.4 trainer 分岐 (L389-395) は `train_batches, val_batches = iterate_mixed_batches(t_cfg.train_corpora_mix, context_length=..., batch_size=..., val_split=t_cfg.val_split)` と関数を tuple unpack で受け取る。一方、§6.2 API契約 docstring (L320-321) は『Returns a list of (batch_size, context_length) mx.array (compatible with iterate_batches return type)』とのみ宣言し戻り値型は `list[mx.array]` の単一 list (line 302 の `-> list[mx.array]:`)。`val_split > 0` のとき何を返すかが API 契約で未定義: (a) `(train_batches, val_batches)` tuple を返すなら戻り値型は `list[mx.array] | tuple[list[mx.array], list[mx.array]]`、(b) `val_split=0` のとき後方互換で list を返すなら型注釈・docstring に Union を明記する必要、(c) val_batches を別関数で取り出す API 設計なら §6.4 の tuple unpack が成立しない。",
+      "suggested_fix": "§6.2 L302 の戻り値型注釈を `list[mx.array] | tuple[list[mx.array], list[mx.array]]` (val_split > 0 のとき (train, val) tuple、それ以外は list) に修正し、docstring (L320-321) に分岐ロジックを 1 段落追加。または signature を `iterate_mixed_batches(...) -> tuple[list[mx.array], list[mx.array]]` (val_split=0 でも `(train_batches, [])` を返す) に統一し §6.4 の tuple unpack と整合させる。前者を推奨 (val_split=0 なら list 単一返却で iterate_batches と signature 互換が保てる、設計判断 #1 トレードオフの後方互換性が活きる)。",
+      "affected_section": "§6.2 API契約 L294-335 / §6.4 trainer 分岐 L385-401"
+    },
+    {
+      "id": "DR2-009",
+      "severity": "Should Fix",
+      "category": "ドキュメント整合",
+      "title": "Issue 本文の hyperparam 列挙 (L121) で min_lr が脱落 (lr=3e-5 / warmup_ratio=0.0 / max_steps のみ)",
+      "description": "Issue 本文 L121 の新 yaml 列挙『新 hyperparam (`lr=3e-5` / `warmup_ratio=0.0` / `max_steps=10000-20000` / `train_corpora_mix` / `val_corpora_mix`)』で `min_lr=3e-6` が抜けている。設計方針書 §4 L149 では『学習 hyperparam (`lr=3e-5`, `warmup_ratio=0.0`, `min_lr=3e-6`, `max_steps=10000-20000`, `train_corpora_mix` (sum=1.0 strict), `val_split=0.05`)』と min_lr を明記。S5-001 反映 (lr=3e-5 → min_lr=3e-6 cosine decay) のために `min_lr=3e-6` 設定は必須 (`_build_lr_schedule` の `min_lr>0` 分岐で cosine_decay を選択するためのキー条件、photon_mlx/trainer.py:178-181)。Issue 本文の列挙から min_lr が抜けると、実装担当が新 yaml を作る際に min_lr=0.0 (デフォルト) のまま提出する可能性があり、L182-183 の `else: return lr` で定数 LR になり cosine decay が effectively 無効化される。",
+      "suggested_fix": "Issue 本文 L121 の hyperparam 列挙を『新 hyperparam (`lr=3e-5` / `warmup_ratio=0.0` / **`min_lr=3e-6`** / `max_steps=10000-20000` / `train_corpora_mix` / `val_split=0.05`)』に修正 (DR2-001 で val_corpora_mix も val_split に変更されることに注意)。これにより Issue ↔ 設計 §4 / §5 設計判断 #3 / §11 S5-001 行と一致する。",
+      "affected_section": "Issue 本文 L121"
+    },
+    {
+      "id": "DR2-010",
+      "severity": "Nice to Have",
+      "category": "テスト整合",
+      "title": "リポジトリ root に pyproject.toml / pytest.ini / setup.cfg が存在せず、§8 の 'pytest --ignore=data/training/' 規約は CI yaml 側のみで担保される",
+      "description": "設計方針書 §8 L519 と §11 S3-006/S7-004 行 (L596) で『`python -m pytest --ignore=data/training/ photon_mlx/tests/ baseline_reporag/tests/ tests/ torch_ref/tests/` を CI 必須化』と規定。しかし root 配下に `pyproject.toml` / `pytest.ini` / `setup.cfg` のいずれも存在しない (検証済: `find -maxdepth 4 -name 'pyproject.toml' -o ...` で hit なし)。pytest が rootdir を自動検出する場合は CWD ベースとなり、`testpaths` 等の設定がないため CI yaml で `--ignore=data/training/` を必ず明示しないとローカル実行と CI で挙動が乖離する可能性。さらに『新規 `tests/test_generate_institutional_training_corpus.py`』 (§4 / §10 L564) と『既存 `tests/test_generate_training_corpus.py`』 (root 直下 `tests/`) の collection 順序 / fixture 衝突可能性も pytest config で固定されない。",
+      "suggested_fix": "§8 末尾 (L519) または §10 影響範囲表に 1 行追加: 『root 配下に `pyproject.toml` / `pytest.ini` が無いため pytest 設定は CI yaml の command line 引数 (`--ignore=data/training/ photon_mlx/tests/ baseline_reporag/tests/ tests/ torch_ref/tests/`) のみで担保される。テスト discovery 順序の不安定性を避けるため、`pyproject.toml` を新設して `[tool.pytest.ini_options] testpaths` を一元化する案を follow-up Issue として起票』。本 Issue では pyproject.toml 新設は範囲外 (DR1-011 の yaml diff test 同様、再現性最優先)。",
+      "affected_section": "§8 テスト戦略 L519 / §10 影響範囲表"
+    },
+    {
+      "id": "DR2-011",
+      "severity": "Nice to Have",
+      "category": "ドキュメント整合",
+      "title": "workspace/mvp/roadmap.md の Phase 2 conditional 表 (L88-94) と設計方針書のリスク表項目で 3-6% / >6% 分岐の参照 line 番号が乖離",
+      "description": "設計方針書 §11 リスク行『再学習で Turn 5-6 NC < 6% 達成失敗』 (L597) は『3-6% 帯の場合、本 Issue 内で追加軽量 fine-tune 5K step (compute 余裕あれば、roadmap.md L88-94 conditional 表 3-6% 分岐に該当)』と参照。実際の `workspace/mvp/roadmap.md` を確認すると Phase 2 conditional 表は L86-94 (見出し『PHOTON 再学習の判定（#113 で決定）』が L86、表本体が L88-94)、表内容は『< 3% / 3-6% / > 6%』の 3 段階。設計方針書の line 範囲指定 (L88-94) は『見出しを除いた表本体のみ』を指しており、Issue 本文 L130 の roadmap 更新方針 (『Phase 2 conditional 表に「>6% 分岐実行済」マーキング』) とは表記の粒度が一致しない (Issue 本文は『>6% 分岐』のみマーキング、設計方針書は『3-6% 分岐』にも fallback path を提示)。Day 5 ロールアウト工程で roadmap.md L88-94 を更新する際にどの粒度で書換えるか曖昧。",
+      "suggested_fix": "設計方針書 §11 L597 の参照を『roadmap.md (workspace/mvp/roadmap.md) L88-94 の conditional 表 3-6% 行 (軽量 fine-tune 5K step) と > 6% 行 (本格再学習 10-20K step) の両方を参照。本 Issue 採用結果に応じて該当行に「実行済」マーキング』へ修正。Issue 本文 L130 も『Phase 2 conditional 表 (>6% 分岐) に「実行済」マーキング、必要に応じて 3-6% fallback も追記』へ統一。これにより Day 5 ドキュメント更新時に書換え対象 cell が一意に決まる。",
+      "affected_section": "§11 リスク表 L597、Issue 本文 L130"
+    }
+  ],
+  "must_fix_count": 3,
+  "should_fix_count": 6,
+  "nice_to_have_count": 2,
+  "summary": "設計方針書 (615 行) は Stage 1 反映で API 表面・境界条件・責務分割の 3 大 Must Fix を取り込み、Codex 指摘 S5/S7 系もよく整理されている。Stage 2 整合性レビューでは以下 3 点が Must Fix。(1) DR2-001: Issue 本文が `val_corpora_mix` を 7 箇所で維持する一方、設計方針書 DR1-005 で同 field を完全廃止し `val_split: float` に置換しており、両ドキュメントの TrainingConfig schema が乖離。/tdd-impl 着手前に Issue 本文 L50/L53/L81/L121/L137/L142/L177 の一括修正が必要。(2) DR2-002: Issue 本文 L122 が `photon_mlx.trainer.load_checkpoint` を直接呼ぶ記述を保ったまま、設計方針書 DR1-002 で導入した `photon_mlx.checkpoint` 抽出と trainer 直 import 禁止規約が伝播していない (Issue 本文 L138 / L186 でも同旧表記)。(3) DR2-003: §8 / §10 が `photon_mlx/tests/test_data.py` を新規 or 拡張対象として宣言する一方、repo 上に同ファイルは実在せず、既存 27+ data tests は `test_training.py::TestData` クラスに同居する事実を反映していない。Should Fix 6 件は内部整合 (リスク表の batch_size=4 vs micro_batch=2 矛盾、`epochs` 引数の API 表面の漂流、val_split + tuple 戻り値の型注釈不在)、Codex 反映の脱落 (S5-001 の min_lr=3e-6 必須条件が Issue 本文 L121 から脱落、リスク行 L590 で min_lr 言及が抜ける)、ドキュメント整合 (旧 mt_eval.md vs _v2.md の関係未明示、roadmap.md 参照行の粒度ずれ) が中心。Nice to Have 2 件は pyproject.toml 不在による pytest 設定の暗黙化と roadmap conditional 表の line 番号ずれ。Stage 1 で扱った SOLID/KISS/YAGNI/DRY 観点とは重複しない整合性違反のみに絞った結果、合計 11 件 (上限 12 件以内)。Issue ↔ 設計方針書の sync 不整合 (DR2-001 / DR2-002) を /apply-review で先行解消する必要あり。"
+}

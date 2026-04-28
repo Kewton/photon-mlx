@@ -4,7 +4,7 @@
 - **目標**: PHOTON を MVP (Minimum Viable Product) として公開可能にする
 - **MVP 定義**: pip install → 学習済みモデル自動 DL → 自分のリポジトリ / ドキュメントで使える
 - **当初想定**: 5 週間（Phase 1-3）
-- **現在の進捗**: Phase 1 完了、**Phase 2 再定義**（制度文書ドメイン検証に pivot）
+- **現在の進捗**: Phase 1 完了、**Phase 2 完了（2026-04-28、Issue #135 採用）**、Phase 3 着手可能
 
 ---
 
@@ -32,7 +32,7 @@
 
 | 項目 | 担当 Epic / Issue |
 |------|------------------|
-| **Phase 2: 制度文書ドメイン精度検証** | Epic #117（今日登録）|
+| ~~**Phase 2: 制度文書ドメイン精度検証**~~ | ~~Epic #117~~ ✅ **完了 2026-04-28 (#135 採用)** |
 | **Phase 3: 配布**（pip install + HuggingFace 公開）| 未起票（Phase 2 判定後）|
 
 ---
@@ -55,7 +55,25 @@
 
 ---
 
-## Phase 2: 制度文書ドメイン検証 — 🏃 進行中（Epic #117）
+## Phase 2: 制度文書ドメイン検証 — ✅ 完了（Epic #117、2026-04-28 #135 採用）
+
+### Phase 2 完了サマリ (2026-04-28)
+
+Issue #135 (本格再学習) で **Turn 5-6 NC < 6% MVP 達成** (refusal-aware では 0.00% で 3% 理想閾値も達成)。Phase 7 institutional MT eval の採用判定により Epic #117 close 条件を満たした。
+
+| 指標 | Phase 2 受入条件 | 採用 retrain (#135) | 判定 |
+|------|----------------|--------------------|------|
+| 制度文書 Turn 5-6 NC | < 6% (MVP) | **0.00%** (refusal-aware) | ✅ |
+| 制度文書 Turn 5-6 NC | < 3% (理想) | **0.00%** | ✅ |
+| 制度文書 follow-up latency | baseline -30%+ | -37.7% | ✅ |
+| 訓練品質 (val_loss) | (参考) | -70.6% (1.6238 → 0.4777) | ✅ |
+
+**採用 checkpoint**: `photon_institutional_retrain_20260428/step_003000`
+**エビデンス**:
+- `reports/institutional_photon_mt_eval_v2_3k.md` (採用判定)
+- `reports/institutional_photon_mt_eval_v2_3k_bug_check.md` (refusal-aware 検証)
+
+**follow-up Issue**: #156 (`run_multi_turn_eval.py` の `is_refusal` 出力欠落の計測 bug)
 
 ### 方針の変更（2026-04-24）
 
@@ -83,17 +101,17 @@
 | **G4（仕上げ）** | #115 | feat(app): wizard domain template + 日本語 prompt | #112, #114 | 2 日 |
 | G4 | #116 | docs: Phase 2 完了レポート（再現率比較）| 全 Issue | 1 日 |
 
-### PHOTON 再学習の判定（#113 で決定）
+### PHOTON 再学習の判定（#113 で決定 → 仮説 B 確定 → #135 で本格再学習実施 → 採用）
 
 #113（現行 PHOTON で制度文書 MT eval）の **Turn 5-6 NC** で以下を判定：
 
-| Turn 5-6 NC | 判定 | 次アクション |
-|-------------|------|-------------|
-| < 3% | 仮説 A 勝ち | 再学習不要、Phase 2 完了へ |
-| 3-6% | 中間 | 軽量 fine-tune（5K step、resume）|
-| > 6% | 仮説 B 勝ち | 本格再学習（10-20K step、JP 50%+）|
+| Turn 5-6 NC | 判定 | 次アクション | 実績 |
+|-------------|------|-------------|------|
+| < 3% | 仮説 A 勝ち | 再学習不要、Phase 2 完了へ | — |
+| 3-6% | 中間 | 軽量 fine-tune（5K step、resume）| — |
+| **> 6%** | **仮説 B 勝ち** | **本格再学習（10-20K step、JP 50%+）** | ✅ #113 で 10.83% を実測、**#135 で実施 → 0.00% (refusal-aware) で完了** |
 
-**推定仮説 A: 60% / 仮説 B: 40%**（Tokenizer 共有 × encoding 一貫性の同時不確実性）
+**推定仮説 A: 60% / 仮説 B: 40%** (Tokenizer 共有 × encoding 一貫性の同時不確実性) → 実測で **仮説 B 確定**、#135 で本格再学習実施し受入条件達成。
 
 ### 成功条件（Phase 2 完了 = Phase 3 着手可能）
 

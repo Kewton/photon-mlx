@@ -242,6 +242,144 @@ def test_validate_cross_config_on_bare_dataclasses() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Issue #135 / Phase 4-1: TrainingConfig.train_corpora_mix + val_split
+# ---------------------------------------------------------------------------
+# DR1-005 simplification: val_corpora_mix dict was dropped in favour of a
+# single ``val_split: float`` that carves val out of the same shuffled
+# train pool, preserving the train_corpora_mix ratio.
+# DR1-003 strict validation: empty mix dict, weight <= 0 or non-finite,
+# sum(weights) outside ±1e-6 of 1.0 must all raise ValueError at config
+# construction time so trainer never sees an invalid mix.
+
+
+class TestTrainingConfigCorporaMix:
+    """TrainingConfig.train_corpora_mix + val_split schema (DR1-003 / DR1-005)."""
+
+    def test_default_train_corpora_mix_is_none(self) -> None:
+        """Backwards compat: default config keeps the legacy single-corpus path."""
+        t = TrainingConfig()
+        assert t.train_corpora_mix is None
+        assert t.val_split == 0.0
+
+    def test_explicit_mix_with_valid_weights(self) -> None:
+        t = TrainingConfig(
+            train_corpora_mix={"a.jsonl": 0.5, "b.jsonl": 0.5},
+            val_split=0.05,
+        )
+        assert t.train_corpora_mix == {"a.jsonl": 0.5, "b.jsonl": 0.5}
+        assert t.val_split == 0.05
+
+    def test_empty_mix_dict_raises(self) -> None:
+        with pytest.raises(ValueError, match="train_corpora_mix"):
+            TrainingConfig(train_corpora_mix={})
+
+    def test_negative_weight_raises(self) -> None:
+        with pytest.raises(ValueError, match="weight"):
+            TrainingConfig(train_corpora_mix={"a.jsonl": -0.1, "b.jsonl": 1.1})
+
+    def test_zero_weight_raises(self) -> None:
+        with pytest.raises(ValueError, match="weight"):
+            TrainingConfig(train_corpora_mix={"a.jsonl": 0.0, "b.jsonl": 1.0})
+
+    def test_non_finite_weight_raises(self) -> None:
+        with pytest.raises(ValueError):
+            TrainingConfig(train_corpora_mix={"a.jsonl": float("inf"), "b.jsonl": 0.5})
+
+    def test_non_numeric_weight_raises(self) -> None:
+        with pytest.raises((TypeError, ValueError)):
+            TrainingConfig(
+                train_corpora_mix={"a.jsonl": "0.5", "b.jsonl": 0.5}  # type: ignore[dict-item]
+            )
+
+    def test_sum_off_target_raises(self) -> None:
+        with pytest.raises(ValueError, match="sum"):
+            TrainingConfig(train_corpora_mix={"a.jsonl": 0.4, "b.jsonl": 0.5})  # 0.9
+
+    def test_sum_within_tolerance_passes(self) -> None:
+        # 0.5 + 0.4999999999 = 0.9999999999 — within 1e-6 of 1.0.
+        TrainingConfig(train_corpora_mix={"a.jsonl": 0.5, "b.jsonl": 0.4999999999})
+
+    def test_val_split_negative_raises(self) -> None:
+        with pytest.raises(ValueError, match="val_split"):
+            TrainingConfig(val_split=-0.1)
+
+    def test_val_split_one_or_more_raises(self) -> None:
+        with pytest.raises(ValueError, match="val_split"):
+            TrainingConfig(val_split=1.0)
+
+    def test_val_split_zero_is_allowed(self) -> None:
+        """val_split=0 means "no train-pool split" (legacy single-corpus path)."""
+        t = TrainingConfig(val_split=0.0)
+        assert t.val_split == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Issue #135 / Phase 4-3: institutional_docs_photon_retrain.yaml shape
+# ---------------------------------------------------------------------------
+
+
+def test_institutional_retrain_yaml_loads_with_expected_hyperparams(
+    tmp_path: Path,
+) -> None:
+    """Pin the retrain yaml's key knobs so silent edits surface in CI.
+
+    The retrain yaml is the source of truth for Issue #135's training
+    hyperparameters; if any of these drift, eval comparisons against
+    earlier runs become invalid. We assert the values that the design
+    policy nailed down (S5-001 lr / DR1-005 val_split / DR1-003 mix
+    sums to 1) rather than every line, so harmless edits to comments
+    or repo paths don't churn this test.
+    """
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    cfg_path = repo_root / "configs" / "institutional_docs_photon_retrain.yaml"
+    assert cfg_path.exists(), f"missing: {cfg_path}"
+
+    from torch_ref.config import load_photon_config
+
+    cfg = load_photon_config(str(cfg_path))
+
+    t = cfg.training
+    # S5-001 / DR2-009: cosine_decay 経路に乗るには min_lr > 0 必須。
+    assert t.learning_rate == 3.0e-5
+    assert t.min_learning_rate == 3.0e-6
+    assert t.warmup_ratio == 0.0
+    # DR1-005 reflected.
+    assert t.val_split == 0.05
+    # Day 4: 段階的検証. max_steps=3000 (累計, 既存 600 + 追加 2400) で
+    # 中間 eval して必要なら resume_from で延長.
+    assert t.max_steps == 3000
+    assert t.eval_every_steps == 500
+    assert t.save_every_steps == 500
+    # S5-004 reflected: micro_batch * grad_accum = effective batch 32.
+    assert t.micro_batch_size == 2
+    assert t.gradient_accumulation_steps == 16
+    # DR1-003: train_corpora_mix must be a non-empty dict summing to 1.0.
+    mix = t.train_corpora_mix
+    assert mix is not None and len(mix) == 2
+    assert abs(sum(mix.values()) - 1.0) < 1e-6
+    # Day 4 mix ratio: JP:0.7 / EN:0.3 for stronger institutional-domain
+    # learning while preserving the EN 600-step base.
+    jp_path = next(p for p in mix if "institutional/train_jp" in p)
+    en_path = next(p for p in mix if "mulmoclaude" in p or "train_multi" in p)
+    assert mix[jp_path] == 0.7
+    assert mix[en_path] == 0.3
+    # Issue #135 Day 3: paths are absolute (per-user direction to point at
+    # this worktree for JP and the develop worktree for the existing
+    # mulmoclaude-trained EN corpus). Both must be under one of the two
+    # expected worktree roots so the DR4-002 approved-root guard in
+    # photon_mlx/data.iterate_mixed_batches can accept them.
+    expected_roots = (
+        "/Users/maenokota/share/work/github_kewton/photon-mlx-feature-issue-135-photon-retrain/",
+        "/Users/maenokota/share/work/github_kewton/photon-mlx-develop/",
+    )
+    for path in mix:
+        assert path.startswith(expected_roots), (
+            f"corpus path must be absolute under an approved worktree root "
+            f"(DR4-002), got {path}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Issue #140 / DR4-002: embedding_random_init_threshold field
 # ---------------------------------------------------------------------------
 

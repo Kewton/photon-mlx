@@ -1,0 +1,242 @@
+[
+  {
+    "session_id": "INST-MT-001",
+    "avg_latency_ms": 13553.289027661473,
+    "followup_avg_latency_ms": 11922.462074796204,
+    "first_turn_latency_ms": 21707.42379198782,
+    "total_citations": 12,
+    "no_citation_turns": 0
+  },
+  {
+    "session_id": "INST-MT-002",
+    "avg_latency_ms": 14124.288395493446,
+    "followup_avg_latency_ms": 14167.941132991109,
+    "first_turn_latency_ms": 13906.024708005134,
+    "total_citations": 16,
+    "no_citation_turns": 0
+  },
+  {
+    "session_id": "INST-MT-003",
+    "avg_latency_ms": 10267.49788200444,
+    "followup_avg_latency_ms": 10715.827408409677,
+    "first_turn_latency_ms": 8025.850249978248,
+    "total_citations": 15,
+    "no_citation_turns": 1
+  },
+  {
+    "session_id": "INST-MT-004",
+    "avg_latency_ms": 11515.653132169973,
+    "followup_avg_latency_ms": 9155.059591808822,
+    "first_turn_latency_ms": 23318.62083397573,
+    "total_citations": 8,
+    "no_citation_turns": 2
+  },
+  {
+    "session_id": "INST-MT-005",
+    "avg_latency_ms": 11136.628013831796,
+    "followup_avg_latency_ms": 9773.982124996837,
+    "first_turn_latency_ms": 17949.85745800659,
+    "total_citations": 10,
+    "no_citation_turns": 0
+  },
+  {
+    "session_id": "INST-MT-006",
+    "avg_latency_ms": 15617.513146008909,
+    "followup_avg_latency_ms": 15658.779841812793,
+    "first_turn_latency_ms": 15411.179666989483,
+    "total_citations": 12,
+    "no_citation_turns": 0
+  },
+  {
+    "session_id": "INST-MT-007",
+    "avg_latency_ms": 15643.763736026207,
+    "followup_avg_latency_ms": 15699.398858228233,
+    "first_turn_latency_ms": 15365.588125016075,
+    "total_citations": 17,
+    "no_citation_turns": 0
+  },
+  {
+    "session_id": "INST-MT-008",
+    "avg_latency_ms": 15894.490326347295,
+    "followup_avg_latency_ms": 15719.936383212917,
+    "first_turn_latency_ms": 16767.26004201919,
+    "total_citations": 21,
+    "no_citation_turns": 0
+  },
+  {
+    "session_id": "INST-MT-009",
+    "avg_latency_ms": 17858.403229338972,
+    "followup_avg_latency_ms": 17008.48290020367,
+    "first_turn_latency_ms": 22108.004875015467,
+    "total_citations": 11,
+    "no_citation_turns": 0
+  },
+  {
+    "session_id": "INST-MT-010",
+    "avg_latency_ms": 13540.619027829962,
+    "followup_avg_latency_ms": 12432.824475003872,
+    "first_turn_latency_ms": 19079.59179196041,
+    "total_citations": 9,
+    "no_citation_turns": 0
+  },
+  {
+    "session_id": "INST-MT-011",
+    "avg_latency_ms": 17441.234312505305,
+    "followup_avg_latency_ms": 16375.162208406255,
+    "first_turn_latency_ms": 22771.594833000563,
+    "total_citations": 13,
+    "no_citation_turns": 0
+  },
+  {
+    "session_id": "INST-MT-012",
+    "avg_latency_ms": 12926.044485997409,
+    "followup_avg_latency_ms": 11255.29760819627,
+    "first_turn_latency_ms": 21279.778875003103,
+    "total_citations": 16,
+    "no_citation_turns": 1
+  },
+  {
+    "session_id": "INST-MT-013",
+    "avg_latency_ms": 12106.918604161669,
+    "followup_avg_latency_ms": 10444.394208397716,
+    "first_turn_latency_ms": 20419.540582981426,
+    "total_citations": 18,
+    "no_citation_turns": 1
+  },
+  {
+    "session_id": "INST-MT-014",
+    "avg_latency_ms": 13877.6973473432,
+    "followup_avg_latency_ms": 11820.976758410688,
+    "first_turn_latency_ms": 24161.300292005762,
+    "total_citations": 11,
+    "no_citation_turns": 1
+  },
+  {
+    "session_id": "INST-MT-015",
+    "avg_latency_ms": 14106.677819324736,
+    "followup_avg_latency_ms": 12682.678999984637,
+    "first_turn_latency_ms": 21226.671916025225,
+    "total_citations": 12,
+    "no_citation_turns": 1
+  },
+  {
+    "session_id": "INST-MT-016",
+    "avg_latency_ms": 9873.936152667738,
+    "followup_avg_latency_ms": 10092.507150000893,
+    "first_turn_latency_ms": 8781.081166001968,
+    "total_citations": 15,
+    "no_citation_turns": 0
+  },
+  {
+    "session_id": "INST-MT-017",
+    "avg_latency_ms": 9641.318701653896,
+    "followup_avg_latency_ms": 9663.75076698605,
+    "first_turn_latency_ms": 9529.15837499313,
+    "total_citations": 8,
+    "no_citation_turns": 0
+  },
+  {
+    "session_id": "INST-MT-018",
+    "avg_latency_ms": 16824.805944333395,
+    "followup_avg_latency_ms": 15598.891866602935,
+    "first_turn_latency_ms": 22954.376332985703,
+    "total_citations": 9,
+    "no_citation_turns": 0
+  },
+  {
+    "session_id": "INST-MT-019",
+    "avg_latency_ms": 13478.270493001522,
+    "followup_avg_latency_ms": 11855.651374801528,
+    "first_turn_latency_ms": 21591.366084001493,
+    "total_citations": 7,
+    "no_citation_turns": 0
+  },
+  {
+    "session_id": "INST-MT-020",
+    "avg_latency_ms": 11934.141500008991,
+    "followup_avg_latency_ms": 9283.276000013575,
+    "first_turn_latency_ms": 25188.46899998607,
+    "total_citations": 14,
+    "no_citation_turns": 1
+  },
+  {
+    "session_id": "INST-MT-021",
+    "avg_latency_ms": 15042.486562490618,
+    "followup_avg_latency_ms": 14385.73227499146,
+    "first_turn_latency_ms": 18326.25799998641,
+    "total_citations": 13,
+    "no_citation_turns": 0
+  },
+  {
+    "session_id": "INST-MT-022",
+    "avg_latency_ms": 12444.661361184748,
+    "followup_avg_latency_ms": 12494.08893341897,
+    "first_turn_latency_ms": 12197.52350001363,
+    "total_citations": 16,
+    "no_citation_turns": 1
+  },
+  {
+    "session_id": "INST-MT-023",
+    "avg_latency_ms": 16670.76079818071,
+    "followup_avg_latency_ms": 16141.630657820497,
+    "first_turn_latency_ms": 19316.41149998177,
+    "total_citations": 11,
+    "no_citation_turns": 1
+  },
+  {
+    "session_id": "INST-MT-024",
+    "avg_latency_ms": 13353.070333677655,
+    "followup_avg_latency_ms": 13782.326442014892,
+    "first_turn_latency_ms": 11206.789791991469,
+    "total_citations": 11,
+    "no_citation_turns": 1
+  },
+  {
+    "session_id": "INST-MT-025",
+    "avg_latency_ms": 10458.134868172541,
+    "followup_avg_latency_ms": 9400.157083407976,
+    "first_turn_latency_ms": 15748.023791995365,
+    "total_citations": 5,
+    "no_citation_turns": 1
+  },
+  {
+    "session_id": "INST-MT-026",
+    "avg_latency_ms": 11237.375305655101,
+    "followup_avg_latency_ms": 9202.46823359048,
+    "first_turn_latency_ms": 21411.910665978212,
+    "total_citations": 15,
+    "no_citation_turns": 0
+  },
+  {
+    "session_id": "INST-MT-027",
+    "avg_latency_ms": 14385.054048335101,
+    "followup_avg_latency_ms": 12800.715108006261,
+    "first_turn_latency_ms": 22306.748749979306,
+    "total_citations": 16,
+    "no_citation_turns": 1
+  },
+  {
+    "session_id": "INST-MT-028",
+    "avg_latency_ms": 12669.645673508057,
+    "followup_avg_latency_ms": 12449.680850014556,
+    "first_turn_latency_ms": 13769.469790975563,
+    "total_citations": 5,
+    "no_citation_turns": 2
+  },
+  {
+    "session_id": "INST-MT-029",
+    "avg_latency_ms": 16306.308347334076,
+    "followup_avg_latency_ms": 14454.660208406858,
+    "first_turn_latency_ms": 25564.549041970167,
+    "total_citations": 18,
+    "no_citation_turns": 0
+  },
+  {
+    "session_id": "INST-MT-030",
+    "avg_latency_ms": 12046.631499824192,
+    "followup_avg_latency_ms": 11711.452074791305,
+    "first_turn_latency_ms": 13722.528624988627,
+    "total_citations": 11,
+    "no_citation_turns": 0
+  }
+]

@@ -183,3 +183,40 @@ def test_photon_yaml_has_required_tokenizer_fields() -> None:
     assert not failures, (
         f"PHOTON profile yaml missing required tokenizer fields: {failures}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Issue #135 Phase 8 — institutional_docs_photon.yaml の checkpoint_path を
+# institutional retrain step_003000 に昇格 (Phase 7 refusal-aware Turn 5-6
+# NC = 0.00% で採用判定)。再学習を経て mulmoclaude step_000600 へ戻すような
+# silent rollback を CI で検出する。
+# ---------------------------------------------------------------------------
+
+
+# Phase 8 採用 checkpoint。値変更は本 Issue #135 の前提を覆すため、必ず
+# 設計方針書 + reports/ + bug check report をセットで更新すること。
+INSTITUTIONAL_PHOTON_ADOPTED_CHECKPOINT = (
+    "photon_institutional_retrain_20260428/step_003000"
+)
+
+
+def test_institutional_docs_photon_checkpoint_path_is_phase8_adopted() -> None:
+    """``configs/institutional_docs_photon.yaml`` の ``model.checkpoint_path``
+    は Phase 8 採用 ckpt (step_003000) に固定される。
+
+    Issue #135 Phase 8: refusal-aware Turn 5-6 NC = 0.00% (Issue #154 Bug 2
+    観点) を達成した institutional retrain 成果物を production photon path
+    として採用。エビデンスは
+    ``reports/institutional_photon_mt_eval_v2_3k.md`` および
+    ``reports/institutional_photon_mt_eval_v2_3k_bug_check.md``。
+
+    Silent な rollback (例: 旧 ``step_000600`` への戻し) を CI で防ぐため、
+    値を厳格 pin する。値変更には本 Issue の前提見直し + 採用判定報告書の
+    更新がセットで必要。
+    """
+    cfg = load_config(CONFIGS_DIR / "institutional_docs_photon.yaml")
+    assert cfg.model.checkpoint_path == INSTITUTIONAL_PHOTON_ADOPTED_CHECKPOINT, (
+        f"institutional_docs_photon.yaml の checkpoint_path が "
+        f"Phase 8 採用 ckpt から逸脱: got {cfg.model.checkpoint_path!r}, "
+        f"expected {INSTITUTIONAL_PHOTON_ADOPTED_CHECKPOINT!r}"
+    )
