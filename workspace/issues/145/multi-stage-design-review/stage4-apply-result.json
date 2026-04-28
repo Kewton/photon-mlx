@@ -1,0 +1,66 @@
+{
+  "stage": 4,
+  "focus": "セキュリティ",
+  "reviewer": "codex",
+  "source_review_result": "workspace/issues/145/multi-stage-design-review/stage4-review-result.json",
+  "target_document": "workspace/design/issue-145-real-weight-test-design-policy.md",
+  "applied": true,
+  "applied_count": 5,
+  "skipped_count": 0,
+  "applied_findings": [
+    {
+      "id": "DR4-001",
+      "severity": "Should Fix",
+      "applied": true,
+      "locations": [
+        "§3 設計判断 #7",
+        "§6 セキュリティ設計",
+        "§10 P5"
+      ],
+      "summary": "weekly_eval の log/xml 名を GITHUB_RUN_ID 付きの run-scoped basename にし、stale artifact 混入を避ける設計へ更新した。"
+    },
+    {
+      "id": "DR4-002",
+      "severity": "Should Fix",
+      "applied": true,
+      "locations": [
+        "§6 セキュリティ設計"
+      ],
+      "summary": "checkpoint_path を tmp root 相対 basename に固定し、../, symlink, repo 外絶対パスを本 integration test で使わない制約を明記した。"
+    },
+    {
+      "id": "DR4-003",
+      "severity": "Should Fix",
+      "applied": true,
+      "locations": [
+        "§3 設計判断 #7",
+        "§6 セキュリティ設計",
+        "§10 P5"
+      ],
+      "summary": "weekly_eval integration step で set -x / printenv / env 等の env dump を禁止し、artifact を pytest stdout/JUnit XML に限定した。"
+    },
+    {
+      "id": "DR4-004",
+      "severity": "Nice to Have",
+      "applied": true,
+      "locations": [
+        "§6 セキュリティ設計"
+      ],
+      "summary": "corrupt checkpoint fixture で pickle, allow_pickle=True, object dtype, Python eval/exec, subprocess を使わない方針を明記した。"
+    },
+    {
+      "id": "DR4-005",
+      "severity": "Nice to Have",
+      "applied": true,
+      "locations": [
+        "§3 設計判断 #6",
+        "§4-4 plugin 依存",
+        "§6 セキュリティ設計"
+      ],
+      "summary": "fake tokenizer patch を function scope monkeypatch に限定し、process-wide env を使うため xdist/forked 前提にしない旨を明記した。"
+    }
+  ],
+  "document_updated": true,
+  "source_code_modified": false,
+  "summary": "Should Fix 3 件、Nice to Have 2 件をすべて設計方針書へ反映した。ソースコードは変更していない。"
+}

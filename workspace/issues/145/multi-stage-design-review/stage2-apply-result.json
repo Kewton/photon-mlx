@@ -1,0 +1,106 @@
+{
+  "stage": 2,
+  "applied": [
+    {
+      "id": "DR2-001",
+      "severity": "Should Fix",
+      "category": "品質基準整合性",
+      "applied_locations": [
+        "§8 品質基準テーブル全テスト行に '+3 件 = positive 1 + negative 2' 内訳明記 [DR2-001 反映]",
+        "§8 末尾に 510/512 が正しい数字である理由を注記",
+        "§10 P6 完了条件に 'CLAUDE.md (507/509 → 510/512) と Issue #145 本文 (508/510 → 510/512) の整合更新責任' を明記"
+      ],
+      "summary": "Issue 本文と CLAUDE.md の test 件数を 510/512 に整合する責任を §10 P6 に明記。§8 に内訳と注記を追加。"
+    },
+    {
+      "id": "DR2-002",
+      "severity": "Should Fix",
+      "category": "コードベース整合性",
+      "applied_locations": [
+        "§3 設計判断 #5 末尾に 'キー名注記 [DR2-002 反映]' を追加"
+      ],
+      "summary": "yaml 表記 (num_heads) と _tiny_cfg ModelConfig 直接構築 (num_attention_heads/num_key_value_heads) のキー名混在を脚注で明示。"
+    },
+    {
+      "id": "DR2-003",
+      "severity": "Should Fix",
+      "category": "fixture整合性",
+      "applied_locations": [
+        "§4-2 末尾に 'autouse fixture 実行順保証 [DR2-003 反映]' セクションを追加 (fixture parameter 依存で順序 pin、または 統合 fixture の代替案を併記)"
+      ],
+      "summary": "_photon_env_isolation と _real_photon_model_guard の実行順を fixture parameter 依存で pin する旨を明示。"
+    },
+    {
+      "id": "DR2-004",
+      "severity": "Should Fix",
+      "category": "コードベース整合性",
+      "applied_locations": [
+        "§5 (c) _make_corrupt_checkpoint docstring に 'DR2-004 反映 — load path の流れ' ブロックを追加"
+      ],
+      "summary": "integrity.json 不在 → _verify_integrity(strict=False) で WARNING + return → mx.load(weights.npz) で fail という流れを docstring に明示。verify_integrity=True plumbing が follow-up (S5-003) である旨も併記。"
+    },
+    {
+      "id": "DR2-005",
+      "severity": "Should Fix",
+      "category": "Issue整合性",
+      "applied_locations": [
+        "§2 影響ファイル表の tests/__init__.py 行を '新設しない (default) / fallback として保留 — 設計判断 #8 参照 [DR2-005 反映]' に書き換え"
+      ],
+      "summary": "tests/__init__.py の '(要検証)' 表記を設計判断 #8 確定後の表現に統一。"
+    },
+    {
+      "id": "DR2-006",
+      "severity": "Nice to Have",
+      "category": "用語統一",
+      "applied_locations": [
+        "§3 設計判断 #3 冒頭に '用語定義 [DR2-006 / DR2-007 反映]' ブロックを追加 (silent load skip / load failure / load success / weight closeness 検証 を定義)",
+        "§3 設計判断 #3 (b) 検出器ロジック内の 'silently-skipped load' / 'load skip' を 'silent load skip' に統一",
+        "§4-1 Step 7 内の 'silently-skipped load' を 'silent load skip' に統一"
+      ],
+      "summary": "用語 'silently-skipped load' / 'load skip' / 'load 失敗' / 'load 成功' を 'silent load skip' / 'load failure' / 'load success' に統一。"
+    },
+    {
+      "id": "DR2-007",
+      "severity": "Nice to Have",
+      "category": "用語統一",
+      "applied_locations": [
+        "§3 設計判断 #3 用語定義に 'weight closeness 検証' を明示",
+        "§3 設計判断 #3 選択肢 (b) を 'weight closeness 検証 (load 後 trained 一致)' に書き換え [DR2-007 反映]",
+        "§3 設計判断 #3 実装注意 3 を 'weight closeness 検証' に書き換え",
+        "§4-1 Step 7 タイトルを 'detector (b) weight closeness 検証' に統一"
+      ],
+      "summary": "'weight identity' / '同一性' を 'weight closeness 検証' に統一 (bit-perfect equality を含意しない表現)。"
+    },
+    {
+      "id": "DR2-008",
+      "severity": "Nice to Have",
+      "category": "設計判断間整合性",
+      "applied_locations": [
+        "§9 リスク表に '_build_photon_deps signature 変更 PR で integration test 改修漏れ [DR2-008 反映]' 行を新規追加 (緩和策として code_review_checklist.md 1 行追記を提案、本 Issue scope 取扱可否の Note を併記)"
+      ],
+      "summary": "weekly_eval.yml が PR-blocking でない弱点を §9 リスク表に明示し、緩和策を記載 (本 Issue scope 内/外の判断は実装フェーズに委ねる Note)。"
+    },
+    {
+      "id": "DR2-009",
+      "severity": "Nice to Have",
+      "category": "コードベース整合性",
+      "applied_locations": [
+        "§4-2-1 末尾に '注記 [DR2-009 反映]' を追加"
+      ],
+      "summary": "_check_weight_initialization (inference.py:114-144) が model.token_embed のみ参照し tokenizer method 対象外である旨を P2 列挙作業の補助情報として明示。"
+    },
+    {
+      "id": "DR2-010",
+      "severity": "Nice to Have",
+      "category": "設計判断間整合性",
+      "applied_locations": [
+        "§3 設計判断 #5 末尾に 'CI runtime 内訳積算 [DR2-010 反映]' を追加 (positive 7-13s / negative 各 3-5s / 3 件合計 13-23s)"
+      ],
+      "summary": "60s budget の内訳積算を §3 #5 に追加し §9 「CI runtime 60s 超過」リスク評価の根拠として参照可能に。"
+    }
+  ],
+  "deferred": [],
+  "total_applied": 10,
+  "total_deferred": 0,
+  "design_doc_updated": true
+}

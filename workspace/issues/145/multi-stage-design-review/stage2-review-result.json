@@ -1,0 +1,111 @@
+{
+  "stage": 2,
+  "focus": "整合性",
+  "reviewer": "claude-opus",
+  "findings": [
+    {
+      "id": "DR2-001",
+      "severity": "Should Fix",
+      "category": "品質基準整合性",
+      "title": "Issue 本文の test 件数 (約 508/510) と設計方針書 §8 (約 510/512) が不整合",
+      "description": "Issue #145 受入条件 (gh issue view 145) は『本 Issue 完了後は約 508/510 に件数更新 [S3-008]』と明示している (= +1 件加算前提)。一方、設計方針書 §8 品質基準は『約 510/512 通過 (本 Issue で +3 件、pre-existing failure 2 件除く)』と記載 (= +3 件加算前提)。設計判断 §4-1 は test 関数を 3 件 (positive 1 + negative 2) 追加する構造であり、+3 件が正しい。Issue 受入条件の数字 (508/510) は設計確定前 (S3-008 起票時) に detector (b) のみ +1 件で計算されており、detector (c) の negative-path 2 件追加 (S3-010 / DR1-002 反映) を反映できていない数字となっている。実装フェーズで Issue 受入条件と CLAUDE.md の数字を 510/512 に更新する必要がある。",
+      "current_text": "設計方針書 §8: '全テスト | python -m pytest ... | 約 510/512 通過 (本 Issue で +3 件、pre-existing failure 2 件除く)'\nIssue 受入条件: '本 Issue 完了後は約 508/510 に件数更新 [S3-008]'",
+      "suggested_change": "(a) 設計方針書 §10 P6 完了条件に『Issue #145 本文の受入条件文言 (約 508/510 → 約 510/512) と CLAUDE.md 品質チェック行 (約 507/509 → 約 510/512) を整合更新する』を追記する。または (b) §8 の数字差を許容する場合『+3 件のうち 1 件 (positive path) は Issue 起票時の +1 件相当、残り 2 件 (negative path) は S3-010 で追加された detector (c) 由来。最終件数 510/512』を §8 に脚注追加する。\n推奨 (a)。Issue 本文の更新責任を実装フェーズで担保する一行 (P6) を追加する。",
+      "rationale": "Issue 受入条件の数字 (508/510) が確定後の設計と矛盾したまま残ると、実装完了判定で『受入条件 unmet』と誤検知される可能性がある。Stage 1 反映で test 構造が +3 件に確定した以上、Issue 本文の数字も追従させる責任が設計方針書側にある。"
+    },
+    {
+      "id": "DR2-002",
+      "severity": "Should Fix",
+      "category": "コードベース整合性",
+      "title": "設計方針書 §3 #5 の 最小 cfg 寸法表記が _tiny_cfg と yaml 表現の混在",
+      "description": "設計方針書 §3 #5 (line 174) は『base_embed_dim=16, hidden_size=64, intermediate_size=128, num_heads=4, head_dim=16, ...』と記述。実体 photon_mlx/tests/test_training.py:33-52 _tiny_cfg は ModelConfig 直接構築で num_attention_heads=4, num_key_value_heads=4 (NOT num_heads) を使う。一方 baseline yaml の photon_pipeline.py:284 は cfg.model.get('num_heads', 4) で yaml 側の num_heads キー (photon_small.yaml line 175 が前例) を読む。本 Issue の configs/photon_test_minimal.yaml は yaml 経由で baseline Config に load されるため yaml 側は num_heads:4 で正しい。ただし設計方針書は 『_tiny_cfg と同型』と明示しており、ModelConfig 直接構築 (num_attention_heads) と yaml 表記 (num_heads) の使い分けがコメントアウトなしで混在しているため、実装者が yaml に num_attention_heads:4 と書くと cfg.model.get('num_heads', 4) は default の 4 を返して動くが意図と異なる/混乱の元になる。",
+      "current_text": "(b) は photon_mlx/tests/test_training.py::_tiny_cfg と同型: base_embed_dim=16, hidden_size=64, intermediate_size=128, num_heads=4, head_dim=16, tokenizer.vocab_size=256, chunk_sizes=[4, 4], encoder/decoder_layers_per_level=[1, 1]",
+      "suggested_change": "§3 #5 の寸法表記の直後に注記を追加: '※ yaml 表記では num_heads:4 (baseline _build_photon_deps が cfg.model.get(\"num_heads\", 4) で読む key 名)。photon_mlx/tests/test_training.py::_tiny_cfg は ModelConfig 直接構築のため num_attention_heads=4 / num_key_value_heads=4 の field 名を使う点に注意。本 Issue の configs/photon_test_minimal.yaml は yaml なので num_heads を採用する。'",
+      "rationale": "DR1-005 で count_parameters() のリポジトリ既存 pattern と一致させる方針を取った文脈と同じく、寸法定義時の API キー名の不一致は実装フェーズで '0.5 時間程度の混乱' を生む。Stage 1 で 10 件の Must/Should Fix を適用した今、寸法レベルの一致は最後の整合確認として残しておく価値がある。"
+    },
+    {
+      "id": "DR2-003",
+      "severity": "Should Fix",
+      "category": "fixture整合性",
+      "title": "_real_photon_model_guard の autouse=True と _photon_env_isolation の autouse=True が併用される際の実行順保証が不明",
+      "description": "§4-2 で fixture を 4 個定義: _photon_env_isolation (autouse=True), fake_tokenizer, _real_photon_model_guard (autouse=True), mlx_available_or_skip。autouse=True が 2 個併用される場合、実行順は (i) conftest 内の定義順 / (ii) アルファベット順 / (iii) パラメータ依存順 に依存する。本 Issue の場合、_real_photon_model_guard は assertion で test を fail させる guard、_photon_env_isolation は env clean。両者の実行順が保証されないと、env 汚染状態で MagicMock 残留検出をかけてしまう (ノイズ) または逆 (env clean 前に MagicMock 残留検知をスキップ) のリスクがゼロではない。",
+      "current_text": "- `_photon_env_isolation` (autouse=True) [DR1-003 反映 — typo `_phsoton_` → `_photon_` 訂正]: `PHOTON_CHECKPOINT_ROOT` / `PHOTON_ALLOW_RANDOM_INIT` の env を test 開始時にクリア\n- `fake_tokenizer`: SimpleNamespace + vocab_size=256\n- `_real_photon_model_guard` (autouse=True): `assert not isinstance(photon_mlx.model.PhotonModel, MagicMock)` で MagicMock patch 残留を検出 [S3-006]\n- `mlx_available_or_skip`: MLX import 失敗時に test を skip",
+      "suggested_change": "§4-2 に fixture 実行順の明示を追加: 'autouse fixture 2 個 (_photon_env_isolation / _real_photon_model_guard) の実行順は本 Issue では本質的に依存しない (env 汚染と MagicMock 残留は独立な検査) が、可読性のため pytest fixture parameter 依存で順序を pin する: _real_photon_model_guard が _photon_env_isolation を fixture parameter として受ける (e.g. def _real_photon_model_guard(_photon_env_isolation): ...) ことで env クリーン後に guard を走らせる順序を保証する。あるいは fixture を 1 つに統合 (_photon_test_setup) して順序を実装で固定する。'",
+      "rationale": "pytest の autouse fixture 順序問題は Issue #140 の S7-001 follow-up で 'review checklist' を強化している context (CLAUDE.md '## Code Review Checklist' 参照) と同じ構造の事故を生む可能性がある (autouse 順依存性)。設計フェーズで実行順を明示しておくことで、実装で MagicMock 検知ノイズが発生した際の root cause analysis 時間を短縮できる。"
+    },
+    {
+      "id": "DR2-004",
+      "severity": "Should Fix",
+      "category": "コードベース整合性",
+      "title": "corrupt ckpt fixture が integrity.json を作らない点が __load__ path の挙動と一致するか確認の追記が必要",
+      "description": "§5 (c) _make_corrupt_checkpoint は valid state.json + corrupt weights.npz を作成、integrity.json は作らない。photon_mlx/checkpoint.py:117-130 _verify_integrity(strict=False) は integrity.json 不在時 'WARNING + return' で続行する。よって load_checkpoint は integrity check を skip し、mx.load(weights.npz) で初めて失敗する (corrupt npz)。これは設計の意図 ('weights.npz 破損で load 失敗') と一致。しかし設計方針書 §5 (c) コメントには 'integrity.json 不在 + corrupt weights.npz の組み合わせで load_checkpoint が _verify_integrity(strict=False) → mx.load 段で fail する' という load path の流れが書かれていない。実装者が後で 'integrity.json も作るべきか?' と再判断する余地が残る。",
+      "current_text": "def _make_corrupt_checkpoint(tmp_path):\n    \"\"\"valid shape の checkpoint dir を作り weights.npz を破損させる。\n    DR1-004 反映: state.json は CheckpointState (photon_mlx/checkpoint.py:30-43) の field のみを含む valid 最小 schema にする。...\"\"\"\n    ckpt_dir = tmp_path / \"corrupt_ckpt\"\n    ckpt_dir.mkdir()\n    state_payload = {...}\n    (ckpt_dir / \"state.json\").write_text(json.dumps(state_payload))\n    (ckpt_dir / \"weights.npz\").write_bytes(b\"\\x00\" * 100)  # 不正バイナリ\n    return ckpt_dir",
+      "suggested_change": "§5 (c) _make_corrupt_checkpoint の docstring に load path の流れを追記:\n  '本 fixture は integrity.json を作らない: photon_mlx/checkpoint.py:117-130 _verify_integrity(strict=False) は integrity.json 不在時 WARNING + return で続行するため、production 経路 _build_photon_deps → _load_photon_checkpoint → photon_mlx.trainer.load_checkpoint → photon_mlx.checkpoint.load_checkpoint(verify_integrity=False) は load フェーズの mx.load(weights.npz) で fail する。これにより (i) integrity check の特定挙動 (DR4-003) を本 Issue scope 外に保ちつつ、(ii) corrupt weights.npz による load failure → except 句 → RuntimeError or PHOTON_ALLOW_RANDOM_INIT bypass の経路を実コード経由で pin できる。'",
+      "rationale": "S5-003 で trainer wrapper の verify_integrity plumbing は follow-up と確定したが、その判断がここに反映されていないと、テスト実装者が 'integrity.json も作って verify_integrity=True を試すべきか?' と迷う。設計方針書は __load__ path 全体の流れを 1 段下のレイヤまで明示することで、scope 境界を再判断する余地をなくす。"
+    },
+    {
+      "id": "DR2-005",
+      "severity": "Should Fix",
+      "category": "Issue整合性",
+      "title": "Issue 本文 影響ファイル一覧と設計方針書 §2 で `tests/__init__.py` の表現粒度が違う",
+      "description": "Issue 本文 影響ファイル: '(要検証) tests/__init__.py を新設するか — 現状 tests/ 直下は __init__.py 不在のフラット構成。... 安全策: tests/__init__.py を新設しない方針を採る場合、pyproject.toml [tool.pytest.ini_options] で testpaths = [...] を明記して discovery 範囲を pin する [S3-002]'。設計方針書 §2 表: 'tests/__init__.py | (要検証) — pytest discovery 安全策として追加可否を判定 | 低'。設計判断 §3 #8: '(b) を default、(a) は fallback' で実質 'tests/__init__.py 新設しない' に確定済。両者は方向性は一致しているが、Issue 本文は '安全策' として testpaths pin を述べているのに対し、設計方針書 §3 #8 は 'P1 完了条件で空テスト先行確認 → 壊れる場合のみ (a)' という条件付き判断ロジックを追加で含む。Issue と設計の内容差は本質的に齟齬ではないが、Issue 本文の (要検証) 部分が設計確定後も '要検証' のまま残るのは Issue close 判定で曖昧さを生む。",
+      "current_text": "Issue 本文: '- (要検証) tests/__init__.py を新設するか'\n設計方針書 §2: 'tests/__init__.py | (要検証) — pytest discovery 安全策として追加可否を判定 | 低'\n設計方針書 §3 設計判断 #8: '決定: (b) を default、(a) は fallback'",
+      "suggested_change": "§2 の表記を 設計判断 #8 に整合させる: 'tests/__init__.py | 新設しない (default) / fallback として保留 | 低 — 設計判断 #8 参照'。これで '要検証' の語が設計判断と整合する形で残る。Issue 本文側は実装フェーズで close 判定時に '設計判断 #8 採用 = 新設しない / fallback 不要' を明示すれば追記不要。",
+      "rationale": "Issue 本文と設計方針書 §2 の文言が同じく '(要検証)' のままだと、設計確定後も Issue を見た実装者が '要検証 = 設計フェーズに渡す → 設計済 → 何が確定したか?' と探索する。Stage 1 反映で他項目 (DR1-001/002 等) は確定済として書き換えられている以上、tests/__init__.py 部分も確定後の表現に揃える方が一貫性がある。"
+    },
+    {
+      "id": "DR2-006",
+      "severity": "Nice to Have",
+      "category": "用語統一",
+      "title": "'load skip' / 'load 失敗' / 'silently-skipped load' が混用されている",
+      "description": "設計方針書内で次の 3 用語が同じ事象 (load 経路が事故で random-init のまま戻る) を指して混用されている: (i) §3 #3 検出器ロジック '当初案 ... silently-skipped load を検出できない' / 'load 成功 / load skip 時' / (ii) §5 (b) コメント 'load 後 model の weight が ... silently-skipped load 時は random-init#2 と trained で乖離 → fail' / (iii) Issue 受入条件 '\"_load_photon_checkpoint を patch しない\" ことで前者と差別化される (検出力の境界を明示)' (こちらは 'patch しない' 表現)。同じ事象を異なる用語で指すのは可読性に影響しないが、レビューや実装で 'load skip と load failure は同じ事象?' と確認する手間が発生する。",
+      "current_text": "§3 #3: 'silently-skipped load を検出できない' / 'load skip 時' / §5 (b): 'silently-skipped load 時は random-init#2 と trained で乖離'",
+      "suggested_change": "用語を 'silent load skip' (英) または '黙示的 load skip' (日) に統一する旨を §3 #3 冒頭または用語表 (新設) に明示する。具体:\n  - 'silently-skipped load' = 'silent load skip' (load 経路が exception や bypass を通らず、wire-up 不整合で load_checkpoint が呼ばれずに完了する事象)\n  - 'load 失敗' = 'load failure' (load_checkpoint が exception を投げる事象、PHOTON_ALLOW_RANDOM_INIT bypass の対象)\n  - 'load 成功' = 'load success' (load_checkpoint が exception なく完了し weight が反映される事象)",
+      "rationale": "本 Issue の主目的『S7-001 型 silent bug 検出』の 'silent' とは何か、を厳密に定義しておくと、follow-up Issue (#145 候補方針 A) で同じ用語を再使用するときに迷わない。Nice to Have レベルだが、用語統一は将来の review 工数を減らす。"
+    },
+    {
+      "id": "DR2-007",
+      "severity": "Nice to Have",
+      "category": "用語統一",
+      "title": "'weight identity' / 'weight 同一性' / '近接性' の使い分けが文書内で混在",
+      "description": "DR1-002 反映後の設計方針書で 3 表現が混用: (i) §3 #3 '(b) weight identity 検証 (positive path) を pin' / (ii) §3 #3 実装注意 '3. weight 同一性検証は trained_model の参照値と load 後 model の値の 近接性 で行う' / (iii) §4-1 Step 7 'load 後 model の weight が trained 参照値と 近接 (...) であることを assert'。意図は同じ (load 後 == trained と (誤差付き) 等価) だが、'identity' (同一性) という英語が strict equality を連想させる一方で実装は close-比較なため、英語と日本語と実装の閾値レベルが微妙にズレている。",
+      "current_text": "(i) '(b) weight identity 検証 (positive path)' / (ii) 'weight 同一性検証は ... 近接性 で行う' / (iii) '近接 (...) であることを assert'",
+      "suggested_change": "(b) 検出器の表現を 'weight closeness 検証' (近接性検証) に統一し、実装閾値 (`abs(norm_after - norm_trained) < 1e-5`) と一致させる。識別子 'weight identity' は厳密に保留し検証用途では使わない。§3 #3 タイトル '(b) weight identity 検証' → '(b) weight closeness 検証 (load 後 trained 一致)' のように書き換え。",
+      "rationale": "DR1-010 で 'bit-perfect (==) は MLX nondeterminism の余地を残すため避ける' と明記したのと整合。'identity' は意味論的に bit-perfect を含意する英語であり、close-比較ベースの実装と認識のズレを生む。"
+    },
+    {
+      "id": "DR2-008",
+      "severity": "Nice to Have",
+      "category": "設計判断間整合性",
+      "title": "設計判断 #2 (private API 直接) と #7 (CI 戦略 weekly_eval.yml) の連鎖整合は OK だが、CI failure 時の private API 変更同期手順が未明示",
+      "description": "設計判断 #2 line 82: 'private API 依存を受容する根拠: (a) _build_photon_deps の signature 変更を本 Issue 単独でなく既存 boundary test 群 ... も巻き込んで強制改修する力学が働き、boundary test と本 integration test の両方が同じ private API に依存する 「2 重構造的圧力」 として signature 安定化を担保する'。設計判断 #7 (CI weekly_eval.yml) で integration test を週次実行するが、もし将来 _build_photon_deps の signature が変更され integration test が fail した場合、月曜朝の weekly_eval.yml で初めて検知され、該当 PR は既に main にマージ済の可能性がある (PR-blocking ではないため)。'2 重構造的圧力' の前提 (両 test が同じ私 API に依存) は signature 変更時に 同時 PR として両方を改修すれば成立するが、その fail-fast 経路が weekly_eval.yml では弱い (月曜まで blocking しない)。",
+      "current_text": "設計判断 #2 line 82: '(a) ... boundary test と本 integration test の両方が同じ private API に依存する 「2 重構造的圧力」 として signature 安定化を担保する'\n設計判断 #7: '(b) — weekly_eval.yml に追加。continue-on-error: true 禁止で fail-fast (S7-001)' (PR を block しない / scheduled で fail)",
+      "suggested_change": "§9 リスク表に新規行を追加: '_build_photon_deps signature 変更 PR で integration test 改修漏れ | 中 (将来) | 中 | weekly_eval.yml は PR-blocking でないため検知が翌週月曜まで遅延。緩和策: (i) follow-up Issue で PR-level workflow を新設 (本 Issue scope 外)、(ii) docs/code_review_checklist.md に \"_build_photon_deps signature 変更時は tests/integration/test_photon_real_weights.py の追従を確認\" を追記 (本 Issue 影響ファイルに既に含まれているため scope 内で対応可能)'。",
+      "rationale": "Stage 1 の DR1-007 で 'private API 依存を受容する根拠' を強化したが、その根拠の前提 (両 test が同 PR で改修される力学) は code review checklist で明示しないと働かない。本 Issue の影響ファイルに既に docs/code_review_checklist.md があるので、scope 内で 1 行追記で対応可能。"
+    },
+    {
+      "id": "DR2-009",
+      "severity": "Nice to Have",
+      "category": "コードベース整合性",
+      "title": "fake_tokenizer の必要 method 列挙作業 (P2) が _check_weight_initialization 経路を考慮していない",
+      "description": "設計判断 #6 / §4-2-1 / P2 完了条件で fake_tokenizer の必要 method を 'deps['photon_inference'].generate_answer 経路で参照される method を実コードから列挙' する作業を §10 P2 に追加。しかし PhotonInference.__init__ (line 222) で _check_weight_initialization(model, cfg.model.embedding_random_init_threshold) を call するため、smoke 実行前に init で WARNING/silent skip 経路が走る。fake_tokenizer は _check_weight_initialization 経路では参照されない (model.token_embed のみ参照) ので問題ないが、tokenizer の必要 method 列挙時に '_check_weight_initialization で参照される? → されない' を確認しておかないと P2 で混乱する可能性。Nice to Have 程度。",
+      "current_text": "P2 完了条件: '... fake_tokenizer の必要 method 列挙 (deps['photon_inference'].generate_answer 経路を実コードから読む)'",
+      "suggested_change": "P2 完了条件に注記を追加: '※ PhotonInference.__init__ 内の _check_weight_initialization (inference.py:114-144) は model.token_embed のみ参照するため tokenizer method の対象外。列挙対象は deps['photon_inference'].generate_answer (max_new_tokens=1) の call graph のみで十分。'",
+      "rationale": "yak-shaving 防止 (DR1-008 と同じ目的)。__init__ 経路の WARNING source を明示しておけば fake_tokenizer の最小実装範囲が確定的に決まる。"
+    },
+    {
+      "id": "DR2-010",
+      "severity": "Nice to Have",
+      "category": "設計判断間整合性",
+      "title": "設計判断 #5 と P2 P3 の 1-step 学習所要時間の積算が §9 リスク表の '60s 超過 確率: 低' と整合か検証",
+      "description": "§3 #5: '1 step (forward+backward+optimizer.step) で 1-3 秒、save_checkpoint で +1-2 秒'。Issue 本文: 'CI runtime budget ... 60 秒以内に完走することを受入条件で定める (実測 5-15 秒予測に対して 4x 安全マージン)'。§4-1 の test_photon_pipeline_with_self_trained_minimal_ckpt の実行内容を積算: PhotonModel(cfg) 構築 (1-2s) + _flat_l2_norm × 2 回 (各 0.5s) + 1-step 学習 (1-3s) + save_checkpoint (1-2s) + _build_photon_deps (PhotonModel 再構築 1-2s + tokenizer fixture 0s + load_checkpoint 1-2s + PhotonInference 構築 0.5s) + smoke generate_answer (max_new_tokens=1, 0.5-1s) + _flat_l2_norm × 2 回 = 計 7-13s。test 1 件で 7-13s。残り 2 件 (negative path) は学習 step なしで各 3-5s。3 件合計 13-23s。§9 'CI runtime 60s 超過 確率: 低' と整合。ただし設計内に 1 件あたりの内訳積算がないため、実装で速くなり過ぎ/遅くなり過ぎを検証しにくい。",
+      "current_text": "§9 リスク: 'CI runtime 60s 超過 | 低 | 低 | M3 Ultra 上で 5-15 秒、4x マージン'",
+      "suggested_change": "§9 注釈または §3 #5 末尾に内訳の見積もりを追加: '※ 3 件合計 (positive 1 + negative 2) で 13-23s。positive: 構築 1-2s + L2 norm 2×0.5s + 1-step 1-3s + save 1-2s + load 1-2s + smoke 0.5-1s + L2 norm 2×0.5s ≈ 7-13s / negative 各 3-5s。'",
+      "rationale": "実装フェーズで実測値が見積もりから乖離した時に root cause analysis を始められる。Nice to Have。"
+    }
+  ],
+  "must_fix_count": 0,
+  "should_fix_count": 5,
+  "nice_to_have_count": 5,
+  "summary": "Issue #145 設計方針書 (Stage 1 反映済 / DR1-001..010 適用後) の Stage 2 整合性レビュー。Must Fix は 0 件、Should Fix 5 件 / Nice to Have 5 件。\n\n主要発見 (Should Fix):\n  - DR2-001: Issue 受入条件の test 件数 508/510 と設計方針書 §8 の 510/512 が不整合。設計判断 §4-1 の +3 件構造に対し Issue の数字 (+1 件想定) が更新追従していない。実装フェーズで Issue 本文と CLAUDE.md の数字を 510/512 に更新する責任を §10 P6 に明記すべき。\n  - DR2-002: 最小 cfg 寸法表記で _tiny_cfg (ModelConfig 直接構築 / num_attention_heads) と本 Issue の yaml 表記 (cfg.model.get('num_heads', 4)) のキー名混在。実装者の誤解防止のため脚注追加を推奨。\n  - DR2-003: autouse fixture 2 個 (_photon_env_isolation / _real_photon_model_guard) の実行順保証。fixture parameter 依存または統合で順序を pin すべき。\n  - DR2-004: corrupt ckpt fixture が integrity.json を作らない理由 (verify_integrity=False で _verify_integrity が WARNING + return) を §5 (c) docstring に明示し、実装者が再判断する余地をなくす。\n  - DR2-005: Issue 本文と設計方針書 §2 で 'tests/__init__.py (要検証)' のままの表現が、設計判断 #8 で確定後も残っている。§2 を 'default 新設しない / fallback 保留' に書き換え。\n\nNice to Have:\n  - DR2-006: 'load skip' / 'load 失敗' / 'silently-skipped load' の用語統一\n  - DR2-007: 'weight identity' / '同一性' / '近接性' の用語統一 ('weight closeness 検証' に統一推奨)\n  - DR2-008: private API 依存の '2 重構造的圧力' を docs/code_review_checklist.md 1 行追記で補強\n  - DR2-009: fake_tokenizer 必要 method 列挙時に _check_weight_initialization 経路の対象外を明示\n  - DR2-010: 60s budget の内訳積算を §9 または §3 #5 に追加\n\nコードベース整合性 (検証済 OK):\n  - _build_photon_deps 戻り値 4 key {photon_inference, safe_recgen, photon_cfg, tokenizer} ✅ (photon_pipeline.py:520-525)\n  - PhotonInference.__init__ line 189: self.model = model ✅\n  - _resolve_checkpoint_path Path.resolve(strict=True) + root containment ✅ (photon_pipeline.py:589-622)\n  - CheckpointState schema ✅ (checkpoint.py:30-43): step, best_val_loss, best_step, patience_counter, train_losses, val_losses\n  - _check_weight_initialization WARNING message に 'random-init' substring 含有 ✅ (inference.py:135-141)\n  - _patch_heavy_deps autouse fixture 隔離 ✅ (file-level fixture かつ tests/integration/ 配下に conftest.py 局所性で適用されない)\n  - PHOTON_CHECKPOINT_ROOT monkeypatch.setenv による ./checkpoints/ 非汚染 ✅\n  - _make_corrupt_checkpoint state.json schema (CheckpointState 6 field) ✅\n\nfixture 整合性: 既存 _patch_heavy_deps (file-level autouse) と新規 _real_photon_model_guard の隔離保証は monkeypatch teardown + conftest.py ディレクトリ局所性で論理的に成立 (DR1-003 反映通り)。\n\n設計判断 #1〜#8 連鎖整合: #2 (private API 直接) → #4 (markers 追加) → #7 (weekly_eval step 追加) の連鎖は論理的に矛盾なし。DR2-008 で CI strategy の弱点 (PR-blocking ではない) に対する compensation 1 行を追加するとより強固。\n\nDR1-002 反映後の検出器ロジック (trained 参照値 vs load 後 近接性) は §10 P3 ステップ説明と整合 (Step 3 で norm_trained 保持 → Step 7 で abs(norm_after - norm_trained) < 1e-5 比較)。\n\n総合: Stage 1 反映で論理整合は確保済。Stage 2 で発見した 5 Should Fix は微修正レベル (件数更新方針、用語整合、autouse 順序、fixture docstring 補強、§2 表記の確定後表現) であり、設計方針書の骨格に大きな変更は不要。"
+}
