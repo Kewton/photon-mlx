@@ -1,0 +1,18 @@
+{
+  "stage": 6,
+  "stage_name": "指摘事項反映 (Stage 5 通常レビュー2回目)",
+  "applier": "codex",
+  "summary": "Stage 5 の Must Fix S5-001 を Issue 本文へ反映した。Task 2 の具体実行手順に `mkdir -p configs/_experiments` を追加し、`scripts/ingest_repo.py` の現行 CLI に合わせて `--repo` と sentinel `--commit` を明示した。更新前本文は `stage6-prev-body.md`、更新後本文は `stage6-updated-body.md` に保存済み。",
+  "applied_findings": [
+    {
+      "id": "S5-001",
+      "applied": true,
+      "method": "Issue本文 Task 2 `具体実行手順` の variant config 作成手順に `mkdir -p configs/_experiments` を追加し、ingest コマンドへ `--repo /Users/maenokota/share/work/github_kewton/myWebData/markdowndb/institutional_documents` と `--commit 9e500539f29555364217b773368305e7f59aa026` を追加した。併せて variant config の `repo.repo_path` / `repo.repo_commit` が ingest 引数と同値で残っていることを確認する注記を加えた。"
+    }
+  ],
+  "deferred_findings": [],
+  "applied_count": 1,
+  "deferred_count": 0,
+  "github_issue_updated": true,
+  "github_issue_url": "https://github.com/Kewton/photon-mlx/issues/144"
+}

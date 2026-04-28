@@ -1,0 +1,112 @@
+{
+  "stage": 3,
+  "focus": "影響範囲（1回目）",
+  "reviewer": "claude-opus",
+  "iteration": 1,
+  "findings": [
+    {
+      "id": "S3-001",
+      "severity": "Must Fix",
+      "category": "API互換性",
+      "title": "Issue 本文の依拠 API 名 `_load_checkpoint_into_model` が実コードに存在せず、実体は `_load_photon_checkpoint`",
+      "description": "Stage 1 適用後の Issue 本文「背景」セクションには `baseline_reporag/photon_pipeline.py` line 626-633 で `_load_photon_checkpoint` が wire 済みと記載されているが、Stage 3 影響範囲レビューの Issue 指示文書 (本タスク命令文) には `_load_checkpoint_into_model` (line 625-) という別名で言及されている。grep の結果、実コード上に `_load_checkpoint_into_model` は **存在せず**、実体は `_load_photon_checkpoint` (photon_pipeline.py:625) であり、`photon_mlx.trainer.load_checkpoint` (trainer.py:80) を lazy import で呼ぶ薄ラッパー。Issue 本文側は正しく `_load_photon_checkpoint` と書かれているため Issue 修正は不要だが、設計フェーズ／実装フェーズで `_load_checkpoint_into_model` を patch しようとして fail する手戻りを避けるため、受入条件「mock を使わない範囲」サブリストの語彙を実体名に固定すべき (現状の Issue 本文では `photon_mlx.trainer.load_checkpoint` のみ言及で曖昧)。",
+      "current_text": "- [ ] `photon_mlx.trainer.load_checkpoint` が実 npz weight ファイルから state を復元すること (`load_checkpoint` を patch しない)",
+      "suggested_change": "- [ ] `photon_mlx.trainer.load_checkpoint` (実体は `photon_mlx.checkpoint.load_checkpoint`、`trainer.py:80` で lazy re-export) が実 npz weight ファイルから state を復元すること (`load_checkpoint` を patch しない / `baseline_reporag.photon_pipeline._load_photon_checkpoint` も patch しない — この 2 箇所が production の load 経路)\n- [ ] 既存テスト `baseline_reporag/tests/test_photon_pipeline_checkpoint_load.py` は `_load_photon_checkpoint` を patch しているため、本 integration test は \"`_load_photon_checkpoint` を patch しない\" ことで前者と差別化される (検出力の境界を明示)",
+      "rationale": "DR4-003 integrity 機構 (`photon_mlx/checkpoint.py:109 _verify_integrity`) は `load_checkpoint` 内で必ず呼ばれる構造的検証であり、本 Issue ゴール (random-init 検出) と直接関連する。Issue 本文で実体名と patch 不可境界を明示することで、設計フェーズで「どこまで mock 可か」の判断が一意になり、Stage 1 S1-007 の趣旨が完成する。"
+    },
+    {
+      "id": "S3-002",
+      "severity": "Must Fix",
+      "category": "影響ファイル",
+      "title": "`tests/__init__.py` 不在により `tests/integration/` 配下が pytest discovery されない可能性",
+      "description": "`find tests -type d` の結果、`tests/` 直下に Python パッケージ構造 (`__init__.py`) が **存在せず**、フラットなテストファイル群として運用されている (`tests/test_*.py`)。pytest は rootdir 推定と test file collection を `__init__.py` 不在でも実行できるが、`tests/integration/__init__.py` を新設する場合に `tests/__init__.py` 不在のままだと:\n  (1) sys.path / namespace package 解決が intermitent に失敗する (特に `pytest tests/integration/test_photon_real_weights.py` を直接呼ぶ CI step で)\n  (2) 既存 tests/ 配下のフラットテストが `pytest tests/` で走らなくなるリスク\n  (3) `from tests.integration import ...` 形式の import が機能しない\n影響ファイル「scope 内」リストには `tests/integration/__init__.py` のみ追加されているが、`tests/__init__.py` の追加要否を Stage 1-2 では判定していない。",
+      "current_text": "## 影響ファイル (scope 内)\n\n- `tests/integration/__init__.py` (新規, 既存 tests/ 配下に integration/ サブディレクトリは未存在)\n- `tests/integration/test_photon_real_weights.py` (新規)",
+      "suggested_change": "「影響ファイル (scope 内)」に `tests/__init__.py` の追加要否判定を明示するか、unaffected であることを設計フェーズで確認する旨を追記:\n\n- `tests/integration/__init__.py` (新規)\n- `tests/integration/test_photon_real_weights.py` (新規)\n- (要検証) `tests/__init__.py` を新設するか — 現状 `tests/` 直下は __init__.py 不在のフラット構成。pytest rootdir 推定が integration/ 配下でも壊れないか、設計フェーズで `pytest tests/integration/test_photon_real_weights.py -v` を空テストで先行実行して確認する。\n  - 安全策: `tests/__init__.py` を新設しない方針を採る場合、`pyproject.toml [tool.pytest.ini_options]` で `testpaths = [\"tests\", \"baseline_reporag/tests\", \"photon_mlx/tests\", \"torch_ref/tests\"]` を明記して discovery 範囲を pin する。",
+      "rationale": "test discovery 設計の不整合は \"local では通るが CI で SKIP される\" 型の最も検出困難な回帰の温床となる。Issue #135 S7-001 (random-init bug) と同類の \"silently 動いて見える\" 構造的事故を防ぐ目的の本 Issue で、test 自身の discovery が不安定だと本末転倒。pytest rootdir / testpaths 設定は影響ファイル側に明示すべき。"
+    },
+    {
+      "id": "S3-003",
+      "severity": "Should Fix",
+      "category": "設定",
+      "title": "`pyproject.toml` 新規追加が ruff / 既存 lint 設定に与える影響が未評価",
+      "description": "Stage 1-2 で「`pyproject.toml` を新規 or 更新, pytest markers `integration` / `slow` を登録」とされているが、リポジトリ rootに `pyproject.toml` / `pytest.ini` / `setup.cfg` が **いずれも存在しない** (find 確認済)。新規 `pyproject.toml` を追加すると、ruff の自動検出 (`ruff check .` は `pyproject.toml [tool.ruff]` セクションを優先する) によって既存の警告 0 件状態が **暗黙にルール変更される** リスクがある。具体的には:\n  - 現状 ruff は デフォルト rules (E, F, I) で警告 0 件と CLAUDE.md に記載\n  - `pyproject.toml` に `[tool.ruff]` セクション無しで pytest markers のみ追加すれば ruff は影響を受けない\n  - しかし ruff config を移行するか否かを Issue 段階で確定しないと、後続 PR で意図しない lint 強化が混入する\n他に `[build-system]` / `[project]` セクションを Issue で扱うか (現状 requirements.txt 運用なので pyproject.toml は build メタデータが空でも問題ないが、後続 Issue で setuptools migration が来た時の干渉も検討要)。",
+      "current_text": "- `pyproject.toml` (新規 or 更新, pytest markers `integration` / `slow` を登録)",
+      "suggested_change": "`pyproject.toml` 新規追加の scope を最小化する旨を明記:\n\n- `pyproject.toml` (新規, 本 Issue scope は `[tool.pytest.ini_options] markers = [\"integration\", \"slow\"]` のみ追加。`[tool.ruff]` / `[build-system]` / `[project]` セクションは追加しない (既存の `ruff check .` 警告 0 件挙動を保持するため、ruff config は cwd ベースのデフォルト動作に委ねる))\n- `[tool.pytest.ini_options]` に併せて `testpaths` を明記し既存 4 ディレクトリ (`tests`, `baseline_reporag/tests`, `photon_mlx/tests`, `torch_ref/tests`) を pin する (S3-002 と整合)",
+      "rationale": "新規 config ファイルの導入は周辺ツール (ruff, mypy, build) の自動検出パスを変える可能性がある。Issue 段階で scope 最小化を宣言しておくと、設計レビュー / 実装フェーズで scope creep を抑止できる。"
+    },
+    {
+      "id": "S3-004",
+      "severity": "Should Fix",
+      "category": "CI/CD",
+      "title": "weekly_eval.yml への step 追加方針が `pip install -r requirements.txt` 想定だが MLX 学習依存のフルインストール時間が未評価",
+      "description": "現行 `.github/workflows/weekly_eval.yml` は `pip install -r requirements.txt` でフル依存を入れた後に `python -m scripts.run_baseline_eval` / `python -m scripts.run_multi_turn_eval` を順次実行。本 Issue で integration test step を追加する場合、(1) 既存 evaluate step の前 or 後ろどちらに挿入するか、(2) 失敗時に既存 step を block するか (`continue-on-error`)、(3) artifact upload に integration test ログを含めるかの設計判断が未確定。timeout 180min は eval が中心であり integration test 追加で 5-15 秒なら余裕だが、self-hosted runner の負荷状況によっては既存 eval step が 178 分で running 中の場合 integration step が timeout 切られるリスク。実装フェーズで `if: always()` / `continue-on-error: true` 等の挙動を Issue 段階で方針宣言しておくべき。",
+      "current_text": "- 推奨: weekly_eval.yml に `Run real-weight integration test` step を追加 (blocking ではない nightly 相当) + 毎 PR では `pytest -m \"not integration\"` で除外する形を採用",
+      "suggested_change": "CI 戦略の運用詳細を追記:\n\n- weekly_eval.yml への step 追加方針 (blocking ではない nightly 相当) の運用詳細:\n  - 挿入位置: `Run multi-turn eval` step の **後** (eval 完走後に integration test を走らせ、eval 結果に影響を与えない)\n  - 失敗時挙動: `continue-on-error: true` で job 全体を fail させない (nightly notification はログ確認で対応)\n  - artifact: 既存 `eval-results-${{ github.run_number }}` artifact に `logs/integration_test_*.log` を追加 (if: always() で常時収集)\n  - 実行時間予算: integration test は 60 秒以内に完走することを受入条件で定める (実測 5-15 秒予測に対して 4x の安全マージン)",
+      "rationale": "CI step の運用詳細を Issue 段階で明示しないと、実装フェーズで PR review 中に \"既存 eval を block するな\" / \"timeout を伸ばせ\" の往復が発生する。Stage 1 S1-004 の継続として、運用層まで Issue で確定させるのが Stage 3 影響範囲レビューの定型対応。"
+    },
+    {
+      "id": "S3-005",
+      "severity": "Should Fix",
+      "category": "リスク",
+      "title": "MLX nondeterminism と seed 固定の保証範囲が `mx.array_equal` assert に対して不十分",
+      "description": "Stage 1-2 適用後の候補方針 B コメントには「seed=42 固定で deterministic 挙動を保証」「学習前後で `mx.array_equal` の否定で確認可能」と記載されている。しかし MLX の deterministic 挙動は `configs/photon_tiny.yaml:9-11` の `seed: 42 / deterministic: true` 仕様に依拠しており、`PhotonModel(cfg)` の random-init 自体は MLX RNG (`mx.random.seed`) に依存する。具体的なリスク:\n  - (a) `mx.random.seed(42)` を call せずに PhotonModel を 2 回構築すると weights が異なる → `mx.array_equal` の否定は trivially 成立し random-init detector として機能しない (false positive)\n  - (b) `mx.array_equal` 自体は MLX 上で eager eval が必要 (`mx.eval` 呼び出し漏れで lazy graph のまま比較する場合あり)\n  - (c) DR4-003 `_verify_integrity` は SHA-256 ベースで bit-perfect だが、`mx.array_equal` は浮動小数比較で精度依存\n受入条件 (3) (a)-(d) の選択肢のうち default 推奨が (b) weight identity 検証となっているが、上記リスクへの対処方針が Issue 本文に記載されていない。",
+      "current_text": "(b) **weight identity 検証** (default 推奨) — random-init `PhotonModel(cfg)` のパラメータと、checkpoint load 後のパラメータの L2 norm / sample tensor が異なることを assert (random seed 固定で実装可能、`mx.array_equal` の否定で確認)",
+      "suggested_change": "(b) の実装注意点を追記:\n\n(b) **weight identity 検証** (default 推奨) — random-init `PhotonModel(cfg)` のパラメータと、checkpoint load 後のパラメータの L2 norm / sample tensor が異なることを assert\n  - 実装注意:\n    1. `mx.random.seed(42)` を test 冒頭で明示 call (PhotonConfig の seed 設定に頼らず、test 自身で seed を固定)\n    2. 比較は `mx.eval(param)` 後に `np.asarray(param)` 経由で numpy ベースで行う (`mx.array_equal` の lazy eval 罠回避)\n    3. L2 norm 比較は閾値 (e.g., `abs(norm_before - norm_after) > 1e-4`) で実装し bit-perfect 比較は避ける\n  - フォールバック: (b) で flaky が発生する場合は (a) checkpoint integrity hash 検証 (DR4-003 の SHA-256 ベース、bit-perfect 保証) に切替可能",
+      "rationale": "MLX の lazy eval / RNG 仕様を Issue 段階で明示しないと、実装フェーズで `mx.array_equal` 戻り値が常に True になる / flaky になる等の検出困難な失敗モードに hit する。Stage 1 S1-008 の \"`mx.array_equal` の否定で確認可能\" 記述を実装注意点まで掘り下げるのが Stage 3 影響範囲レビューの責務。"
+    },
+    {
+      "id": "S3-006",
+      "severity": "Should Fix",
+      "category": "既存テスト影響",
+      "title": "`baseline_reporag/tests/test_photon_pipeline_checkpoint_load.py` (autouse fixture) との shared state 干渉リスク",
+      "description": "既存 `baseline_reporag/tests/test_photon_pipeline_checkpoint_load.py` には autouse fixture `_patch_heavy_deps` が存在し、`photon_mlx.model.PhotonModel` / `photon_mlx.inference.PhotonInference` / `photon_mlx.safe_recgen.SafeRecGenController` を MagicMock で置換 (line 75-123)。この autouse は **同 test ファイル内のみ scope** だが、(1) module-level patch (`monkeypatch.setattr(\"photon_mlx.model.PhotonModel\", ...)`) は monkeypatch のスコープアウト時に reset されるため隣接 test ファイルには影響しないものの、(2) pytest collection 順 / xdist 並列実行時に `tests/integration/test_photon_real_weights.py` が同 worker 上で前後して走る場合の MLX state 共有 (e.g., `mx.metal.is_available()` の cached state) や、(3) sys.modules cache に残った lazy import の汚染 (`photon_mlx.model` が MagicMock のまま再利用される) リスクがある。本 Issue 実装時に integration test が `_load_photon_checkpoint` の **実体** を呼ぶ前に sys.modules を reset する fixture が必要か、設計フェーズで判定すべき。",
+      "current_text": "- [ ] 既存テスト + 新規テスト全パス",
+      "suggested_change": "「テスト構造の最低保証」に sys.modules / pytest collection 干渉対策を追記:\n\n- [ ] 既存テスト + 新規テスト全パス (`python -m pytest torch_ref/tests/ photon_mlx/tests/ baseline_reporag/tests/ tests/ -v` 全件パス、約 507/509、残り 2 件は CLAUDE.md 記載の pre-existing failure)\n- [ ] integration test 内で `photon_mlx.model.PhotonModel` の **実体** が import されることを検証する fixture を用意する (e.g., `import photon_mlx.model; assert not isinstance(photon_mlx.model.PhotonModel, MagicMock)`)。これにより既存 `test_photon_pipeline_checkpoint_load.py` の MagicMock patch 残留を test 開始時に検出可能。\n- [ ] integration test は他 test と独立して走らせるため `tests/integration/` 配下に分離 (既に scope 内で確定済)。pytest-xdist 並列実行時は `--forked` か `-n 0` (integration test のみシリアル化) を README / CI コマンドに明記。",
+      "rationale": "既存 autouse fixture と新規 integration test の干渉は CI 上で intermittent に発現するため、ローカル実行で気付きにくい。Issue #135 S7-001 が \"production path で MagicMock が silently 通る\" 型の事故であり、本 Issue が再発防止を目的とする以上、test fixture 汚染による \"integration test が実は MagicMock を測っていた\" という回帰を Issue 段階で防御線として明示すべき。"
+    },
+    {
+      "id": "S3-007",
+      "severity": "Should Fix",
+      "category": "設定",
+      "title": "`PHOTON_CHECKPOINT_ROOT` 環境変数の test 内設定方法と既存 `./checkpoints/` ディレクトリの干渉",
+      "description": "`baseline_reporag/photon_pipeline.py:604` の `_resolve_checkpoint_path` は `PHOTON_CHECKPOINT_ROOT` 環境変数を参照、未設定時は cwd 配下 `./checkpoints/` を root とする。本 Issue で tmp_path に checkpoint を生成する場合:\n  - (a) `monkeypatch.setenv(\"PHOTON_CHECKPOINT_ROOT\", str(tmp_path))` で test 内のみ override する必要 (既存 `test_photon_pipeline_checkpoint_load.py:142` で前例あり)\n  - (b) test 実行時に worktree 配下に存在する実 checkpoint dir (`./checkpoints/photon_institutional_retrain_20260428/step_003000/` 等、CLAUDE.md 記載の本番 ckpt) との衝突回避\n  - (c) `_resolve_checkpoint_path` は `Path.resolve(strict=True)` を呼ぶため tmp_path 経由でも実在性が要求される (空 dir では fail)\n上記の test 環境設定詳細が Issue 本文には記載されていない。設計フェーズで fixture 化する方針を明示すべき。",
+      "current_text": "(2 ステップ目以降の説明)",
+      "suggested_change": "「テスト構造の最低保証」または候補方針 B コメントに環境変数設定方針を追記:\n\n- [ ] `monkeypatch.setenv(\"PHOTON_CHECKPOINT_ROOT\", str(tmp_path))` で test scope のみ checkpoint root を tmp_path に向ける (既存 `baseline_reporag/tests/test_photon_pipeline_checkpoint_load.py:142` の前例に従う)\n- [ ] tmp_path 配下に `save_checkpoint(model, state, tmp_path / \"test_ckpt\")` で生成した dir を `cfg.model.checkpoint_path` に注入 (相対パス `\"test_ckpt\"` で記述、`_resolve_checkpoint_path` が root 配下に解決)\n- [ ] 既存の本番 `./checkpoints/photon_institutional_retrain_20260428/step_003000/` とは tmp_path scope 化により完全分離 (干渉なし)",
+      "rationale": "実装フェーズで「test 中に PHOTON_CHECKPOINT_ROOT を どう設定するか」を毎回考えるのは無駄。Stage 1 S1-006 で影響ファイルに `configs/photon_test_minimal.yaml` を追加したのと同レベルで、test 環境設定方針も Issue 本文で確定させるべき。"
+    },
+    {
+      "id": "S3-008",
+      "severity": "Should Fix",
+      "category": "ドキュメント",
+      "title": "CLAUDE.md 「品質チェック」コマンドへの本 Issue test 実行コマンドの追加要否",
+      "description": "CLAUDE.md の「品質チェック」表 (lines 110-117 想定) には:\n  - テスト: `python -m pytest torch_ref/tests/ photon_mlx/tests/ baseline_reporag/tests/ tests/ -v`\n  - 「全テストパス (約 507/509、残り 2 件は pre-existing failure)」\n  と記載されている。本 Issue で `tests/integration/` 配下に新規 test を追加すると、(1) 上記コマンドが integration test を含むか (`tests/` glob で含まれる)、(2) 新規 markers 登録後に default で `pytest -m \"not integration\"` で除外する想定なら CLAUDE.md コマンドを更新する必要、(3) 「全テストパス 約 507/509」の総数が更新される。Issue 本文の影響ファイルに CLAUDE.md は含まれていないが、運用ドキュメント側の整合確認が必要。",
+      "current_text": "## 影響ファイル (scope 内)\n(現行リスト)",
+      "suggested_change": "「影響ファイル (scope 内)」または別セクションで CLAUDE.md 整合の方針を明記:\n\n- (推奨) `CLAUDE.md` の「品質チェック」コマンド整合確認: integration test を default で除外する場合は `pytest -m \"not integration\"` フラグ追加要否を判定。default で含める場合は test 件数 (約 507 → 約 508) 更新要否を判定。\n  - 採用方針 (推奨): 既存コマンド `python -m pytest torch_ref/tests/ photon_mlx/tests/ baseline_reporag/tests/ tests/ -v` は integration test を含む (5-15 秒程度の追加なので blocking で良い)。CLAUDE.md 更新は不要、ただし「約 508/510 通過」に件数を更新。\n  - 代替方針: integration test を nightly のみ走らせる場合 (CI 戦略 S1-004 で nightly 採用なら) 、開発者ローカルでは default 含む / CI weekly_eval.yml で `--ignore=tests/integration/` を追加し別 step で integration test を実行。CLAUDE.md には integration 専用コマンドを別行で追記。",
+      "rationale": "CLAUDE.md は本リポジトリの開発者向け一次ドキュメントであり、test 件数や実行コマンドが Issue 実装後に乖離するとオンボーディング混乱を招く。Issue 段階で更新方針を判定するのが Stage 3 影響範囲レビューの定型対応 (Issue #140 / docs/code_review_checklist.md 同類)。"
+    },
+    {
+      "id": "S3-009",
+      "severity": "Nice to Have",
+      "category": "リスク",
+      "title": "HuggingFace Hub download 依存 (`_load_hf_tokenizer`) の test isolation 詳細未確定",
+      "description": "Stage 1 S1-007 で「tokenizer は HF download を避けるため `_load_hf_tokenizer` を local fixture に置き換えてよい (test isolation のため許容)」とされたが、具体的な置換方法が Issue 本文には記載されていない。実装手段の選択肢:\n  (a) `monkeypatch.setattr(\"baseline_reporag.photon_pipeline._load_hf_tokenizer\", _fake_tokenizer)` (既存 `test_photon_pipeline_checkpoint_load.py:99` の前例)\n  (b) `transformers.AutoTokenizer.from_pretrained` を patch (より上流)\n  (c) HF cache (`~/.cache/huggingface/`) に事前 download 済み tokenizer を要求 (CI cache fixture)\nself-hosted runner には HF cache が温存されている可能性が高いが、初回実行 / cache invalidation 時に download fail で flaky になるリスク。(a) を default 推奨として Issue 本文に明記すれば実装が早い。",
+      "current_text": "- [ ] tokenizer は HF download を避けるため `_load_hf_tokenizer` を local fixture に置き換えてよい (test isolation のため許容)",
+      "suggested_change": "tokenizer 置換方針を具体化:\n\n- [ ] tokenizer は HF download を避けるため `_load_hf_tokenizer` を local fixture に置き換えてよい (test isolation のため許容)\n  - 実装方針 (推奨): `monkeypatch.setattr(\"baseline_reporag.photon_pipeline._load_hf_tokenizer\", _fake_tokenizer)` で test scope のみ MagicMock 置換 (既存 `baseline_reporag/tests/test_photon_pipeline_checkpoint_load.py:99` と同じ流儀)\n  - 代替: `transformers.AutoTokenizer.from_pretrained` を patch するのは上流すぎて副作用が広いため避ける",
+      "rationale": "Issue 段階で実装方針を default 推奨化することで実装効率が上がる。Nice to Have にとどまる範囲だが、CI flakiness 予防の観点で有用。"
+    },
+    {
+      "id": "S3-010",
+      "severity": "Nice to Have",
+      "category": "リスク",
+      "title": "仮説検証 H5 Rejected の代替案 (a)-(d) の影響範囲的実装可能性 — 全 4 案が実装可能",
+      "description": "Stage 3 影響範囲レビューの命令文で要求された「仮説検証で Rejected された H5 の代替案 (4 案 a/b/c/d) が影響範囲的に実装可能か」を再検証した結果、全案とも本 Issue scope で実装可能と判定:\n  - (a) checkpoint integrity hash 検証: `photon_mlx/checkpoint.py:109 _verify_integrity` が public でない `_` prefix だが、`load_checkpoint(verify_integrity=True)` (line 162) 経由で外部 API として呼べる。本 Issue で 1 step 学習 → save_checkpoint で integrity.json が自動生成され、load 時に SHA-256 比較。**実装可能**。\n  - (b) weight identity 検証: `model.parameters()` を save 前後で取り出し比較。S3-005 の注意点に従えば **実装可能**。\n  - (c) PHOTON_ALLOW_RANDOM_INIT bypass ネガティブテスト: `baseline_reporag/photon_pipeline.py:397-413` の挙動を `monkeypatch.setenv` + checkpoint 不在 dir の組み合わせで test。**実装可能**。\n  - (d) `_score_prune_candidates` 直接呼出: `photon_mlx/inference.py:536` の private method。`PhotonInference` 構築 + KVCache 準備 + chunk 入力が必要で、(a)-(c) より test set up コストが高い。**実装可能だが工数大**。\n影響範囲的には (a)-(c) が低コストかつ独立、(d) は高コスト。default 推奨 (b) + 補強 (c) の 2 案併用が最も検出力が高く実装コストも低い (それぞれ 5-10 行程度の assert 追加)。",
+      "current_text": "(受入条件 (3) の (a)-(d) 4 案併用可能性は明示されていない)",
+      "suggested_change": "受入条件 (3) に「複数案併用」の明示文を追記:\n\n- [ ] random-init detector を、実在する API に基づいた以下のいずれか (or 複数併用) で実装すること\n  ↓ 以下を追記\n  - 推奨組み合わせ: **(b) weight identity 検証 (positive path) + (c) PHOTON_ALLOW_RANDOM_INIT bypass ネガティブテスト (negative path)** の 2 案併用 — 学習データ load 経路と bypass 経路の両方を pin することで random-init silently 動作型の事故を多角的に検出可能。実装コスト合計 15-20 行程度。\n  - (a) integrity hash は `load_checkpoint(verify_integrity=True)` 引数追加で簡潔だが、SHA-256 比較は \"checkpoint が物理的に存在し改竄されていない\" を保証するのみで \"weight が model に load された\" の verify には (b) との組み合わせが必要。",
+      "rationale": "Stage 3 命令文で明示要求された H5 代替案の実装可能性判定を Issue 本文に反映することで、設計フェーズで採否判定が早まる。Nice to Have にとどめるが、明示すれば実装効率が上がる。"
+    }
+  ],
+  "must_fix_count": 2,
+  "should_fix_count": 6,
+  "nice_to_have_count": 2,
+  "summary": "Stage 3 影響範囲レビュー (1回目) の結果、Stage 1-2 で適用された 9 件の Should/Must Fix は概ね妥当だが、影響範囲視点で 10 件の追加指摘を検出。Must Fix は (S3-001) Issue 命令文の `_load_checkpoint_into_model` 名と実コード `_load_photon_checkpoint` の名前不一致を受入条件側で実体名に固定する点、(S3-002) `tests/__init__.py` 不在による pytest discovery 不安定リスクを scope 確定する点。Should Fix は (S3-003) `pyproject.toml` 新規追加の scope 最小化、(S3-004) weekly_eval.yml step 追加の運用詳細 (挿入位置・continue-on-error・artifact)、(S3-005) MLX nondeterminism 対策の実装注意点、(S3-006) 既存 autouse fixture との sys.modules 干渉対策、(S3-007) `PHOTON_CHECKPOINT_ROOT` の test 内設定方針、(S3-008) CLAUDE.md 品質チェック整合確認。Nice to Have は (S3-009) tokenizer 置換方針の default 推奨明示、(S3-010) H5 代替案の併用方針 (b+c 推奨)。S1-005 系の影響ファイル整合は再検証の結果、`tests/__init__.py` の追加要否のみ未確定 (S3-002)、他は scope 内 (`tests/integration/__init__.py` / `tests/integration/test_photon_real_weights.py` / `configs/photon_test_minimal.yaml` / `pyproject.toml` / `.github/workflows/weekly_eval.yml`) で網羅されている。仮説検証 H5 Rejected の代替案 (a)-(d) は **全 4 案とも本 Issue scope で実装可能**、推奨は (b) weight identity + (c) PHOTON_ALLOW_RANDOM_INIT 併用 (S3-010)。"
+}

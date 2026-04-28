@@ -110,6 +110,81 @@ They are cached in `~/.cache/huggingface/`. Ensure network access is available f
 
 ---
 
+## PHOTON Checkpoint Distribution
+
+PHOTON pipeline (`provider: "photon"` in YAML) は学習済 checkpoint の物理配置と環境変数の整合が必要。
+本セクションは Issue #135 採用 checkpoint (`photon_institutional_retrain_20260428/step_003000`、val_loss 0.4777) の配備運用を記録する。
+
+### 採用 checkpoint の配置 (2026-04-28 整理済)
+
+```
+$REPO/checkpoints/photon_institutional_retrain_20260428/
+├── best/         (1.4 GB) ← step_003000 と同内容、念のため保持
+└── step_003000/  (1.4 GB) ← ★採用、configs/institutional_docs_photon.yaml が参照
+
+合計: ~2.8 GB
+```
+
+**配置先の決定根拠** (worktree cleanup 耐性):
+- 学習は `feature/issue-135-photon-retrain` worktree 内 (`./checkpoints/`) で実施。
+- そのまま参照すると worktree cleanup で消失するリスクがあるため、**develop worktree の `./checkpoints/` 配下にコピー**して長期保管する運用に変更。
+- 中間 step (step_001000, _001500, _002000, _002500, final) は disk space 節約のため削除済 (~7 GB 解放)。再現性は `logs/train_photon_institutional_retrain_20260428/train_log.jsonl` で担保。
+
+### 環境変数の設定
+
+```bash
+# 本マシン (M3 Ultra Mac Studio) では develop worktree の絶対パスを使用
+export PHOTON_CHECKPOINT_ROOT=/Users/maenokota/share/work/github_kewton/photon-mlx-develop/checkpoints
+```
+
+config 側 (`configs/institutional_docs_photon.yaml`) は相対パスで参照:
+```yaml
+model:
+  checkpoint_path: "photon_institutional_retrain_20260428/step_003000"
+```
+
+`baseline_reporag/photon_pipeline.py::_resolve_checkpoint_path` (Issue #148 Phase A0) が
+`$PHOTON_CHECKPOINT_ROOT/$checkpoint_path` を `Path.resolve(strict=True)` で解決し、root containment と
+weights.npz/state.json の存在を fail-loud で検証する。
+
+### Random-init 安全装置
+
+`PHOTON_CHECKPOINT_ROOT` 未設定 or 不正パスで起動した場合、`_load_photon_checkpoint` は **RuntimeError で fail-fast**。
+unit/CI の negative-path テスト用 escape として `PHOTON_ALLOW_RANDOM_INIT=1` のみ許可するが、
+production/eval では設定禁止 (S7-001 random-init eval の再発防止)。
+
+### 旧 checkpoint (mulmoclaude 600-step) の温存
+
+| 用途 | 場所 | 内容 |
+|------|------|------|
+| **再学習 resume 起点として保持** | `$REPO/checkpoints/step_000600/` | mulmoclaude 600-step (val_loss 1.6238) |
+| 過去 step (step_000100 〜 step_001600 等) | 同上 | 学習途上のスナップショット、研究用 |
+
+これらは Issue #135 の resume_from を再現する場合のみ必要なので、disk space 圧迫時は最小限 (step_000600 のみ) に削減してよい。
+
+### Phase 3 (将来) — External Storage への移行
+
+Production deploy 時には設計方針書 §11 リスク表「派生学習物 (corpus / checkpoint) は public 配布対象外」に準じ、
+private S3 / GCS / HuggingFace Private Hub にアップして、各環境は `download_checkpoint.sh` 等で取得する運用に切り替える予定。
+
+```bash
+# 例: huggingface_hub 経由 (Phase 3 で実装予定)
+huggingface-cli download <org>/photon-institutional-retrain-20260428 \
+  --local-dir ./checkpoints/photon_institutional_retrain_20260428 \
+  --include "step_003000/*"
+```
+
+詳細は Phase 3 設計時に別 Issue で議論。
+
+### 配備時のチェックリスト
+
+- [ ] `PHOTON_CHECKPOINT_ROOT` を環境変数に設定 (.envrc / docker-compose.yml / k8s ConfigMap)
+- [ ] `$PHOTON_CHECKPOINT_ROOT/photon_institutional_retrain_20260428/step_003000/` に `weights.npz`, `state.json`, `integrity.json` の 3 ファイル存在
+- [ ] `state.json` の `best_val_loss` が `0.47774723892817733` 付近 (整合性確認)
+- [ ] `python -m baseline_reporag.cli --config configs/institutional_docs_photon.yaml` で smoke test、PHOTON 起動 log で `Loaded PHOTON checkpoint from ...` を確認
+
+---
+
 ## Monitoring
 
 ### Key metrics

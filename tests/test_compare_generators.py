@@ -208,3 +208,89 @@ class TestRunVariantAttachesGeneratorUsed:
         assert rows[0]["generator_used"] == "photon"
         assert rows[0]["variant_requested"] == "photon"
         assert rows[0]["answer"] == "hello"
+
+
+class TestRunVariantSeedPropagation:
+    """Issue #143 / Step 7: ``run_variant`` forwards ``seed`` into ``pipeline.query``.
+
+    The acceptance criterion is byte-identical Qwen output across the
+    two variants (Qwen-only / PHOTON-with-Qwen-fallback) when
+    ``cfg.run.seed`` is pinned. That guarantee starts with this kwarg
+    actually reaching ``pipeline.query``.
+    """
+
+    def _drive_run_variant(self, monkeypatch, *, seed):
+        from unittest.mock import MagicMock
+
+        from baseline_reporag.config import Config
+        from baseline_reporag.contracts import QueryResult
+        from baseline_reporag.profiler import LatencyBreakdown, MemorySnapshot
+
+        module = _load_module()
+
+        fake_latency = LatencyBreakdown(
+            retrieval_ms=1.0, generation_ms=1.0, citation_ms=0.0, total_ms=2.0
+        )
+        fake_memory = MemorySnapshot(peak_mb=10.0, current_mb=5.0)
+        fake_result = QueryResult(
+            answer="x",
+            session_id="compare-row1",
+            turn_id=1,
+            cited_chunk_ids=["c1"],
+            wrong_citation_indices=[],
+            no_citation=False,
+            latency=fake_latency,
+            memory=fake_memory,
+            citation_postprocessed=False,
+            generator_used="qwen",
+            generator_fallback_reason=None,
+        )
+
+        fake_pipeline = MagicMock()
+        fake_pipeline.query.return_value = fake_result
+
+        import baseline_reporag.pipeline_factory as pipeline_factory_module
+
+        monkeypatch.setattr(
+            pipeline_factory_module,
+            "build_pipeline",
+            lambda _cfg: fake_pipeline,
+        )
+
+        cfg = Config({"inference": {}, "model": {"provider": "baseline"}})
+        questions = [{"id": "q1", "question": "Q?"}]
+
+        if seed is _SENTINEL:
+            module.run_variant(
+                cfg, questions, repo_id="r", photon_generation_enabled=False
+            )
+        else:
+            module.run_variant(
+                cfg,
+                questions,
+                repo_id="r",
+                photon_generation_enabled=False,
+                seed=seed,
+            )
+        return fake_pipeline
+
+    def test_default_seed_none_forwards_none(self, monkeypatch) -> None:
+        """Default invocation forwards ``seed=None`` (no MLX seeding)."""
+        fake_pipeline = self._drive_run_variant(monkeypatch, seed=_SENTINEL)
+        call = fake_pipeline.query.call_args
+        assert call.kwargs.get("seed") is None
+
+    def test_explicit_seed_propagates(self, monkeypatch) -> None:
+        """``seed=42`` reaches ``pipeline.query``."""
+        fake_pipeline = self._drive_run_variant(monkeypatch, seed=42)
+        call = fake_pipeline.query.call_args
+        assert call.kwargs.get("seed") == 42
+
+    def test_seed_zero_propagates(self, monkeypatch) -> None:
+        """``seed=0`` MUST propagate (DR3-002 silent-bug guard)."""
+        fake_pipeline = self._drive_run_variant(monkeypatch, seed=0)
+        call = fake_pipeline.query.call_args
+        assert call.kwargs.get("seed") == 0
+
+
+_SENTINEL = object()

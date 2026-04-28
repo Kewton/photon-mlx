@@ -113,15 +113,15 @@ Issue #135 (本格再学習) で **Turn 5-6 NC < 6% MVP 達成** (refusal-aware 
 
 **推定仮説 A: 60% / 仮説 B: 40%** (Tokenizer 共有 × encoding 一貫性の同時不確実性) → 実測で **仮説 B 確定**、#135 で本格再学習実施し受入条件達成。
 
-### 成功条件（Phase 2 完了 = Phase 3 着手可能）
+### 成功条件（Phase 2 完了 = Phase 3 着手可能）— ✅ 2026-04-28 達成
 
-| 指標 | 基準 | 現状 |
-|------|------|------|
-| 制度文書 Static NC | < 20% | 未計測 |
-| 制度文書 MT NC | < 15% | 未計測 |
-| 制度文書 follow-up latency | baseline -20%+ | 未計測 |
-| **FastAPI 改善の再現率** | **70%+** | 未計測 |
-| PHOTON Turn 5-6 NC | < 3% | 未計測 |
+| 指標 | 基準 | 実測値 | 判定 |
+|------|------|--------|------|
+| 制度文書 Static NC | < 20% | 11.21% (#112) | ✅ |
+| 制度文書 MT NC | < 15% | 8.33% raw / 0.00% refusal-aware (#135 step_003000) | ✅ |
+| 制度文書 follow-up latency | baseline -20%+ | -37.7% (12,092 ms vs 19,426 ms、#135) | ✅ |
+| **FastAPI 改善の再現率** | **70%+** | Indicator A 100% / B 110%（`reports/phase2_cross_domain_validation.md` §3） | ✅ |
+| PHOTON Turn 5-6 NC | < 3% | 0.00% (refusal-aware) / 6.67% (raw、計測 bug 由来 #156) | ✅ |
 
 ### タイムライン
 

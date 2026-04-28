@@ -1,0 +1,74 @@
+{
+  "stage": 4,
+  "stage_name": "指摘事項反映（1回目影響範囲）",
+  "applied": [
+    {
+      "finding_id": "S3-001",
+      "severity": "Must Fix",
+      "status": "applied",
+      "summary": "受入条件「テスト構造の最低保証」内で `photon_mlx.trainer.load_checkpoint` 行に実体経路 (`photon_mlx.checkpoint.load_checkpoint` / `trainer.py:80` lazy re-export) と patch 不可境界 (`load_checkpoint` / `_load_photon_checkpoint` の 2 経路) を明示。続けて既存 `test_photon_pipeline_checkpoint_load.py` との差別化条件を追加項目で明文化。"
+    },
+    {
+      "finding_id": "S3-002",
+      "severity": "Must Fix",
+      "status": "applied",
+      "summary": "「影響ファイル (scope 内)」に `tests/__init__.py` の追加要否判定エントリを追記。pytest rootdir 推定確認手順と、`tests/__init__.py` を新設しない場合の安全策 (`pyproject.toml [tool.pytest.ini_options] testpaths` で 4 ディレクトリを pin) を併記。"
+    },
+    {
+      "finding_id": "S3-003",
+      "severity": "Should Fix",
+      "status": "applied",
+      "summary": "影響ファイルの `pyproject.toml` 行を更新し、scope を `[tool.pytest.ini_options]` の markers + testpaths のみに最小化。`[tool.ruff]` / `[build-system]` / `[project]` セクションを追加しない方針を明記し、ruff 警告 0 件挙動の保持を保証。S3-002 と整合。"
+    },
+    {
+      "finding_id": "S3-004",
+      "severity": "Should Fix",
+      "status": "applied",
+      "summary": "受入条件「CI 実行戦略」直下に運用詳細サブリストを追加: 挿入位置 (`Run multi-turn eval` 後)、continue-on-error: true、artifact (`logs/integration_test_*.log` を `if: always()` で収集)、実行時間予算 60 秒以内の 4 項目を明文化。"
+    },
+    {
+      "finding_id": "S3-005",
+      "severity": "Should Fix",
+      "status": "applied",
+      "summary": "random-init detector (b) weight identity 検証に「実装注意」サブセクションを追加: (1) `mx.random.seed(42)` 明示 call、(2) `mx.eval` + numpy 経由比較で lazy eval 罠回避、(3) L2 norm 閾値 1e-4。flaky 時のフォールバック (a) integrity hash も併記。"
+    },
+    {
+      "finding_id": "S3-006",
+      "severity": "Should Fix",
+      "status": "applied",
+      "summary": "「テスト構造の最低保証」に MagicMock 残留検出 fixture (`assert not isinstance(photon_mlx.model.PhotonModel, MagicMock)`) と、pytest-xdist 並列実行時の `--forked` / `-n 0` 指針を 2 項目追加。既存 autouse fixture `_patch_heavy_deps` (line 75-123) との sys.modules 干渉対策。"
+    },
+    {
+      "finding_id": "S3-007",
+      "severity": "Should Fix",
+      "status": "applied",
+      "summary": "「テスト構造の最低保証」に `monkeypatch.setenv(\"PHOTON_CHECKPOINT_ROOT\", str(tmp_path))` 設定指針、`save_checkpoint` 経由 tmp_path 注入手順、`Path.resolve(strict=True)` 実在性要求の注意、本番 checkpoints/ との分離保証の 3 項目を追加。"
+    },
+    {
+      "finding_id": "S3-008",
+      "severity": "Should Fix",
+      "status": "applied",
+      "summary": "受入条件「既存テスト + 新規テスト全パス」に test 件数を 507/509 → 508/510 に更新する旨を追記。「影響ファイル」末尾に CLAUDE.md 整合確認項目 (推奨/代替の 2 採用方針) を追加。"
+    },
+    {
+      "finding_id": "S3-010",
+      "severity": "Nice to Have",
+      "status": "applied",
+      "summary": "受入条件「random-init detector」セクション冒頭に「推奨組み合わせ: (b) weight identity + (c) PHOTON_ALLOW_RANDOM_INIT bypass ネガティブテストの 2 案併用」を明記。実装コスト (15-20 行) と検出力の根拠を併記。候補方針 B コード block コメントの step 5 にも併記。"
+    }
+  ],
+  "deferred": [
+    {
+      "finding_id": "S3-009",
+      "severity": "Nice to Have",
+      "status": "deferred",
+      "reason": "tokenizer 置換方針 (`monkeypatch.setattr(\"baseline_reporag.photon_pipeline._load_hf_tokenizer\", _fake_tokenizer)`) の default 推奨明示は実装者判断に委ねる旨が指示文に明記されており、Issue 本文への追記は据置。設計フェーズで実装者が既存 `test_photon_pipeline_checkpoint_load.py:99` の前例を参考に決定する。"
+    }
+  ],
+  "total_applied": 9,
+  "total_deferred": 1,
+  "issue_updated": true,
+  "issue_url": "https://github.com/Kewton/photon-mlx/issues/145",
+  "applied_at": "2026-04-28",
+  "review_history_entry_added": "Stage 3 影響範囲レビュー (1回目) 反映 (2026-04-28): S3-001/002/003/004/005/006/007/008/010 反映、S3-009 据置"
+}

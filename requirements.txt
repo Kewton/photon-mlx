@@ -11,6 +11,9 @@ sentence-transformers
 # Tokenizer
 transformers
 
+# HF Hub direct file access (Issue #144: spiece.model 個別 download 用)
+huggingface_hub
+
 # Lexical search
 rank-bm25
 

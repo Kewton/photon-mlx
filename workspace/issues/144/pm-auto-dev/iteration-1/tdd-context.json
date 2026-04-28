@@ -1,0 +1,51 @@
+{
+  "issue_number": "144",
+  "iteration": 1,
+  "branch": "feature/issue-144-ruri-v2-build",
+  "scope_note": "本 Issue では具体的に実装すべきコードは2点のみ: (1) requirements.txt に huggingface_hub 1 行追加、(2) scripts/_setup_ruri_models.py 新規作成。build/eval (Task 2.3-2.5) と report 更新 (Task 3.1-3.2) は重い手動運用のため本フェーズで実行しない (work-plan.md 参照)。",
+  "design_policy_path": "workspace/design/issue-144-ruri-v2-build-design-policy.md",
+  "work_plan_path": "workspace/issues/144/work-plan.md",
+  "issue_review_summary_path": "workspace/issues/144/issue-review/summary-report.md",
+  "design_review_summary_path": "workspace/issues/144/multi-stage-design-review/summary-report.md",
+  "tasks": [
+    {
+      "task_id": "Task 1.1",
+      "title": "requirements.txt に huggingface_hub を追加",
+      "deliverable": "requirements.txt",
+      "details": "transformers の直下に '# HF Hub direct file access (Issue #144: spiece.model 個別 download 用)' コメントと 'huggingface_hub' (バージョン pin なし) の 2 行を追加する。",
+      "verification": [
+        "git diff requirements.txt で 2 行追加のみであること",
+        "python -m pip install -r requirements.txt が成功すること (実行不要、import 可能ならOK)",
+        "python -m pip check で resolver 不整合なし (実行可能なら確認)"
+      ]
+    },
+    {
+      "task_id": "Task 1.2",
+      "title": "scripts/_setup_ruri_models.py 新規作成",
+      "deliverable": "scripts/_setup_ruri_models.py",
+      "details": "設計方針書 §3.1 に従う。関数構成: fetch_ruri_files() / verify_load() / __main__ で両方実行。RURI_MODELS = ['cl-nagoya/ruri-small-v2'] (hard-coded、CLI 引数化しない)、RURI_FILES = ['spiece.model']。huggingface_hub からの ImportError は親切メッセージで raise (try/except + ImportError raise from e)。fetch_ruri_files は HfHubHTTPError/OSError を fail-fast で raise。verify_load は SentenceTransformer 単独 load 検証。出力 log は sanitized (filename + size のみ、HF cache full path / raw traceback / token を Issue コメントに貼らない方針 - DR4-002)。",
+      "verification": [
+        "ファイルが scripts/_setup_ruri_models.py に作成されている",
+        "from __future__ import annotations が冒頭にある",
+        "ruff check scripts/_setup_ruri_models.py が警告 0 件",
+        "ruff format --check scripts/_setup_ruri_models.py が差分なし",
+        "tests/test_no_scaffolding_in_prod.py の PROD_ROOTS 対象外なので scaffolding test 影響なし",
+        "python -c 'import scripts._setup_ruri_models' (もしくは module 単独 import) が ImportError なく完了 (huggingface_hub 既にインストール済み環境なら)"
+      ]
+    }
+  ],
+  "constraints": [
+    "ソースコード変更は requirements.txt と scripts/_setup_ruri_models.py のみ",
+    "既存テスト (pytest) を破壊しない",
+    "ruff check . / ruff format --check . で警告0件・差分なし",
+    "Issue #139 設計判断: scripts/ は tests/test_no_scaffolding_in_prod.py の PROD_ROOTS 対象外、_setup_ruri_models.py の '_' prefix も問題なし",
+    "Issue #140 / S7-001: PR レビュー時に prod code path に scaffolding 命名 (_Stub, _Mock 等) が残らないこと。本 task は scripts/ 配下なので適用外だが念のため確認",
+    "build/eval (Task 2.3-2.5) と report 更新 (Task 3.1-3.2) は本フェーズで実行しない"
+  ],
+  "test_strategy": "scripts/_setup_ruri_models.py は network/HF Hub 依存のため unit test 対象外 (work-plan.md / 設計方針書 §3.1 設計判断参照)。代わりに 'python -m pytest' 全パス + ruff check 警告 0 件 + 既存 invariant test 不変 で受入。verify_load() の手動実行 log は Phase 5 で Issue コメントに sanitized 形式で記録。",
+  "expected_outputs": {
+    "requirements_diff_lines": 2,
+    "new_files": ["scripts/_setup_ruri_models.py"],
+    "modified_files": ["requirements.txt"]
+  }
+}

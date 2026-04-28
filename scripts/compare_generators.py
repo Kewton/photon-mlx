@@ -80,10 +80,18 @@ def run_variant(
     repo_id: str,
     *,
     photon_generation_enabled: bool,
+    seed: int | None = None,
 ) -> list[dict]:
     """Run all questions through a single generator variant.
 
     Returns a list of JSONL-friendly dicts (one per question).
+
+    Issue #143 / Step 7: ``seed`` (keyword-only, default ``None``) is
+    forwarded into ``pipeline.query`` so the side-by-side comparison
+    observes the same Qwen sampling stream as ``run_baseline_eval``
+    when callers resolve ``seed`` from ``cfg.run`` upstream. ``None``
+    keeps the legacy call shape used by the existing MagicMock
+    ``test_compare_generators.py::TestRunVariantAttachesGeneratorUsed``.
     """
     # CB-004 (codex-fix): lightweight factory import — no MLX required to
     # execute the Qwen-only variant (the PHOTON variant lazy-loads MLX on
@@ -103,6 +111,7 @@ def run_variant(
             question=question,
             session_id=session_id,
             repo_id=repo_id,
+            seed=seed,
         )
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
         rows.append(
@@ -158,8 +167,15 @@ def main() -> None:
 
     from baseline_reporag.config import load_config
 
+    # Issue #143 / Step 7: resolve ``cfg.run.seed`` once and forward it
+    # into both Qwen + PHOTON variants so the two outputs are directly
+    # comparable.  ``resolve_eval_seed`` validates the run block and
+    # returns ``None`` when ``deterministic=False``.
+    from baseline_reporag.eval.run_config import resolve_eval_seed
+
     cfg = load_config(args.config)
     repo_id = args.repo_id or cfg.repo.repo_id
+    seed = resolve_eval_seed(cfg)
     questions = load_questions(args.questions)
 
     if not questions:
@@ -180,6 +196,7 @@ def main() -> None:
             questions,
             repo_id=repo_id,
             photon_generation_enabled=enabled,
+            seed=seed,
         )
         all_rows.extend(rows)
         for row in rows:

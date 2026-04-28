@@ -1,0 +1,11 @@
+{
+  "issue_number": "144",
+  "focus_area": "影響範囲",
+  "iteration": 1,
+  "stage": 3,
+  "stage_name": "影響範囲レビュー（1回目）",
+  "stage1_result_path": "workspace/issues/144/issue-review/stage1-review-result.json",
+  "stage2_apply_result_path": "workspace/issues/144/issue-review/stage2-apply-result.json",
+  "updated_issue_body_path": "workspace/issues/144/issue-review/stage2-updated-body.md",
+  "output_path": "workspace/issues/144/issue-review/stage3-review-result.json"
+}

@@ -1,0 +1,8 @@
+{
+  "issue_number": "145",
+  "stage": 2,
+  "stage_name": "指摘事項反映（1回目通常）",
+  "review_result_path": "workspace/issues/145/issue-review/stage1-review-result.json",
+  "original_issue_path": "workspace/issues/145/issue-review/original-issue.json",
+  "instruction": "Stage 1 の Must Fix / Should Fix 指摘を全て Issue 本文に反映する。Nice to Have は実装者の判断に任せて反映 or 据え置き。"
+}

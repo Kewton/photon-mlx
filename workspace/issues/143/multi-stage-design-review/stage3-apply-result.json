@@ -1,0 +1,16 @@
+{
+  "stage": 3,
+  "reviewer": "codex",
+  "issue_number": "143",
+  "applied_findings": [
+    "DR3-001",
+    "DR3-002",
+    "DR3-003",
+    "DR3-004",
+    "DR3-005"
+  ],
+  "skipped_findings": [],
+  "applied_count": 5,
+  "design_doc_updated": true,
+  "summary": "設計方針書のみ更新。eval seed 伝播の影響範囲に retrieval_grid_search/run_stress_eval と対応テストを追加し、seed=0 の silent bug を避ける `seed is not None` 表記へ統一した。schema は run_index/run_seed の 2 fields に統一し、aggregator の旧 JSONL 互換と Issue #156 の run_multi_turn_eval.py 衝突点を明記した。"
+}

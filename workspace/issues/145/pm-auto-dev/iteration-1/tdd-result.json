@@ -1,0 +1,44 @@
+{
+  "iteration": 1,
+  "issue_number": "145",
+  "phases_completed": ["P1", "P2", "P3", "P4", "P5", "P6", "P7"],
+  "files_added": [
+    "tests/integration/__init__.py",
+    "tests/integration/conftest.py",
+    "tests/integration/test_photon_real_weights.py",
+    "configs/photon_test_minimal.yaml",
+    "pyproject.toml"
+  ],
+  "files_modified": [
+    ".github/workflows/weekly_eval.yml",
+    "CLAUDE.md",
+    "docs/code_review_checklist.md",
+    "GitHub Issue #145 body"
+  ],
+  "test_results": {
+    "integration_total": 3,
+    "integration_passed": 3,
+    "integration_runtime_seconds": 3.29,
+    "full_suite_passed": 1260,
+    "full_suite_failed_pre_existing": 3,
+    "pre_existing_failures": [
+      "tests/test_generate_training_corpus.py::TestMain::test_main_cli_tokenizer_id",
+      "tests/test_generate_training_corpus.py::TestMain::test_main_uses_tokenize_text",
+      "baseline_reporag/tests/test_photon_pipeline.py::TestBuildPhotonDepsRealTokenizer::test_vocab_size_mismatch_raises (real_hf_loader marker)"
+    ]
+  },
+  "ruff_check": "pass",
+  "ruff_format_check_new_files": "pass",
+  "ruff_format_check_pre_existing_violations": [
+    "baseline_reporag/photon_pipeline.py",
+    "scripts/train_photon.py"
+  ],
+  "issue_body_updated": true,
+  "test_design_pins": {
+    "positive_path": "trained_model L2 norm vs deps['photon_inference'].model L2 norm closeness < 1e-5 (DR1-002)",
+    "negative_without_bypass": "RuntimeError raised when corrupt ckpt + no PHOTON_ALLOW_RANDOM_INIT",
+    "negative_with_bypass": "deps returned + WARNING (random-init/PHOTON_ALLOW_RANDOM_INIT) emitted"
+  },
+  "blockers": [],
+  "summary": "All 7 phases (P1-P7) completed. 3 new integration tests pass in 3.29s (well within 60s budget). All 32 design review findings reflected. CI integration step added to weekly_eval.yml without continue-on-error and without env dump. CLAUDE.md / docs / Issue body updated. ruff check passes for all new files. Pre-existing format violations in photon_pipeline.py / train_photon.py and pre-existing failures in test_generate_training_corpus.py + test_vocab_size_mismatch_raises (real_hf_loader marker) are out of scope."
+}

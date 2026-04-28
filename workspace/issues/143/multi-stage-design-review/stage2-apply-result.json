@@ -1,0 +1,20 @@
+{
+  "stage": 2,
+  "issue_number": "143",
+  "applied_findings": [
+    "DR2-001",
+    "DR2-002",
+    "DR2-003",
+    "DR2-004",
+    "DR2-005",
+    "DR2-006",
+    "DR2-007",
+    "DR2-008",
+    "DR2-009",
+    "DR2-010"
+  ],
+  "skipped_findings": [],
+  "applied_count": 10,
+  "design_doc_updated": true,
+  "summary": "Stage 2 整合性レビュー 10 件 (Must Fix 2 / Should Fix 6 / Nice to Have 2) を全て設計方針書に反映。DR2-001 で §3 / §7 / §10 の test ファイル名を tests/test_aggregate_institutional.py へ修正 (実在ファイル名と整合、新規ファイル作成しない旨を明記)。DR2-002 で §12 Task 3 受入条件を 2 fields (run_index/run_seed) に修正、§12 末尾に Issue 本文との差分注釈、§9 Step 11 に Issue body 同期タスクを追記。DR2-003 は DR2-001 と統合済。DR2-004 で §3 表に tests/test_ci_eval_check.py / demo/run_demo.py / baseline_reporag/pipeline_factory.py の 3 行 (変更なし) を追加。DR2-005 で §3 表に docs/code_review_checklist.md 行を追加、§12 Task 5 受入条件と §10 Step 10 LOC を更新 (40 → 45)。DR2-006 で ADR-11 に non-symmetric default (Generator=None / QwenMLXAdapter=42) と fail-soft 注記を追加。DR2-007 で §10 Step 1 セルに 8 test cases 補足、§10 末尾に LOC 内訳補注を追加。DR2-008 で §9 Step 5 直前に #156 マージ完了の前提条件注記を挿入。DR2-009 で §9 末尾に Step 10/11 境界の運用ルールを追記。DR2-010 で §8 末尾に CI / 受入時の全 test scope 補注を追加。ADR 番号 (ADR-1〜ADR-11) と章構成 (§1〜§14) は維持し、§3 表・§7 テスト戦略・§10 影響範囲表の整合性を保ったまま修正。ソースコードは変更していない。"
+}

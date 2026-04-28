@@ -1,0 +1,14 @@
+{
+  "issue_number": "145",
+  "focus_area": "通常",
+  "iteration": 1,
+  "stage": 1,
+  "stage_name": "通常レビュー（1回目）",
+  "hypothesis_verification_path": "workspace/issues/145/issue-review/hypothesis-verification.md",
+  "original_issue_path": "workspace/issues/145/issue-review/original-issue.json",
+  "key_findings_from_phase_0_5": [
+    "H2/H3 (依存・現状記述) は Issue 起票時点 2026-04-26 では正しかったが、2026-04-28 時点で #135 main マージ済み (commit 8c13517) のため Rejected。Issue 本文を更新する必要あり",
+    "H5 (random-init detector の `pipeline.last_pruning_score_distribution.std()`) は架空の API。grep -rn 'pruning_score' baseline_reporag/ photon_mlx/ 結果 0 件。代替検証手段の決定が必要",
+    "#139 は PR #147 で 2026-04-27 マージ済 (closed)。「推奨: #139 先行マージ」も解消"
+  ]
+}

@@ -1,0 +1,72 @@
+{
+  "stage": 2,
+  "stage_name": "指摘事項反映（1回目通常）",
+  "applied": [
+    {
+      "finding_id": "S1-001",
+      "severity": "Must Fix",
+      "status": "applied",
+      "summary": "背景セクションに 2026-04-28 時点の最新ステータスを反映 (#135 main マージ済 commit 8c13517 / PR #157, #139 main マージ済 PR #147)。`現行 main の baseline_reporag/photon_pipeline.py には checkpoint_path 設定も load_checkpoint 呼び出しも存在しない` の旧記述を削除し、line 256 / 365-417 / 626-633 に実装済みであることを明記。依存セクションを「(解消済)」表記に更新し、本 Issue が着手可能状態である旨を明示。"
+    },
+    {
+      "finding_id": "S1-002",
+      "severity": "Must Fix",
+      "status": "applied",
+      "summary": "候補方針 A サンプルコード内の `assert pipeline.last_pruning_score_distribution.std() > 0.01` を削除し、受入条件 (3) を実在 API ベースの選択肢 (a) checkpoint integrity hash 検証 / (b) weight identity 検証 (default 推奨) / (c) PHOTON_ALLOW_RANDOM_INIT bypass ネガティブテスト / (d) `_score_prune_candidates` 直接呼び出しに書き換え。元の Issue 記載が架空 API であった旨を注記として追加。"
+    },
+    {
+      "finding_id": "S1-003",
+      "severity": "Should Fix",
+      "status": "applied",
+      "summary": "候補方針 A の見出しを「**本 Issue scope 外 / follow-up Issue 化**」に変更し、scope 外セクションを新設。HF Hub upload / self-hosted runner キャッシュ / S3 mirror の決定、CI runtime budget 評価、HF allowlist 整備が必要である理由を明記し、follow-up Issue タイトル例を追記。"
+    },
+    {
+      "finding_id": "S1-004",
+      "severity": "Should Fix",
+      "status": "applied",
+      "summary": "受入条件 (4) を CI 戦略確定の判断材料を含む形に置換: blocking PR workflow が main 未定義であること、weekly_eval.yml が cron Monday 00:00 UTC / runs-on self-hosted / timeout 180min であること、self-hosted Apple Silicon runner 必須、pytest markers が repo 未登録のため本 Issue で新規登録すること、推奨運用 (`pytest -m \"not integration\"`) を明記。"
+    },
+    {
+      "finding_id": "S1-005",
+      "severity": "Should Fix",
+      "status": "applied",
+      "summary": "候補方針 B のステップ 3-4 に wire-up 経路選択肢 (i) `_build_photon_deps(cfg)` 直接呼び出し (default 推奨) / (ii) `pipeline_factory.build_pipeline(cfg_yaml)` 経由を明示し、既存 `test_photon_pipeline_checkpoint_load.py` の前例にも言及。Stage 3 影響範囲レビューで確定する旨を記載。"
+    },
+    {
+      "finding_id": "S1-006",
+      "severity": "Should Fix",
+      "status": "applied",
+      "summary": "「影響ファイル」セクションを「scope 内」「scope 外 (follow-up Issue 化)」に分割。`tests/integration/__init__.py` 新規、`configs/photon_test_minimal.yaml` 新規 (vocab=256 / hidden=64 / layers=2 想定、photon_tiny を流用しない理由を明記)、`pyproject.toml` 新規 or 更新 (pytest markers 登録) を追加。曖昧な `必要なら` / `場合は別途` を排除。"
+    },
+    {
+      "finding_id": "S1-007",
+      "severity": "Should Fix",
+      "status": "applied",
+      "summary": "受入条件 (2) を「テスト構造の最低保証 (mock を使わない範囲を明示)」サブリストに分解: PhotonModel patch 不可 / load_checkpoint patch 不可 / save_checkpoint で実 dir 生成 / `_load_hf_tokenizer` のみ test isolation のため local fixture 置換可、を明記。"
+    },
+    {
+      "finding_id": "S1-008",
+      "severity": "Nice to Have",
+      "status": "applied",
+      "summary": "候補方針 B コメント内に seed=42 固定 / 1 step forward+backward+optimizer.step ≈1-3 秒 / save_checkpoint +1-2 秒 / `mx.array_equal` 否定での確認方法を補足。利点記述を「20-60 秒」から「M3 Ultra 上で 5-15 秒程度、self-hosted runner なら blocking PR への組み込みも検討可能」に更新。"
+    },
+    {
+      "finding_id": "S1-009",
+      "severity": "Nice to Have",
+      "status": "applied",
+      "summary": "受入条件に PHOTON_ALLOW_RANDOM_INIT bypass の負経路テスト項目を追記 (env 未設定 + checkpoint 不在 → RuntimeError、env=1 + checkpoint 不在 → WARNING + 続行)。`baseline_reporag/photon_pipeline.py:397-413` の挙動を pin する旨を明記。"
+    }
+  ],
+  "deferred": [],
+  "total_applied": 9,
+  "total_deferred": 0,
+  "must_fix_applied": 2,
+  "must_fix_total": 2,
+  "should_fix_applied": 5,
+  "should_fix_total": 5,
+  "nice_to_have_applied": 2,
+  "nice_to_have_total": 2,
+  "issue_updated": true,
+  "issue_url": "https://github.com/Kewton/photon-mlx/issues/145",
+  "applied_at": "2026-04-28"
+}
