@@ -16,7 +16,7 @@
 |---------|------|
 | **言語** | Python 3.12+ |
 | **ML基盤** | MLX (Apple Silicon), PyTorch (reference) |
-| **LLMバックエンド** | mlx-lm (Qwen2.5-Coder-14B-Instruct-4bit) |
+| **LLMバックエンド** | mlx-lm (Qwen3.5-9B-MLX-4bit, no-think モード) — 2026-04-28 採用 |
 | **検索** | BM25 (rank-bm25), sentence-transformers |
 | **サーバ** | FastAPI, uvicorn |
 | **テスト** | pytest |
@@ -157,11 +157,18 @@ reports/                # ベンチマークレポート
 
 ## プロダクトライン
 
-- **プロダクトライン**: baseline_rag + PHOTON institutional retrain (#135 採用済)
+- **プロダクトライン**: baseline_rag + PHOTON institutional retrain (#135 採用済) + Qwen3.5-9B-MLX-4bit no-think (#148 Phase B/C 採用済 / 2026-04-28)
+- **採用 LLM** (2026-04-28、出典: `reports/qwen_model_matrix_20260428_400cmp_report.md`):
+  - **`mlx-community/Qwen3.5-9B-MLX-4bit` no-think モード**
+  - **400-sample 比較根拠** (Baseline+Qwen2.5 / Baseline+Qwen3.5 / PHOTON+Qwen2.5 / PHOTON+Qwen3.5):
+    - **PHOTON + Qwen3.5 が全条件で勝利**: static p50 **11,781 ms** (-44.3%), multi-turn p50 **7,438 ms** (-43.6%)
+    - **No-citation rate**: 全条件 0.00% (PHOTON+Qwen2.5 比較で 5.0% → 0.0%, MT 8.33% → 0.0%)
+    - **reasoning leak**: 0.00% (no-think 統合後の漏れは未観測)
+  - **Note**: PHOTON 訓練 checkpoint との互換性のため `tokenizer_id` は Qwen 2.5 を維持
 - **現在のメトリクス** (Gate 2 v6 = #135 Phase 8 採用、出典: `reports/institutional_photon_mt_eval_v2_3k.md`):
   - **採用 PHOTON checkpoint**: `photon_institutional_retrain_20260428/step_003000` (val_loss=0.4777)
   - **Turn 5-6 no-citation rate (refusal-aware)**: **0.00%** (MVP < 6% / 理想 < 3% を共に達成)
-  - **Follow-up latency p50**: 12,092 ms (-37.7% vs baseline 19,426 ms)
+  - **Follow-up latency p50**: 12,092 ms (-37.7% vs baseline 19,426 ms) — Qwen 2.5 計測時。Qwen 3.5 切替後の institutional 再計測は別途
   - **Val_loss**: 0.4777 (-70.6% vs mulmoclaude 600-step 1.6238、perplexity 5.07 → 1.61)
   - 訓練データ: institutional_documents 4,228 docs + mulmoclaude train_multi (JP:0.7/EN:0.3)
   - エビデンス: `reports/institutional_photon_mt_eval_v2_3k_bug_check.md` (refusal-aware 検証)

@@ -1,0 +1,76 @@
+version: 1
+
+project:
+  name: "photon-reporag"
+  mode: "evaluation"
+
+run:
+  name_prefix: "qwen-model-matrix"
+  seed: 42
+  shuffle: false
+  save_predictions: true
+  save_artifacts: true
+  output_dir: "./workspace/temp/full_eval_model_matrix_runs"
+
+repo:
+  repo_id: "fastapi_fastapi"
+  repo_commit: "eba8942c81dbf990d25fbae34e6601bdbc21e74b"
+
+variants:
+  - id: "baseline_qwen25"
+    label: "Baseline + Qwen2.5"
+    kind: "baseline"
+    config_path: "./configs/baseline.yaml"
+
+  - id: "baseline_qwen35_nothink"
+    label: "Baseline + Qwen3.5 no-think"
+    kind: "baseline"
+    config_path: "./configs/baseline.yaml"
+    override:
+      model:
+        model_id: "mlx-community/Qwen3.5-9B-MLX-4bit"
+
+  - id: "photon_qwen25"
+    label: "PHOTON + Qwen2.5"
+    kind: "photon"
+    config_path: "./configs/photon_small.yaml"
+    override:
+      inference:
+        photon_generation_enabled: false
+
+  - id: "photon_qwen35_nothink"
+    label: "PHOTON + Qwen3.5 no-think"
+    kind: "photon"
+    config_path: "./configs/photon_small.yaml"
+    override:
+      model:
+        model_id: "mlx-community/Qwen3.5-9B-MLX-4bit"
+      inference:
+        photon_generation_enabled: false
+
+fairness:
+  fix_repo_snapshot: true
+  fix_generation_params: true
+  fix_retrieval_budget: true
+  fix_eval_order: true
+  warmup_before_measurement: true
+  warmup_requests: 3
+
+generation:
+  max_new_tokens: 768
+  temperature: 0.2
+  top_p: 0.9
+  do_sample: false
+  repetition_penalty: 1.05
+
+datasets:
+  static_eval:
+    enabled: true
+    path: "./data/eval_sets/static_eval.jsonl"
+    max_cases: 120
+
+  multi_turn_eval:
+    enabled: true
+    path: "./data/eval_sets/multi_turn_eval.jsonl"
+    max_sessions: 30
+    max_turns_per_session: 6
