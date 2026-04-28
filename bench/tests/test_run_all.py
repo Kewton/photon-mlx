@@ -8,6 +8,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from bench.run_all import (
+    _count_jsonl_records,
+    _expected_predictions_for_eval,
     filter_variants,
     parse_variants_csv,
     run_variant,
@@ -214,6 +216,70 @@ class TestSaveRunPredictions:
         lines = path.read_text().strip().split("\n")
         assert len(lines) == 1
         assert json.loads(lines[0])["eval_id"] == "SE-001"
+
+
+class TestProgressHelpers:
+    def test_count_jsonl_records(self, tmp_path) -> None:
+        path = tmp_path / "out.jsonl"
+        path.write_text('{"a":1}\n\n{"b":2}\n', encoding="utf-8")
+        assert _count_jsonl_records(path) == 2
+        assert _count_jsonl_records(tmp_path / "missing.jsonl") == 0
+
+    def test_expected_predictions_for_eval(self, tmp_path) -> None:
+        static_path = tmp_path / "static.jsonl"
+        static_path.write_text(
+            "\n".join(
+                json.dumps({"id": f"SE-{i}", "question": f"Q{i}"}) for i in range(3)
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        mt_path = tmp_path / "mt.jsonl"
+        mt_path.write_text(
+            "\n".join(
+                [
+                    json.dumps(
+                        {
+                            "session_id": "MT-1",
+                            "turns": [
+                                {"turn_id": 1, "question": "Q1"},
+                                {"turn_id": 2, "question": "Q2"},
+                            ],
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "session_id": "MT-2",
+                            "turns": [
+                                {"turn_id": 1, "question": "Q1"},
+                                {"turn_id": 2, "question": "Q2"},
+                                {"turn_id": 3, "question": "Q3"},
+                            ],
+                        }
+                    ),
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        eval_cfg = {
+            "datasets": {
+                "static_eval": {
+                    "enabled": True,
+                    "path": str(static_path),
+                    "max_cases": 2,
+                },
+                "multi_turn_eval": {
+                    "enabled": True,
+                    "path": str(mt_path),
+                    "max_sessions": 2,
+                    "max_turns_per_session": 2,
+                },
+            }
+        }
+
+        assert _expected_predictions_for_eval(eval_cfg) == 6
 
 
 # ------------------------------------------------------------------

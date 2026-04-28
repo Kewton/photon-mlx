@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 from typing import Callable, Literal, Protocol
 
+from baseline_reporag.generation.qwen_thinking import normalize_qwen_thinking
+
 
 class LLMClient(Protocol):
     """Minimal LLM surface the generator depends on (ISP-narrow)."""
@@ -97,10 +99,20 @@ class QwenMLXAdapter:
             else ""
         )
         user_prompt = prompt + suffix
-        chat_prompt = self._tokenizer.apply_chat_template(
+        messages, enable_thinking = normalize_qwen_thinking(
             [{"role": "user", "content": user_prompt}],
-            add_generation_prompt=True,
-            tokenize=False,
+            self.model,
+            enable_thinking=False,
+        )
+        template_kwargs = {
+            "add_generation_prompt": True,
+            "tokenize": False,
+        }
+        if enable_thinking is not None:
+            template_kwargs["enable_thinking"] = enable_thinking
+        chat_prompt = self._tokenizer.apply_chat_template(
+            messages,
+            **template_kwargs,
         )
         if seed is not None:
             try:

@@ -1,0 +1,254 @@
+{
+  "run_dir": "/Users/maenokota/share/work/github_kewton/photon-mlx-develop/workspace/temp/full_eval_model_matrix_runs/qwen_model_matrix_20260428_400cmp",
+  "eval_config_path": "/Users/maenokota/share/work/github_kewton/photon-mlx-develop/configs/eval_qwen_model_matrix_400.yaml",
+  "variants": [
+    {
+      "variant_id": "baseline_qwen25",
+      "label": "Baseline + Qwen2.5",
+      "prediction_path": "/Users/maenokota/share/work/github_kewton/photon-mlx-develop/workspace/temp/full_eval_model_matrix_runs/qwen_model_matrix_20260428_400cmp/qwen_model_matrix_20260428_400cmp_baseline_qwen25.jsonl",
+      "config": {
+        "provider": "mlx_lm",
+        "model_id": "mlx-community/Qwen2.5-Coder-14B-Instruct-4bit",
+        "photon_generation_enabled": false,
+        "tokenizer_id": null,
+        "checkpoint_path": null
+      },
+      "static": {
+        "count": 40,
+        "no_citation_rate": 0.025,
+        "leak_rate": 0.0,
+        "latency_ms": {
+          "count": 40,
+          "mean": 20510.01,
+          "p50": 20206.8,
+          "min": 7962.04,
+          "max": 36244.51
+        },
+        "generation_ms": {
+          "count": 40,
+          "mean": 20314.43,
+          "p50": 20110.55,
+          "min": 7856.13,
+          "max": 36152.31
+        },
+        "avg_citation_count": 3.4,
+        "generator_used_counts": {
+          "qwen": 40
+        },
+        "generator_fallback_reasons": {}
+      },
+      "multi_turn": {
+        "count": 60,
+        "no_citation_rate": 0.0167,
+        "leak_rate": 0.0,
+        "latency_ms": {
+          "count": 60,
+          "mean": 21490.57,
+          "p50": 20888.09,
+          "min": 9590.61,
+          "max": 35970.75
+        },
+        "generation_ms": {
+          "count": 60,
+          "mean": 21422.63,
+          "p50": 20824.65,
+          "min": 9533.03,
+          "max": 35907.55
+        },
+        "avg_citation_count": 2.25,
+        "followup_latency_p50_ms": 20443.18,
+        "turn_5_6_no_citation_rate": 0.0,
+        "generator_used_counts": {
+          "qwen": 60
+        },
+        "generator_fallback_reasons": {}
+      }
+    },
+    {
+      "variant_id": "baseline_qwen35_nothink",
+      "label": "Baseline + Qwen3.5 no-think",
+      "prediction_path": "/Users/maenokota/share/work/github_kewton/photon-mlx-develop/workspace/temp/full_eval_model_matrix_runs/qwen_model_matrix_20260428_400cmp/qwen_model_matrix_20260428_400cmp_baseline_qwen35_nothink.jsonl",
+      "config": {
+        "provider": "mlx_lm",
+        "model_id": "mlx-community/Qwen3.5-9B-MLX-4bit",
+        "photon_generation_enabled": false,
+        "tokenizer_id": null,
+        "checkpoint_path": null
+      },
+      "static": {
+        "count": 40,
+        "no_citation_rate": 0.0,
+        "leak_rate": 0.0,
+        "latency_ms": {
+          "count": 40,
+          "mean": 11507.65,
+          "p50": 12407.34,
+          "min": 4475.24,
+          "max": 20105.39
+        },
+        "generation_ms": {
+          "count": 40,
+          "mean": 11329.23,
+          "p50": 12178.66,
+          "min": 4412.8,
+          "max": 20040.42
+        },
+        "avg_citation_count": 5.275,
+        "generator_used_counts": {
+          "qwen": 40
+        },
+        "generator_fallback_reasons": {}
+      },
+      "multi_turn": {
+        "count": 60,
+        "no_citation_rate": 0.0,
+        "leak_rate": 0.0,
+        "latency_ms": {
+          "count": 60,
+          "mean": 11296.72,
+          "p50": 11241.1,
+          "min": 4892.93,
+          "max": 17499.78
+        },
+        "generation_ms": {
+          "count": 60,
+          "mean": 11236.61,
+          "p50": 11178.87,
+          "min": 4839.17,
+          "max": 17435.71
+        },
+        "avg_citation_count": 4.7833,
+        "followup_latency_p50_ms": 11918.47,
+        "turn_5_6_no_citation_rate": 0.0,
+        "generator_used_counts": {
+          "qwen": 60
+        },
+        "generator_fallback_reasons": {}
+      }
+    },
+    {
+      "variant_id": "photon_qwen25",
+      "label": "PHOTON + Qwen2.5",
+      "prediction_path": "/Users/maenokota/share/work/github_kewton/photon-mlx-develop/workspace/temp/full_eval_model_matrix_runs/qwen_model_matrix_20260428_400cmp/qwen_model_matrix_20260428_400cmp_photon_qwen25.jsonl",
+      "config": {
+        "provider": "photon",
+        "model_id": "mlx-community/Qwen2.5-Coder-14B-Instruct-4bit",
+        "photon_generation_enabled": false,
+        "tokenizer_id": "mlx-community/Qwen2.5-Coder-14B-Instruct-4bit",
+        "checkpoint_path": "step_000600"
+      },
+      "static": {
+        "count": 40,
+        "no_citation_rate": 0.05,
+        "leak_rate": 0.0,
+        "latency_ms": {
+          "count": 40,
+          "mean": 20660.75,
+          "p50": 21163.72,
+          "min": 8020.77,
+          "max": 37773.27
+        },
+        "generation_ms": {
+          "count": 40,
+          "mean": 20330.81,
+          "p50": 20971.12,
+          "min": 7843.91,
+          "max": 37539.74
+        },
+        "avg_citation_count": 3.75,
+        "generator_used_counts": {
+          "qwen": 40
+        },
+        "generator_fallback_reasons": {}
+      },
+      "multi_turn": {
+        "count": 60,
+        "no_citation_rate": 0.0833,
+        "leak_rate": 0.0,
+        "latency_ms": {
+          "count": 60,
+          "mean": 13850.19,
+          "p50": 13177.08,
+          "min": 3880.44,
+          "max": 34957.04
+        },
+        "generation_ms": {
+          "count": 60,
+          "mean": 13574.38,
+          "p50": 12741.06,
+          "min": 3714.81,
+          "max": 34744.91
+        },
+        "avg_citation_count": 1.6833,
+        "followup_latency_p50_ms": 12523.29,
+        "turn_5_6_no_citation_rate": 0.0,
+        "generator_used_counts": {
+          "qwen": 60
+        },
+        "generator_fallback_reasons": {}
+      }
+    },
+    {
+      "variant_id": "photon_qwen35_nothink",
+      "label": "PHOTON + Qwen3.5 no-think",
+      "prediction_path": "/Users/maenokota/share/work/github_kewton/photon-mlx-develop/workspace/temp/full_eval_model_matrix_runs/qwen_model_matrix_20260428_400cmp/qwen_model_matrix_20260428_400cmp_photon_qwen35_nothink.jsonl",
+      "config": {
+        "provider": "photon",
+        "model_id": "mlx-community/Qwen3.5-9B-MLX-4bit",
+        "photon_generation_enabled": false,
+        "tokenizer_id": "mlx-community/Qwen2.5-Coder-14B-Instruct-4bit",
+        "checkpoint_path": "step_000600"
+      },
+      "static": {
+        "count": 40,
+        "no_citation_rate": 0.0,
+        "leak_rate": 0.0,
+        "latency_ms": {
+          "count": 40,
+          "mean": 11554.39,
+          "p50": 11781.07,
+          "min": 5301.46,
+          "max": 19515.43
+        },
+        "generation_ms": {
+          "count": 40,
+          "mean": 11227.77,
+          "p50": 11389.24,
+          "min": 5108.49,
+          "max": 19283.11
+        },
+        "avg_citation_count": 4.875,
+        "generator_used_counts": {
+          "qwen": 40
+        },
+        "generator_fallback_reasons": {}
+      },
+      "multi_turn": {
+        "count": 60,
+        "no_citation_rate": 0.0,
+        "leak_rate": 0.0,
+        "latency_ms": {
+          "count": 60,
+          "mean": 8010.11,
+          "p50": 7438.02,
+          "min": 3986.19,
+          "max": 20022.69
+        },
+        "generation_ms": {
+          "count": 60,
+          "mean": 7757.14,
+          "p50": 7263.94,
+          "min": 3841.57,
+          "max": 19791.62
+        },
+        "avg_citation_count": 3.7167,
+        "followup_latency_p50_ms": 7140.58,
+        "turn_5_6_no_citation_rate": 0.0,
+        "generator_used_counts": {
+          "qwen": 60
+        },
+        "generator_fallback_reasons": {}
+      }
+    }
+  ]
+}

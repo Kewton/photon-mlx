@@ -9,7 +9,10 @@
 | **Python** | 3.12+ | 3.12+ |
 | **Storage** | ~10 GB (model + indexes) | 20 GB+ |
 
-> The Qwen2.5-Coder-14B-Instruct-4bit model loads approximately 8 GB into memory.
+> The Qwen3.5-9B-MLX-4bit model (採用済 / 2026-04-28) loads approximately **5-6 GB** into memory.
+> See `reports/qwen_model_matrix_20260428_400cmp_report.md` for the 400-sample comparison
+> that drove the switch (Qwen 2.5 → Qwen 3.5 no-think): static p50 -38.6%, multi-turn p50 -46.2%
+> on baseline; PHOTON+Qwen3.5 multi-turn p50 7,438 ms (-43.6% vs PHOTON+Qwen2.5).
 > Sentence-transformers embedding model and cross-encoder reranker require additional memory:
 > - **Global default profile** (`configs/baseline.yaml`, `all-MiniLM-L6-v2` + `ms-marco-MiniLM-L-6-v2`): ~1 GB
 > - **Institutional profile** (`configs/institutional_docs.yaml`, `BAAI/bge-m3` + `BAAI/bge-reranker-v2-m3` post-#137): **~5-6 GB** (bge-m3 ~2.3 GB + bge-reranker-v2-m3 ~2.3 GB resident).
@@ -86,7 +89,7 @@ The main configuration file is `configs/baseline.yaml`.
 
 | Section | Parameter | Default | Description |
 |---------|-----------|---------|-------------|
-| `model.model_id` | LLM model | `mlx-community/Qwen2.5-Coder-14B-Instruct-4bit` | Auto-downloaded on first run |
+| `model.model_id` | LLM model | `mlx-community/Qwen3.5-9B-MLX-4bit` | Auto-downloaded on first run. no-think モード使用 (Generator 内で `enable_thinking=False`) |
 | `retrieval.reranker.model_id` | Reranker (global default) | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Auto-downloaded on first run |
 | `retrieval.reranker.model_id` (institutional) | Reranker for institutional profile | `BAAI/bge-reranker-v2-m3` | Used by `configs/institutional_docs.yaml` (#137) |
 | `indexing.embedding.model_id` (institutional) | Embedding for institutional profile | `BAAI/bge-m3` | Used by `configs/institutional_docs.yaml` (#137), `max_input_chars=8192` |

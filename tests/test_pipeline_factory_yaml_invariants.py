@@ -32,10 +32,15 @@ CONFIGS_DIR = Path(__file__).resolve().parent.parent / "configs"
 GLOBAL_DEFAULT_RERANKER_MODEL_ID = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
 # Issue #148 Phase A0: pin the LLM model_id used for generation in the global
-# default profile.  Phase C (adoption LLM evaluation) will update this constant
-# in the same commit that swaps the yaml field so the change is intentional and
+# default profile.  Phase C (adoption LLM evaluation) updates this constant in
+# the same commit that swaps the yaml field so the change is intentional and
 # visible in code review.
-GLOBAL_DEFAULT_GENERATION_MODEL_ID = "mlx-community/Qwen2.5-Coder-14B-Instruct-4bit"
+#
+# 採用切替 (2026-04-28, Phase B/C): Qwen 2.5 → Qwen 3.5 no-think。
+# 評価エビデンス: reports/qwen_model_matrix_20260428_400cmp_report.md (400-sample)
+#   - Baseline+Qwen3.5: static p50 -38.6%, multi-turn p50 -46.2%
+#   - PHOTON+Qwen3.5: static p50 -44.3%, multi-turn p50 -43.6%, NC 0.00%
+GLOBAL_DEFAULT_GENERATION_MODEL_ID = "mlx-community/Qwen3.5-9B-MLX-4bit"
 
 # Issue #137 Phase B: 5-variant A/B で V4 (bge-m3 + bge-reranker-v2-m3, 8192 chars)
 # 採用 (NC -6.90pt vs V0 12.93%、reports/institutional_retrieval_ab.md 参照)。

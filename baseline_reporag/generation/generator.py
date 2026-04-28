@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Callable
 
+from .qwen_thinking import normalize_qwen_thinking
+
 try:
     import mlx_lm
     from mlx_lm.sample_utils import make_sampler
@@ -69,10 +71,20 @@ class Generator:
             import mlx.core as mx
 
             mx.random.seed(seed)
-        prompt: str = self._tokenizer.apply_chat_template(
+        normalized_messages, enable_thinking = normalize_qwen_thinking(
             messages,
-            add_generation_prompt=True,
-            tokenize=False,
+            self._model_id,
+            enable_thinking=False,
+        )
+        template_kwargs = {
+            "add_generation_prompt": True,
+            "tokenize": False,
+        }
+        if enable_thinking is not None:
+            template_kwargs["enable_thinking"] = enable_thinking
+        prompt: str = self._tokenizer.apply_chat_template(
+            normalized_messages,
+            **template_kwargs,
         )
         return mlx_lm.generate(
             self._model,
