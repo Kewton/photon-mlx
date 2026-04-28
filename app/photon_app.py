@@ -29,7 +29,10 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from baseline_reporag.config import load_config  # noqa: E402
-from baseline_reporag.pipeline_factory import build_pipeline  # noqa: E402
+from baseline_reporag.pipeline_factory import (  # noqa: E402
+    build_pipeline,
+    override_repo_for_pipeline,
+)
 
 
 # Issue #82 Wave 3: drift + turn-history panels (streamlit-free helpers).
@@ -1746,6 +1749,13 @@ def _run_query(proj: Project, question: str, session_key: str) -> tuple[str, dic
         return f"エラー: config load failed ({type(exc).__name__}: {exc})", dict(
             metadata_default
         )
+
+    # UI で選択された ``proj.repo_id`` を真実とし、config 側の hardcoded な
+    # ``repo.repo_id`` / ``repo.repo_commit`` を上書きする (build_pipeline は
+    # ``data/indexes/{cfg.repo.repo_id}`` から index を読むため、ここで揃え
+    # ないと別 repo の index がロードされる)。``repo_commit`` は chunks.db
+    # から実際の値を解決し、graph_expansion の SQL filter にも整合させる。
+    override_repo_for_pipeline(cfg, proj.repo_id)
 
     if pipeline_key not in st.session_state:
         try:
