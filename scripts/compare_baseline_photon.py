@@ -32,7 +32,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from baseline_reporag.config import load_config
-from baseline_reporag.pipeline_factory import build_pipeline
+from baseline_reporag.pipeline_factory import build_pipeline, override_repo_for_pipeline
 
 
 @dataclass
@@ -60,6 +60,9 @@ def run_variant(
     """1 variant 分の pipeline を立てて 1 question を実行。"""
     cfg = load_config(config_path)
     resolved_repo_id = repo_id or cfg.repo.repo_id
+    # build_pipeline は cfg.repo.repo_id から index dir を解決するため、
+    # caller の repo_id と異なる場合は事前に cfg を override する。
+    override_repo_for_pipeline(cfg, resolved_repo_id)
     pipeline = build_pipeline(cfg)
     result = pipeline.query(
         question=question,

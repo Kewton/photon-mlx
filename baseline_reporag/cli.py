@@ -25,7 +25,7 @@ from .config import load_config
 # environments without MLX do not fail at ``python -m baseline_reporag.cli``
 # load time.  The factory lazy-imports the PHOTON pipeline (and thus MLX)
 # only when ``cfg.model.provider == "photon"``.
-from .pipeline_factory import build_pipeline
+from .pipeline_factory import build_pipeline, override_repo_for_pipeline
 
 # A-1 Phase 2: ``--use-photon`` のショートカットが指す PHOTON config。
 # baseline.yaml は PHOTON 専用フィールド (checkpoint_path, base_embed_dim 等)
@@ -65,6 +65,12 @@ def main() -> None:
 
     cfg = load_config(config_path)
     repo_id = args.repo_id or cfg.repo.repo_id
+
+    # ``--repo-id`` が config の ``repo.repo_id`` と異なる場合、build_pipeline
+    # は ``data/indexes/{cfg.repo.repo_id}`` を読むため別 repo の index が
+    # ロードされてしまう。``override_repo_for_pipeline`` で cfg を整合させて
+    # から build_pipeline を呼び出す。
+    override_repo_for_pipeline(cfg, repo_id)
 
     # Route via ``build_pipeline`` so ``model.provider`` (baseline vs
     # photon) is honoured end-to-end — Issue #62 Phase 1 Stage 3 DR3-001:

@@ -27,6 +27,8 @@ at module load.
 
 from __future__ import annotations
 
+import sqlite3
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .config import Config, is_symbol_graph_enabled, validate_repo_id
@@ -38,7 +40,70 @@ if TYPE_CHECKING:
     from .pipeline import RepoRAGPipeline
 
 
-__all__ = ["QueryResult", "build_pipeline"]
+__all__ = ["QueryResult", "build_pipeline", "override_repo_for_pipeline"]
+
+
+def override_repo_for_pipeline(
+    cfg: Config,
+    repo_id: str | None,
+    *,
+    data_root: str | None = None,
+) -> None:
+    """Mutate ``cfg`` in-place so ``build_pipeline()`` loads the right corpus.
+
+    ``build_pipeline()`` resolves the index directory from
+    ``cfg.repo.repo_id`` (``data/indexes/{cfg.repo.repo_id}``) — when a
+    caller's ``repo_id`` differs from the config's hardcoded value (e.g.
+    Streamlit project selection, ``--repo-id`` CLI override), the indexes
+    loaded would be the wrong corpus.  Existing eval scripts
+    (``scripts/run_baseline_eval.py``, ``scripts/run_multi_turn_eval.py``)
+    document this and mutate ``cfg.repo.repo_id`` manually before
+    ``build_pipeline``; this helper centralises that pattern and additionally
+    resolves ``repo_commit`` from ``chunks.db`` so graph_expansion's
+    ``iter_repo(repo_id, repo_commit)`` SQL filter sees real data.
+
+    No-op when ``repo_id`` is falsy.
+
+    Note: the override is destructive — the caller's ``cfg`` instance has
+    its ``repo.repo_id`` and ``repo.repo_commit`` overwritten. Callers that
+    reuse a single ``cfg`` for multiple repos must reload via
+    ``load_config`` between switches.
+    """
+    if not repo_id:
+        return
+    cfg.repo.repo_id = repo_id
+    actual_commit = _lookup_repo_commit_from_db(
+        repo_id, data_root or cfg.paths.data_root
+    )
+    if actual_commit is not None:
+        cfg.repo.repo_commit = actual_commit
+
+
+def _lookup_repo_commit_from_db(repo_id: str, data_root: str) -> str | None:
+    """Read one ``repo_commit`` value stored in ``chunks.db`` for ``repo_id``.
+
+    Returns ``None`` when the index dir / DB does not exist or the table is
+    empty — the caller keeps the config's existing value in that case (so
+    fresh ingest is detectable as an error rather than silently replaced
+    with the empty string).
+    """
+    db_path = Path(data_root) / "indexes" / repo_id / "chunks.db"
+    if not db_path.is_file():
+        return None
+    try:
+        conn = sqlite3.connect(str(db_path))
+    except sqlite3.DatabaseError:
+        return None
+    try:
+        row = conn.execute(
+            "SELECT repo_commit FROM chunks WHERE repo_id = ? LIMIT 1",
+            (repo_id,),
+        ).fetchone()
+    except sqlite3.DatabaseError:
+        row = None
+    finally:
+        conn.close()
+    return row[0] if row else None
 
 
 def build_pipeline(cfg: Config) -> "RepoRAGPipeline | PhotonRAGPipeline":
