@@ -49,6 +49,28 @@ make prepare CONFIG=configs/institutional_docs.yaml REPO=/path/to/docs REPO_ID=d
 make ask CONFIG=configs/institutional_docs.yaml REPO_ID=docs Q="..."
 ```
 
+### Cookbook 1-2b: 非 git ディレクトリを ingest する (制度文書 PDF/Markdown 等)
+
+`scripts/ingest_repo.py` は **git 不在ディレクトリも自動対応** する (PR #169)。
+git 不在時は最大 mtime ベースの `manual-<mtime>` 形式の commit id が合成される
+(同一 snapshot に対して deterministic、ファイル更新時は新 id)。
+
+```bash
+# git init は不要 — そのまま ingest できる
+make prepare CONFIG=configs/institutional_docs.yaml \
+  REPO=/path/to/markdowndb/inst_test REPO_ID=inst_test
+```
+
+実行時に stderr に warning が出る (動作には影響なし):
+```
+[warn] /path/to/... is not a git repository;
+       using synthesized commit id 'manual-...' (based on max file mtime).
+```
+
+**bench の厳密な再現性**が必要な場合 (academic eval 等) は `git init` 推奨:
+- 非 git: ファイル更新で commit id が変わる (mtime に依存)
+- git: SHA で厳密に固定される
+
 ### Cookbook 1-3: 巨大 repo で chunk 数を絞りたい
 
 `configs/baseline.yaml` の `evidence_pack.max_chunks` / `max_tokens` を下げる。
