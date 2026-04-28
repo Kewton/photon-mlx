@@ -1,0 +1,39 @@
+{
+  "stage": 4,
+  "focus": "セキュリティ",
+  "reviewer": "codex",
+  "summary": "設計方針書は hard-coded model_id / filename により `_setup_ruri_models.py` の command injection と path traversal の主要リスクを抑えており、`eval` / `exec` / `subprocess` を使わない方針とも整合している。一方で、Stage 1-3 反映後も (1) gitignored variant config の typo / tampering / 過大値を build/eval 前に拒否する明示的な validation gate がない、(2) HF cache の full path や raw traceback を Issue コメントへ貼る運用が secret/path leak の既存チェックリストと衝突する、(3) `huggingface_hub` を unpinned direct dependency として追加する際の resolver 監査記録が不足している、という 3 点がセキュリティ上の Should Fix として残っていた。いずれも設計方針書に反映済みで、ソースコードは変更していない。",
+  "findings": [
+    {
+      "id": "DR4-001",
+      "severity": "Should Fix",
+      "category": "input_validation",
+      "title": "gitignored V2 variant config の固定値検証 gate が不足",
+      "description": "`configs/_experiments/institutional_V2.yaml` は gitignored な手元生成 config であり、§3.4 は yq / python -c / 手編集で値を上書きする運用になっている。現状コードの `scripts/ingest_repo.py` / `scripts/build_indexes.py` / `scripts/run_baseline_eval.py` は config 値を信頼して処理するため、`repo.repo_id`、`repo.repo_path`、`repo.repo_commit`、`embedding.max_input_chars`、`reranker.model_id` 等の typo / tampering / 過大値を build/eval 前に止める明示的な設計が必要。特に `max_input_chars` の過大値は DoS 的なリソース消費、誤った `repo_id` / `repo_commit` は silent な比較不正確化につながる。",
+      "location": "設計方針書 §3.4 V2 build/eval 実行手順 / §6 セキュリティ設計",
+      "recommendation": "variant config 作成直後、ingest/build/eval の前に `load_config` + `validate_repo_id` + 固定値 assert による security validation step を追加する。期待値は `repo_id=institutional_documents_V2`、sentinel path/commit、`embedding.model_id=cl-nagoya/ruri-small-v2`、`max_input_chars=2048`、`batch_size=32`、`normalize=true`、chunking 800/100、reranker `cross-encoder/ms-marco-MiniLM-L-6-v2` とする。"
+    },
+    {
+      "id": "DR4-002",
+      "severity": "Should Fix",
+      "category": "secret_leak",
+      "title": "HF cache full path と raw traceback を Issue コメントへ貼る運用が log hygiene と衝突",
+      "description": "設計方針書 §3.1 は `fetch_ruri_files()` 成功時に `hf_hub_download` が返す local cache path を出力し、`verify_load()` 失敗時 traceback を Issue コメント貼付の根拠にするとしていた。local HF cache path は home directory / user name を含み得るほか、raw traceback や exception message には token、PAT、環境固有 path、HTTP error detail が混入する可能性がある。これは `docs/code_review_checklist.md` と `docs/troubleshooting.md` の log / secret hygiene と整合しない。",
+      "location": "設計方針書 §3.1 fetch_ruri_files / verify_load / §6 セキュリティ設計",
+      "recommendation": "成功 log は filename と file size のみにし、full cache path を出さない。失敗時 traceback は local 判別に留め、Issue コメントには exception type と sanitized summary のみを記録する方針を §3.1 / §6 / §9 に明記する。HF token / PAT / full cache path / raw traceback は Issue コメントに貼らない。"
+    },
+    {
+      "id": "DR4-003",
+      "severity": "Should Fix",
+      "category": "supply_chain",
+      "title": "`huggingface_hub` direct dependency 追加時の resolver 監査記録が不足",
+      "description": "§3.2 は transitive conflict 回避のため `huggingface_hub` を unpinned で追加する設計になっており、この判断自体は既存 `transformers` / `sentence-transformers` との整合上妥当。一方、unpin の場合は pip resolver が選んだ実バージョンと transitive conflict の有無を受入証跡として残さないと、CI/install 差分や resolver drift の原因分析が難しくなる。Stage 3 でも weekly_eval の install step へ限定的に波及することが確認されている。",
+      "location": "設計方針書 §3.2 requirements.txt の依存追加 / §6 セキュリティ設計 / §7 品質基準",
+      "recommendation": "pin は行わない方針を維持しつつ、Task 0 の受入条件に `python -m pip check` と `python -m pip show huggingface_hub transformers sentence-transformers` の実行・resolved version 記録を追加する。"
+    }
+  ],
+  "must_fix_count": 0,
+  "should_fix_count": 3,
+  "nice_to_have_count": 0,
+  "overall_assessment": "approve_with_changes"
+}

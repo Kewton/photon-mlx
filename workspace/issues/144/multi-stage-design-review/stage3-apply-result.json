@@ -1,0 +1,27 @@
+{
+  "stage": 3,
+  "stage_name": "指摘事項対応 (Stage 3 影響分析)",
+  "applier": "codex",
+  "summary": "Stage 3 影響分析の Should Fix 3 件を設計方針書へ反映した。V2 ingest/build/eval が生成する artifact を `data/indexes/institutional_documents_V2/` ディレクトリ単位と run/session logs まで拡張して明記し、weekly_eval への波及を workflow logic 不変 + install step 限定影響として正確化した。さらに Option B 採用時の `.gitignore` 条件付き変更を §5.1 と §9 に追加した。",
+  "applied_findings": [
+    {
+      "id": "DR3-001",
+      "applied": true,
+      "method": "§5.1 の build artifact 行を `data/indexes/institutional_documents_V2/` に拡張し、`chunks.db`、`lexical.pkl`、embedding 内訳を明記。log artifact として `logs/bench_variant_*.jsonl` / `logs/sessions/session_eval-*.json` を追加し、§7 手動受入 (Task 2) と §9 Task 2 も同じ生成物に合わせて更新した。"
+    },
+    {
+      "id": "DR3-002",
+      "applied": true,
+      "method": "§5.3 の weekly_eval 行を、workflow file / eval 対象は不変だが `pip install -r requirements.txt` は `huggingface_hub` 追加後の依存解決を通る、という限定影響の表現に修正した。"
+    },
+    {
+      "id": "DR3-003",
+      "applied": true,
+      "method": "§5.1 変更対象ファイルに `.gitignore` (Option B 採用時のみ `.venv-ruri-*/` 追加) を追記し、§9 Task 0 にも同じ条件付き変更を追加した。"
+    }
+  ],
+  "deferred_findings": [],
+  "applied_count": 3,
+  "deferred_count": 0,
+  "design_policy_updated": true
+}

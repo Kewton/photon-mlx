@@ -1,0 +1,21 @@
+{
+  "stage": 2,
+  "stage_name": "指摘事項反映（1回目通常レビュー指摘）",
+  "applier": "claude-sonnet",
+  "summary": "Stage 1 review_result.json の Must Fix 1 件 + Should Fix 4 件 + Nice to Have 3 件、計 8 件をすべて Issue 本文に反映。GitHub Issue #144 を gh issue edit で更新済み。",
+  "applied_findings": [
+    {"id": "S1-001", "applied": true, "method": "Task 2 に「具体実行手順」セクション追加 (configs/_experiments/institutional_V2.yaml 再生成 + ingest_repo + build_indexes + run_baseline_eval の 4 step を CLI 引数込みで明記)。"},
+    {"id": "S1-002", "applied": true, "method": "Task 1 サンプルコードの RURI_MODELS を `['cl-nagoya/ruri-small-v2']` に縮小、コメントで「将来追加候補: cl-nagoya/ruri-base」を残す。"},
+    {"id": "S1-003", "applied": true, "method": "「実行順序とフォールバック分岐」セクションを新設し Step 1-3a/3b/3c の 5 分岐で Option A → load 検証 → 成功/Option B/Option C への分岐基準を明示。Option B 説明に専用 venv で隔離する旨を追記。"},
+    {"id": "S1-004", "applied": true, "method": "Task 2 に「V2 設定の固定パラメータ (V4 設定との比較整合性確保)」テーブルを追加 (8 パラメータ × 出典)。誤って V4 設定で V2 build するリスクを警告 blockquote で明記。"},
+    {"id": "S1-005", "applied": true, "method": "Task 1 サンプルコードに try/except (HfHubHTTPError, OSError)、download path の print、`verify_load()` 関数 (SentenceTransformer 単独 load の fail-fast 検証) を追加。"},
+    {"id": "S1-006", "applied": true, "method": "影響ファイルセクションに `configs/_experiments/institutional_V2.yaml (新規 — gitignored、commit 対象外)` を追記。`data/indexes/...`、`logs/...` も gitignored 注記を追加。"},
+    {"id": "S1-007", "applied": true, "method": "受入条件に「Task 3 (追加): configs/institutional_docs.yaml:84-87 のコメントを V2 計測値で更新」を追加。Task 3 本文にも config コメント更新の旨を記載。"},
+    {"id": "S1-008", "applied": true, "method": "セクション見出し「## 真因」→「## 推定真因 (実測ベースの仮説)」に変更、冒頭 blockquote で「再現マシンでの実測ベース、Option A 適用後 load 成功時に限り (1) cache 漏れ仮説が真因として確定する」と注記。各仮説項目に「(推定)」「(実測 traceback ベース)」等の修飾を追加。"}
+  ],
+  "applied_count": 8,
+  "deferred_count": 0,
+  "deferred_findings": [],
+  "github_issue_updated": true,
+  "github_issue_url": "https://github.com/Kewton/photon-mlx/issues/144"
+}
