@@ -1,0 +1,78 @@
+{
+  "stage": 1,
+  "applied_at": "2026-04-28",
+  "applier": "claude-opus",
+  "target_file": "workspace/design/issue-144-ruri-v2-build-design-policy.md",
+  "applied_findings": [
+    {
+      "id": "DR1-001",
+      "severity": "Must Fix",
+      "status": "applied",
+      "summary": "§3.1 に「関数の責務」節 (fetch_ruri_files / verify_load の責務・成功条件・失敗時動作・出力 log 形式) を新設し、関数 body の `...` の意味を明確化。",
+      "diff_location": "§3.1 scripts/_setup_ruri_models.py - 関数構成節の直下に新節を追加"
+    },
+    {
+      "id": "DR1-002",
+      "severity": "Should Fix",
+      "status": "applied",
+      "summary": "§3.1 設計判断表のエラーハンドリング行を 2 行に分割。`fetch_ruri_files()` (ImportError/HfHubHTTPError/OSError) と `verify_load()` (ValueError/OSError) の分離を明示。後者は §3.4 フォールバック表との連動を明記。",
+      "diff_location": "§3.1 設計判断表"
+    },
+    {
+      "id": "DR1-003",
+      "severity": "Must Fix",
+      "status": "applied",
+      "summary": "§3.4 Step 2 の手作業 Edit を yq コマンド (推奨) + python -c フォールバック + 手編集チェックリストの 3 段階に置換。override 対象 4 フィールド (embedding.model_id, max_input_chars, reranker.model_id, repo.repo_id) を漏れなく書き換える手順を明示。",
+      "diff_location": "§3.4 V2 build/eval 実行手順 - Step 2 ブロック"
+    },
+    {
+      "id": "DR1-004",
+      "severity": "Should Fix",
+      "status": "applied",
+      "summary": "§3.4 Step 6 に注記を追記し、`configs/institutional_docs.yaml:84-87` コメント更新が YAML コメントのみの変更で `embedding.model_id` 値を変更しないため `tests/test_pipeline_factory_yaml_invariants.py:84-107` の invariant test を破らないことを明示。§2.2 不変条件への相互参照を追加。",
+      "diff_location": "§3.4 V2 build/eval 実行手順 - Step 6 ブロック注記"
+    },
+    {
+      "id": "DR1-005",
+      "severity": "Should Fix",
+      "status": "applied",
+      "summary": "§3.4 Step 0 に「既存 venv が activate 済み」前提を明示する注釈を追加。Option B 採用時の venv 切替経路 (`.venv-ruri-v2`) との関係を明確化。",
+      "diff_location": "§3.4 V2 build/eval 実行手順 - Step 0 ブロック"
+    },
+    {
+      "id": "DR1-006",
+      "severity": "Should Fix",
+      "status": "applied",
+      "summary": "§9 完了条件の各 Task 行末に §5.1 行番号 / §3.x 設計節への相互参照を追加。レビュー時に Task → 影響範囲 → 設計詳細をワンクリックで辿れる形にした。",
+      "diff_location": "§9 完了条件"
+    },
+    {
+      "id": "DR1-007",
+      "severity": "Should Fix",
+      "status": "applied",
+      "summary": "§3.1 設計判断表の冪等性行を 2 行に分割。`fetch_ruri_files()` (hf_hub_download cache) と `verify_load()` (SentenceTransformer の HF cache 再利用) の冪等性を個別に明示。",
+      "diff_location": "§3.1 設計判断表"
+    }
+  ],
+  "deferred_findings": [
+    {
+      "id": "DR1-008",
+      "severity": "Nice to Have",
+      "reason": "現状維持で許容。将来 ruri-base 等が追加されれば再考。設計書本文には反映せず本 stage1-apply-result に記録のみ。"
+    },
+    {
+      "id": "DR1-009",
+      "severity": "Nice to Have",
+      "reason": "本 Issue は YAGNI のため共通 wrapper 化は実装しない。将来 Issue 起票判断は別途運用判断に委ねる。設計書本文には反映せず。"
+    },
+    {
+      "id": "DR1-010",
+      "severity": "Nice to Have",
+      "reason": "シンプルさ優先で本 Issue では `local_files_only` 制御は導入しない。将来オフライン要件が出たら再考。設計書本文には反映せず。"
+    }
+  ],
+  "summary": "Must Fix 2 件 (DR1-001, DR1-003) と Should Fix 5 件 (DR1-002, DR1-004, DR1-005, DR1-006, DR1-007) を全件設計方針書に反映完了。Nice to Have 3 件 (DR1-008, DR1-009, DR1-010) は本 Issue スコープ外として記録のみ実施し、設計書には反映せず。",
+  "applied_count": 7,
+  "deferred_count": 3,
+  "overall_status": "all_must_fix_and_should_fix_applied"
+}

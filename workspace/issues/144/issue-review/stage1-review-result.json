@@ -1,0 +1,84 @@
+{
+  "stage": 1,
+  "focus": "通常（1回目）",
+  "reviewer": "claude-opus",
+  "summary": "ワークアラウンドの方向性 (Option A: huggingface_hub 経由で spiece.model を事前 download) と path 命名規則は既存規約 (#137 work-plan / build_indexes.py の repo_id ベース idx_dir 規則 / aggregator 命名) と概ね整合する一方、(1) V2 build を再実行する具体手順が未記載 (configs/_experiments/institutional_V2.yaml が gitignored で再生成必須、--config / --repo-id 引数の与え方も不明)、(2) Task 1 の RURI_MODELS に ruri-base が含まれているが受入条件に ruri-base 計測の記載なくスコープ過大、(3) Option A 失敗時の fallback 戦略 (Option B のバージョン pin 範囲) が薄い、の 3 点が Must Fix / Should Fix 級。Path 規則は OK。",
+  "findings": [
+    {
+      "id": "S1-001",
+      "severity": "Must Fix",
+      "category": "不足情報",
+      "title": "V2 build を再実行する具体手順 (variant config / --config / --repo-id) が Issue 本文に記載なし",
+      "description": "現在 `configs/institutional_docs.yaml` は V4 (BAAI/bge-m3) で確定 pin されており (`tests/test_pipeline_factory_yaml_invariants.py:81-87` の INSTITUTIONAL_EMBEDDING_MODEL_ID = \"BAAI/bge-m3\" で保護)、本 config を ruri-small-v2 に書き換えると invariant test が壊れる。実際 #137 では V0-V4 を `configs/_experiments/institutional_V<N>.yaml` (gitignored — `.gitignore:configs/_experiments/`) として variant ごとにフルコピーし、`repo.repo_id=institutional_documents_V<N>` を切り替える運用 (workspace/issues/137/work-plan.md L46-51 参照)。V2 build を再実行するには (a) `configs/_experiments/institutional_V2.yaml` を再生成 (`institutional_docs.yaml` から full copy + `embedding.model_id=cl-nagoya/ruri-small-v2` + `repo.repo_id=institutional_documents_V2` + `max_input_chars=2048` + `reranker.model_id=cross-encoder/ms-marco-MiniLM-L-6-v2` + `chunking.max_chars=800` などの override) が必要だが Issue 本文には一切記載なし。",
+      "location": "Issue 本文 ## 変更内容 (案) Task 2 「V2 build を再試行 + eval」",
+      "recommendation": "Task 2 に以下を明記する: (1) `configs/_experiments/institutional_V2.yaml` を `configs/institutional_docs.yaml` から full copy し、`embedding.model_id=cl-nagoya/ruri-small-v2` / `repo.repo_id=institutional_documents_V2` / `embedding.max_input_chars=2048` / `reranker.model_id=cross-encoder/ms-marco-MiniLM-L-6-v2` を上書き (#137 work-plan L46-51 と同形式)。(2) ingest 再実行が必要 (`scripts/ingest_repo.py --config configs/_experiments/institutional_V2.yaml --repo-id institutional_documents_V2`)。(3) `python scripts/build_indexes.py --config configs/_experiments/institutional_V2.yaml --repo-id institutional_documents_V2`。(4) `python scripts/run_baseline_eval.py --config configs/_experiments/institutional_V2.yaml --repo-id institutional_documents_V2 --eval-set data/eval_sets/institutional_static_eval.jsonl --output logs/institutional_V2_$(date +%Y%m%d_%H%M%S).jsonl`。"
+    },
+    {
+      "id": "S1-002",
+      "severity": "Should Fix",
+      "category": "スコープ",
+      "title": "Task 1 の `RURI_MODELS` に `cl-nagoya/ruri-base` を含める必要性が受入条件と整合しない",
+      "description": "Issue 受入条件は ruri-small-v2 (V2) 単体補完であり、ruri-base は #137 5-variant にも含まれない (`reports/institutional_retrieval_ab.md:14-19` 比較表参照)。本 Issue で ruri-base を fix する受入条件もない。にも関わらず Task 1 のサンプルコードで `RURI_MODELS = ['cl-nagoya/ruri-small-v2', 'cl-nagoya/ruri-base']` と 2 モデル分 download する設計になっている。ruri-base は `cl-nagoya/ruri-base` も同じ問題を抱える点で「検証用副次情報」 (Issue 内 `# ruri-base (同じ vendor) も同じ問題` 検証コマンド) として記載されているのみで、本 Issue のゴール「V2 を fix し 5-variant 比較を完成させる」には不要。仮説検証 H4 の申し送りでも同点が指摘されている。",
+      "location": "Issue 本文 ## 変更内容 (案) Task 1 `RURI_MODELS = ['cl-nagoya/ruri-small-v2', 'cl-nagoya/ruri-base']`",
+      "recommendation": "Task 1 のサンプルコードを `RURI_MODELS = ['cl-nagoya/ruri-small-v2']` に縮小する。ruri-base 対応を将来 (例: #135 PHOTON 再学習で ruri-base を training tokenizer 候補にする場合) 追加する余地を残すなら、コメントで「将来追加候補: 'cl-nagoya/ruri-base' (Issue 関連事項に記載済み、必要時 list 拡張)」と書く。あるいは、`RURI_MODELS` を CLI 引数化して default を `['cl-nagoya/ruri-small-v2']` とする設計に変更する。"
+    },
+    {
+      "id": "S1-003",
+      "severity": "Should Fix",
+      "category": "正確性",
+      "title": "Option A 失敗時の fallback 戦略 (Option B のバージョン範囲・副作用) が薄い",
+      "description": "ワークアラウンド Option B `pip install \"transformers<5.0\" \"sentence-transformers<5.0\"` は副作用が大きい (V0/V1/V3/V4 は既に sentence-transformers 5.4.0 で計測完了済み; ダウングレードすると再計測必要 + 互換性 regression リスク)。`requirements.txt` でも sentence-transformers / transformers のバージョンは pin されておらず (現状 unpinned)、ダウングレード後の挙動再現性も不明。さらに「真因が cache 漏れではなく互換性問題」だった場合 Option A 単独で fail するため、判別手順 (Option A 後の AutoTokenizer 単独 load 試行など) を Issue に明記すべき。仮説検証 H1/H2/H3 はいずれも Unverifiable で、ワークアラウンド成功時の挙動でしか真因を判別できないため、判別フローと fallback の分岐基準を Issue で固定する必要がある。",
+      "location": "Issue 本文 ## ワークアラウンド (簡単な fix) Option A/B/C",
+      "recommendation": "ワークアラウンドセクションに「実行順序とフォールバック分岐」を追加: (1) Option A 実行 → (2) `python -c \"from sentence_transformers import SentenceTransformer; SentenceTransformer('cl-nagoya/ruri-small-v2')\"` で load 成功確認 → (3) 成功なら build/eval へ進む / 失敗なら traceback を取得し、tokenizer 関連 (Couldn't instantiate the backend tokenizer) なら Option B (transformers/sentence-transformers の旧版インストール) に分岐 / それ以外なら Option C (上流 issue 報告) を選択。Option B 採用時は **専用 venv で隔離する** ことを明記 (V0/V1/V3/V4 等の既存計測環境を壊さないため)。"
+    },
+    {
+      "id": "S1-004",
+      "severity": "Should Fix",
+      "category": "不足情報",
+      "title": "V2 計測時の固定パラメータ (chunker max_chars=800、reranker、max_input_chars=2048) の制約が記載されていない",
+      "description": "V2 vs V4 比較が「主目的」と Issue ゴール部に書かれているが、`reports/institutional_retrieval_ab.md:17` の V2 行は `cl-nagoya/ruri-small-v2 + cross-encoder/ms-marco-MiniLM-L-6-v2 + max_input_chars=2048` の組合せで設計されている。この前提を変えると過去の V0/V1/V3/V4 と直接比較できないため、V2 再計測時にも同じ固定値を維持する必要がある (chunker.max_chars=800、reranker=ms-marco、max_input_chars=2048)。本 Issue にはこの制約が明示されておらず、運用者が誤って `institutional_docs.yaml` (現 V4 設定) ベースで V2 を build (max_input_chars=8192 + bge-reranker-v2-m3) してしまう可能性がある — その結果は『V2 ruri × V4 component』のキメラ比較となり報告に使えない。",
+      "location": "Issue 本文 ## 変更内容 (案) Task 2",
+      "recommendation": "Task 2 に「V2 設定の固定パラメータ」blockquote を追加: `chunking.max_chars=800` / `chunking.overlap_chars=100` / `embedding.max_input_chars=2048` / `embedding.batch_size=32 (要確認)` / `reranker.model_id=cross-encoder/ms-marco-MiniLM-L-6-v2`。参照: `reports/institutional_retrieval_ab.md:17` の V2 行。"
+    },
+    {
+      "id": "S1-005",
+      "severity": "Should Fix",
+      "category": "実装可能性",
+      "title": "Task 1 のサンプルコードに最小限のエラーハンドリング/冪等性が欠ける",
+      "description": "サンプルコードはエラーハンドリングなし (`hf_hub_download(model_id, filename)` がネットワーク不通や private model gating で fail した場合も握り潰される構造)。さらにファイルが既に cache 済みの場合の冪等性挙動 (huggingface_hub は再 download せずに cache path を返すが、log には差分が出る) や、download 結果 path の return / log 出力が不十分。ただし huggingface_hub の `hf_hub_download` 自体は冪等 (cache hit 時は network 不要) なので機能としては動作する。",
+      "location": "Issue 本文 ## 変更内容 (案) Task 1 サンプルコード",
+      "recommendation": "サンプルコードに以下を追加: (1) `try/except` で `huggingface_hub.errors.HfHubHTTPError` / `OSError` をキャッチし、network 不通時に分かりやすいメッセージで raise。(2) download 結果 path を print (`print(f'Fetched {filename} for {model_id} -> {path}')`)。(3) スクリプト末尾に `python -c \"from sentence_transformers import SentenceTransformer; SentenceTransformer('cl-nagoya/ruri-small-v2')\"` 相当の load 検証 step を組み込み、setup 成功を fail-fast で検知する (実装は別関数化推奨)。"
+    },
+    {
+      "id": "S1-006",
+      "severity": "Nice to Have",
+      "category": "整合性",
+      "title": "影響ファイル `data/indexes/institutional_documents_V2/embedding/` は既存 path 規則と整合している (情報共有)",
+      "description": "Path 整合性確認: `scripts/build_indexes.py:39` が `idx_dir = Path(cfg.paths.data_root) / \"indexes\" / args.repo_id` を使用し、`#137 work-plan.md:49` に「V2: repo.repo_id=institutional_documents_V2」と記載されているため、V2 yaml の repo.repo_id を切り替えた場合の build 結果は `data/indexes/institutional_documents_V2/embedding/` となり Issue 記載と一致する。また `logs/institutional_V2_*.jsonl` も `#137 work-plan.md:55` の慣例 `logs/institutional_V<N>_$(date +%Y%m%d_%H%M%S).jsonl` と整合する (wildcard ですべて captured)。本項は finding ではなく確認結果の共有。",
+      "location": "Issue 本文 ## 影響ファイル",
+      "recommendation": "Path 整合性は問題なし。Issue 本文の影響ファイルセクションに `configs/_experiments/institutional_V2.yaml (新規 — gitignored、commit 対象外)` を追記し、運用者が変更対象を完全に把握できるようにする (現状この行が抜けているため設計レビューで誤認の可能性)。"
+    },
+    {
+      "id": "S1-007",
+      "severity": "Nice to Have",
+      "category": "正確性",
+      "title": "`configs/institutional_docs.yaml:84` のコメント「V2 ruri 計測不能」を更新する受入項目がない",
+      "description": "本 Issue が完了して V2 計測が成功した場合、`configs/institutional_docs.yaml:84-85` のコメント `# #137 Phase B: 5-variant A/B (V0 e5-small, V1 e5-base, V2 ruri 計測不能, V3 bge-reranker swap, V4 bge-m3) で V4 採用` も更新が必要 (例: 「V2 ruri 計測不能」→「V2 ruri-small-v2 NC X.XX%」)。これは Task 3 で実施される暗黙の更新だが、受入条件には明記されていない。",
+      "location": "Issue 本文 ## 受入条件",
+      "recommendation": "受入条件に「Task 3 の補正に加えて `configs/institutional_docs.yaml:84-87` のコメントを V2 計測値で更新 (V2 採否判断後)」を追加。あるいは Task 3 の受入条件を「report 更新 + config コメント更新」に拡張。"
+    },
+    {
+      "id": "S1-008",
+      "severity": "Nice to Have",
+      "category": "正確性",
+      "title": "「真因」表現がコードベース照合では Unverifiable (仮説検証 H1/H2/H3 申し送り)",
+      "description": "Issue 本文 ## 真因 セクションは「ruri-small-v2 リポジトリには spiece.model がない」「sentence-transformers 5.4.0 の自動 fetch ロジック制約」「AutoProcessor fallback 失敗」と断定形で記述されているが、仮説検証 (H1/H2/H3) でいずれも Unverifiable 判定。コードベース照合だけでは真因確定不能のため、Issue 本文の表現を「真因 (ユーザー実測ベースの仮説)」または「現象 + 推定原因」とし、実測 evidence への参照 (find ~/.cache/... の出力 traceback など) を明示する方が誤解を避けられる。",
+      "location": "Issue 本文 ## 真因 (1-3 項目)",
+      "recommendation": "セクション見出しを「## 推定真因 (実測ベースの仮説)」に変更、または冒頭に「以下の根拠は再現マシン (M3 Ultra, sentence-transformers 5.4.0) での実測。Option A 適用後に load が成功した場合に限り (1) cache 漏れ仮説が確定する」と注記を追加する。"
+    }
+  ],
+  "must_fix_count": 1,
+  "should_fix_count": 4,
+  "nice_to_have_count": 3,
+  "overall_assessment": "approve_with_changes"
+}

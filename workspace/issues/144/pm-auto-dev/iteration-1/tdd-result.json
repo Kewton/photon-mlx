@@ -1,0 +1,58 @@
+{
+  "iteration": 1,
+  "implementer": "claude-opus",
+  "status": "success",
+  "summary": "Issue #144 Phase 1 (Task 1.1 + Task 1.2) を完了。requirements.txt に huggingface_hub をコメント付きで追加 (2 行) し、scripts/_setup_ruri_models.py を設計方針書 §3.1 に厳密準拠して新規作成 (71 行)。fetch_ruri_files() / verify_load() / __main__ 構成、RURI_MODELS/RURI_FILES は tuple で hard-coded (CLI 引数化なし、least-privilege)。Log は filename + size のみで HF cache full path を出さない sanitized 出力 (DR4-002)。Lint/Format/invariant tests 全 PASS、import smoke test も PASS。",
+  "files_changed": [
+    {
+      "path": "requirements.txt",
+      "change": "modified",
+      "diff_summary": "transformers 直下に '# HF Hub direct file access (Issue #144: spiece.model 個別 download 用)' コメントと 'huggingface_hub' (バージョン pin なし) を追加 (空行込みで実 diff 3 行 = コメント1 + 値1 + 末尾空行1)。lexical/data/serving グルーピングは不変。"
+    },
+    {
+      "path": "scripts/_setup_ruri_models.py",
+      "change": "added",
+      "lines": 71,
+      "summary": "fetch_ruri_files() (HfHubHTTPError/OSError fail-fast raise、log は filename + size のみ) + verify_load() (SentenceTransformer 単独 load を lazy import で検証、例外 catch せず raise) + __main__ (両者順次実行)。huggingface_hub の ImportError は親切メッセージで raise from e。sentence_transformers は verify_load() 内 lazy import (制約準拠)。"
+    }
+  ],
+  "tasks": [
+    {
+      "id": "Task 1.1",
+      "status": "completed",
+      "verification": "git diff で 3 行追加 (コメント1 + 値1 + 末尾空行調整) のみ。transformers 直下に挿入、グルーピング維持。pip install 自体は本フェーズで未実行 (環境では huggingface_hub が既に解決済み = import 成功で確認)。"
+    },
+    {
+      "id": "Task 1.2",
+      "status": "completed",
+      "verification": "scripts/_setup_ruri_models.py 新規作成 (71 行)。設計方針書 §3.1 骨子に厳密準拠 (RURI_MODELS/RURI_FILES tuple、fetch_ruri_files/verify_load 関数構成、ImportError 親切メッセージ、log sanitized)。ruff check / ruff format --check ともに PASS。importlib 経由の smoke test で RURI_MODELS/RURI_FILES が正しく load されることを確認。"
+    }
+  ],
+  "test_results": {
+    "ruff_check": "PASS",
+    "ruff_format_check": "PASS",
+    "ruff_check_project_wide": "PASS (All checks passed)",
+    "ruff_format_check_project_wide": "PRE_EXISTING_DIFF_ONLY (baseline_reporag/photon_pipeline.py と scripts/train_photon.py に既存差分。本 task の対象外ファイル、diff 検証で本 task 由来でないことを確認)",
+    "pytest_invariants": "PASS (8/8: tests/test_no_scaffolding_in_prod.py + tests/test_pipeline_factory_yaml_invariants.py)",
+    "import_smoke_test": "PASS (importlib.util 経由で _setup_ruri_models を load、RURI_MODELS=('cl-nagoya/ruri-small-v2',) と RURI_FILES=('spiece.model',) を確認)"
+  },
+  "constraints_check": {
+    "only_target_files_modified": "PASS (git status で requirements.txt 修正 + scripts/_setup_ruri_models.py 新規のみ。他のソースは未変更)",
+    "ruff_warnings_zero": "PASS (ruff check . で All checks passed)",
+    "existing_pytest_intact": "PASS (invariant tests 全 PASS、scaffolding test も PASS)",
+    "lazy_import_constraint": "PASS (sentence_transformers は verify_load() 内 lazy import、huggingface_hub のみトップレベル try/except)",
+    "scaffolding_naming": "N/A (scripts/ は PROD_ROOTS 対象外、Issue #139 設計判断)"
+  },
+  "next_steps": [
+    "Phase 2.5 Codex code review (workspace/design/issue-144-ruri-v2-build-design-policy.md §3.1 準拠の確認)",
+    "Phase 3 acceptance test (verify_load() の手動実行 + sanitized log を Issue #144 コメント記録)",
+    "Phase 4 (運用): Task 2.1-2.5 の variant config + V2 ingest/build/eval (本 TDD フェーズ対象外、手動運用)",
+    "Phase 5 (運用): Task 3.1 reports/institutional_retrieval_ab.md V2 行更新 + Task 3.2 configs/institutional_docs.yaml:84-87 コメント更新"
+  ],
+  "notes": [
+    "build/eval (Task 2.3-2.5) と report 更新 (Task 3.1-3.2) は work-plan.md / tdd-context.json scope_note に従い本フェーズで未実行。",
+    "huggingface_hub のバージョン pin は設計方針書 §3.2 / 設計判断 #3 に従い未指定 (transitive 依存と range 衝突回避)。",
+    "DR4-002 (log hygiene): 成功 log は filename + size のみ、失敗時 stderr も exception type のみで raw traceback / cache path を貼らない方針を docstring と print 文に反映済。",
+    "プロジェクト全体の ruff format --check は baseline_reporag/photon_pipeline.py と scripts/train_photon.py の 2 件で既存差分あり (本 task 対象外、git diff でも本 task 由来でないことを確認)。"
+  ]
+}

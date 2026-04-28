@@ -1,0 +1,39 @@
+{
+  "stage": 3,
+  "focus": "影響範囲",
+  "reviewer": "codex",
+  "summary": "設計方針書は Stage 1-2 反映後、主要な実装方針と既存コードの不変条件に概ね整合している。`baseline_reporag/` は既存の `SentenceTransformer(model_id)` 経路をそのまま使い、`photon_mlx/` と `torch_ref/` には直接影響しない。`scripts/` は `tests/test_no_scaffolding_in_prod.py` の PROD_ROOTS 対象外であり、targeted test (`tests/test_pipeline_factory_yaml_invariants.py` + `tests/test_no_scaffolding_in_prod.py`) は 8 passed。CI は weekly_eval の workflow file と eval 対象 (`configs/baseline.yaml`) は不変だが、`requirements.txt` 追加により install step の依存解決には限定的に波及する。silent change 確認では feature/issue-144 は origin/develop より #116 docs/workspace 更新分だけ古く、Issue #144 対象コード・config・report への直接競合は見当たらない。一方で影響範囲表が生成 artifact と CI install step の波及を過小記載していたため、Should Fix 3 件として設計方針書へ反映した。",
+  "findings": [
+    {
+      "id": "DR3-001",
+      "severity": "Should Fix",
+      "category": "既存build結果",
+      "title": "V2 build/eval の生成 artifact が `embedding/` と predictions JSONL だけに過小記載されている",
+      "description": "設計方針書 §5.1 は build 結果を `data/indexes/institutional_documents_V2/embedding/`、eval 結果を `logs/institutional_V2_*.jsonl` としている。しかし現行 `scripts/ingest_repo.py` / `scripts/build_indexes.py` / `scripts/run_baseline_eval.py` の実装では、V2 ingest/build は `data/indexes/institutional_documents_V2/chunks.db`、`lexical.pkl`、`embedding/{embeddings.npy,chunk_ids.json,model_id.txt,max_input_chars.txt}` を生成し、eval は明示 predictions に加えて pipeline の `RunLogger` による `logs/bench_variant_*.jsonl` と `SessionManager` による `logs/sessions/session_eval-*.json` も生成し得る。これらはいずれも gitignored だが、影響範囲表が狭いと既存 build/eval 結果への波及確認や cleanup 判断を誤る。",
+      "location": "§5.1 変更対象ファイル / §7 品質基準 / scripts/ingest_repo.py / scripts/build_indexes.py / scripts/run_baseline_eval.py / baseline_reporag/pipeline_factory.py",
+      "recommendation": "§5.1 の index 影響を `data/indexes/institutional_documents_V2/` ディレクトリ単位に拡張し、`chunks.db`、`lexical.pkl`、embedding 内訳を明記する。log 影響にも predictions JSONL に加えて `logs/bench_variant_*.jsonl` と `logs/sessions/session_eval-*.json` を追記し、§7 の Task 2 受入基準も同じ artifact set に合わせる。"
+    },
+    {
+      "id": "DR3-002",
+      "severity": "Should Fix",
+      "category": "CI/CD",
+      "title": "weekly_eval は job logic 不変だが `requirements.txt` 追加により install step には波及する",
+      "description": "設計方針書 §5.3 は `.github/workflows/weekly_eval.yml` を「本 Issue 影響なし」としている。一方、weekly_eval は line 18-19 で `pip install -r requirements.txt` を実行するため、`huggingface_hub` を直接依存として追加すると CI install step の pip resolver には波及する。`huggingface_hub` は既に `transformers` / `sentence-transformers` の transitive 依存であるため実質的な追加コストは小さいが、workflow file と eval 対象が不変であることと、install step が追加 direct dependency を解決することは分けて記載すべき。",
+      "location": "§5.3 不変対象 / .github/workflows/weekly_eval.yml:18-19 / requirements.txt",
+      "recommendation": "§5.3 の weekly_eval 行を「workflow file / eval 対象は不変。ただし install step は `huggingface_hub` 追加後の依存解決を通るため、CI 影響は install step の直接依存 1 件追加に限定」と書き換える。"
+    },
+    {
+      "id": "DR3-003",
+      "severity": "Should Fix",
+      "category": "後方互換性",
+      "title": "Option B の `.gitignore` 条件付き変更が §5.1 変更対象から漏れている",
+      "description": "設計方針書 §3.4 Option B fallback と §8 リスク表では、`.venv-ruri-v2` の誤 commit を防ぐため `.gitignore` に `.venv-ruri-*/` を追加する方針が書かれている。しかし §5.1 変更対象ファイルと §9 Task 0 には `.gitignore` が含まれておらず、影響範囲を §5 だけで確認するレビュアーが Option B 採用時の条件付き変更を見落とす可能性がある。既存 V0/V1/V3/V4 計測環境を壊さないための venv 隔離方針自体は適切だが、worktree 衛生の変更対象として明示すべき。",
+      "location": "§3.4 Option B fallback / §5.1 変更対象ファイル / §8 リスクと緩和策 / §9 完了条件",
+      "recommendation": "§5.1 に `.gitignore` を条件付き更新として追加し、§9 Task 0 に「Option B 採用時のみ `.gitignore` に `.venv-ruri-*/` を追加」を追記する。"
+    }
+  ],
+  "must_fix_count": 0,
+  "should_fix_count": 3,
+  "nice_to_have_count": 0,
+  "overall_assessment": "approve_with_changes"
+}
