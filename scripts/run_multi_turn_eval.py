@@ -21,6 +21,11 @@ from baseline_reporag.citation import is_refusal_answer
 from baseline_reporag.config import load_config
 from baseline_reporag.contracts import QueryResult
 
+# Issue #143 / Step 3: eval scripts resolve ``cfg.run.seed`` /
+# ``cfg.run.deterministic`` and forward the resolved seed into
+# ``pipeline.query`` so MLX-LM sampling is deterministic across runs.
+from baseline_reporag.eval.run_config import resolve_eval_seed
+
 # CB-004 (codex-fix): lightweight factory import — baseline-only envs no
 # longer have to install MLX to run multi-turn evaluation.
 from baseline_reporag.pipeline_factory import build_pipeline
@@ -140,6 +145,12 @@ def main() -> None:
     # for the requested repo, leaving retrieval empty. Surfaced when the
     # #154 cross-repo filter started dropping mismatched chunks.
     cfg.repo.repo_id = repo_id
+
+    # Issue #143 / Step 3: resolve the eval seed once per run.  The
+    # resolver fails fast on malformed ``cfg.run`` blocks (YAML bool /
+    # str / out-of-range int).
+    seed = resolve_eval_seed(cfg)
+
     run_id = f"mt_eval_{repo_id}_{time.strftime('%Y%m%d_%H%M%S')}"
 
     # Stage 3 DR3-001: route via build_pipeline so PHOTON / baseline
@@ -191,6 +202,7 @@ def main() -> None:
                     question=turn["question"],
                     session_id=f"eval-{sid}",
                     repo_id=repo_id,
+                    seed=seed,
                 )
                 pred = build_prediction_record(
                     session_id=sid,

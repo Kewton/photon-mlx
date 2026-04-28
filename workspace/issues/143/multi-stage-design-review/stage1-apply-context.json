@@ -1,0 +1,8 @@
+{
+  "issue_number": "143",
+  "stage": 1,
+  "stage_name": "通常レビュー反映",
+  "review_result_path": "workspace/issues/143/multi-stage-design-review/stage1-review-result.json",
+  "design_doc_path": "workspace/design/issue-143-eval-reproducibility-design-policy.md",
+  "output_path": "workspace/issues/143/multi-stage-design-review/stage1-apply-result.json"
+}

@@ -1,0 +1,14 @@
+{
+  "issue_number": "143",
+  "iteration": 1,
+  "branch": "feature/issue-143-eval-reproducibility",
+  "scope": "Step 1-7 (Phase 1 implementation only). Step 8-9 (manual ablation/noise floor) and Step 10-11 (docs/PR) are deferred.",
+  "design_doc_path": "workspace/design/issue-143-eval-reproducibility-design-policy.md",
+  "work_plan_path": "workspace/issues/143/work-plan.md",
+  "issue_review_summary": "workspace/issues/143/issue-review/summary-report.md",
+  "design_review_summary": "workspace/issues/143/multi-stage-design-review/summary-report.md",
+  "output_path": "workspace/issues/143/pm-auto-dev/iteration-1/tdd-result.json",
+  "merge_dependency": "Issue #156 must be merged before Step 5-6. We will check #156 status before Step 5; if still open, stop after Step 4 and report.",
+  "estimated_loc": 655,
+  "approach": "TDD red->green->refactor per Step. Run pytest after each Step. Stop on first hard failure and report."
+}

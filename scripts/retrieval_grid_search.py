@@ -130,11 +130,17 @@ def run_eval_inproc(
     *,
     config_idx: int,
     repo_id: str,
+    seed: int | None = None,
 ) -> list[dict[str, Any]]:
     """Run ``pipeline.query`` once per question, collect citation records.
 
     Each question uses ``session_id = f"grid-{config_idx}-{q['id']}"`` to
     keep session history from leaking across configs.
+
+    Issue #143 (DR3-001): ``seed`` is forwarded into every ``query``
+    call so the grid sweep observes the same Qwen sampling stream as
+    the production eval scripts.  Default ``None`` keeps the legacy
+    call shape used by ``test_retrieval_grid_search_smoke.py``.
     """
     records: list[dict[str, Any]] = []
     for q in questions:
@@ -142,6 +148,7 @@ def run_eval_inproc(
             question=q["question"],
             session_id=f"grid-{config_idx}-{q['id']}",
             repo_id=repo_id,
+            seed=seed,
         )
         latency_ms = float(getattr(result.latency, "total_ms", 0.0))
         memory_peak = float(getattr(result.memory, "peak_mb", 0.0))
@@ -241,6 +248,7 @@ def run_phase(
     phase_name: str,
     repo_id: str,
     stop_flag: dict[str, bool],
+    seed: int | None = None,
 ) -> list[ConfigResult]:
     """Execute one phase of the sweep, atomically persisting per-config state."""
     state: dict[str, Any]
@@ -299,7 +307,11 @@ def run_phase(
 
         try:
             records = run_eval_inproc(
-                pipeline, questions, config_idx=idx, repo_id=repo_id
+                pipeline,
+                questions,
+                config_idx=idx,
+                repo_id=repo_id,
+                seed=seed,
             )
         except KeyboardInterrupt:
             state["status"] = "interrupted"
@@ -380,8 +392,13 @@ def main(argv: list[str] | None = None) -> int:
 
     from baseline_reporag.config import load_config
 
+    # Issue #143 / Step 3 (DR3-001): grid sweep observes the same Qwen
+    # sampling stream as production eval scripts via ``cfg.run.seed``.
+    from baseline_reporag.eval.run_config import resolve_eval_seed
+
     base_cfg = load_config(config_path)
     repo_id = base_cfg.repo.repo_id
+    seed = resolve_eval_seed(base_cfg)
 
     phase1_grid = generate_phase1_grid()
     for params in phase1_grid:
@@ -423,6 +440,7 @@ def main(argv: list[str] | None = None) -> int:
                 phase_name="phase1",
                 repo_id=repo_id,
                 stop_flag=stop_flag,
+                seed=seed,
             )
             all_results.extend(phase1_results)
 
@@ -464,6 +482,7 @@ def main(argv: list[str] | None = None) -> int:
                         phase_name="phase2",
                         repo_id=repo_id,
                         stop_flag=stop_flag,
+                        seed=seed,
                     )
                     all_results.extend(phase2_results)
     except _InterruptedError:

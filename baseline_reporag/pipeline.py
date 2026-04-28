@@ -115,6 +115,8 @@ class RepoRAGPipeline:
         question: str,
         session_id: str = "",
         repo_id: str = "",
+        *,
+        seed: int | None = None,
     ) -> QueryResult:
         cfg = self.cfg
         prof = TurnProfiler()
@@ -204,7 +206,17 @@ class RepoRAGPipeline:
                 evidence_text=evidence_text,
                 history_text=session.history_text(max_turns=4),
             )
-            answer = self.generator.generate(messages)
+            # Issue #143: only forward ``seed`` when an eval explicitly
+            # asked for it.  Interactive/CLI/server callers leave it at
+            # ``None`` and we MUST keep the legacy single-positional-arg
+            # call shape so the 17+ existing MagicMock tests keep passing
+            # without spurious ``seed=None`` kwargs leaking through.
+            # DR3-002: ``if seed is not None`` (NOT ``if seed:``); seed=0
+            # is a valid deterministic seed and must propagate.
+            if seed is not None:
+                answer = self.generator.generate(messages, seed=seed)
+            else:
+                answer = self.generator.generate(messages)
 
         # --- Citation ---
         with prof.phase("citation"):

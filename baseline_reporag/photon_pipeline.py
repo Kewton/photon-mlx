@@ -418,7 +418,6 @@ def _build_photon_deps(cfg: Config) -> dict[str, Any]:
             "for production inference."
         )
 
-
     # Issue #64 / Codex CB-001: extract working memory policy once, pass it
     # into PhotonInference alongside the Issue #63 drift_level_weights below.
     working_memory_cfg = _extract_working_memory_cfg(cfg)
@@ -987,6 +986,7 @@ class PhotonRAGPipeline:
         inference_cfg: Any,
         followup_tokens: int | None,
         fallback_policy: str,
+        seed: int | None = None,
     ) -> tuple[str, str, str | None]:
         """Execute the PHOTON generation branch with fail-closed semantics.
 
@@ -1001,6 +1001,12 @@ class PhotonRAGPipeline:
           == "empty_output"``.
         - Security logging: warning message uses ``type(exc).__name__``
           only; the raw exception body is never logged (Stage 4 DR4-002).
+
+        Issue #143: when ``seed`` is provided, both Qwen fallback paths
+        propagate it into ``Generator.generate`` so eval scripts get a
+        reproducible Qwen output even when PHOTON falls back. Default
+        ``seed=None`` preserves the legacy single-positional call shape
+        used by every existing MagicMock test in this module.
         """
         from photon_mlx.inference import _TokenizerEncodeFailure
 
@@ -1027,9 +1033,16 @@ class PhotonRAGPipeline:
                 "PHOTON generation failed; falling back to Qwen (reason=%s)",
                 reason,
             )
-            qwen_answer = bl.generator.generate(
-                messages, max_new_tokens=followup_tokens
-            )
+            # Issue #143 / DR3-002: ``if seed is not None`` (NOT
+            # ``if seed:``) — seed=0 is a valid deterministic seed.
+            if seed is not None:
+                qwen_answer = bl.generator.generate(
+                    messages, max_new_tokens=followup_tokens, seed=seed
+                )
+            else:
+                qwen_answer = bl.generator.generate(
+                    messages, max_new_tokens=followup_tokens
+                )
             return qwen_answer, "qwen", reason
 
         # DR1-001: empty / whitespace-only output is fail-closed.
@@ -1040,9 +1053,14 @@ class PhotonRAGPipeline:
             )
             if fallback_policy == "abort":
                 raise RuntimeError("PHOTON generation failed and fallback policy=abort")
-            qwen_answer = bl.generator.generate(
-                messages, max_new_tokens=followup_tokens
-            )
+            if seed is not None:
+                qwen_answer = bl.generator.generate(
+                    messages, max_new_tokens=followup_tokens, seed=seed
+                )
+            else:
+                qwen_answer = bl.generator.generate(
+                    messages, max_new_tokens=followup_tokens
+                )
             return qwen_answer, "qwen", "empty_output"
 
         return photon_answer, "photon", None
@@ -1052,12 +1070,22 @@ class PhotonRAGPipeline:
         question: str,
         session_id: str = "",
         repo_id: str = "",
+        *,
+        seed: int | None = None,
     ) -> QueryResult:
         """Run PHOTON-enhanced query with drift tracking and evidence pruning.
 
         On follow-up turns (turn 2+), PHOTON coarse state is used to prune
         the evidence pack from max_chunks down to pruned_max_chunks, halving
         LLM prefill time while retaining the most session-relevant chunks.
+
+        Issue #143: ``seed`` (keyword-only, default ``None``) is forwarded
+        into every Qwen call site (Qwen-only path + 2 fallback paths) so
+        eval scripts can reproduce Qwen sampling. ``seed=None`` keeps
+        interactive callers unaffected (CLI / server / Streamlit) and
+        preserves the legacy single-positional Qwen call shape so the
+        17+ existing MagicMock tests in ``test_photon_pipeline.py`` keep
+        passing without TypeError.
         """
         cfg = self.cfg
         bl = self.baseline  # access baseline components without calling query()
@@ -1389,9 +1417,22 @@ class PhotonRAGPipeline:
                     inference_cfg=inference_cfg,
                     followup_tokens=followup_tokens,
                     fallback_policy=fallback_policy,
+                    seed=seed,
                 )
             else:
-                answer = bl.generator.generate(messages, max_new_tokens=followup_tokens)
+                # Issue #143 / DR3-002: ``if seed is not None`` (NOT
+                # ``if seed:``); seed=0 is a valid deterministic seed.
+                # Default ``seed=None`` keeps the legacy single-positional
+                # call shape for interactive callers + 17+ MagicMock
+                # tests.
+                if seed is not None:
+                    answer = bl.generator.generate(
+                        messages, max_new_tokens=followup_tokens, seed=seed
+                    )
+                else:
+                    answer = bl.generator.generate(
+                        messages, max_new_tokens=followup_tokens
+                    )
 
         # --- Citation ---
         with prof.phase("citation"):

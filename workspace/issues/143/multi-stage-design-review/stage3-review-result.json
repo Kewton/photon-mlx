@@ -1,0 +1,58 @@
+{
+  "stage": 3,
+  "focus": "影響範囲",
+  "reviewer": "codex",
+  "issue_number": "143",
+  "summary": "Stage 1/2 の主要指摘は概ね反映済み。ただし影響範囲レビューでは、pipeline.query を直接呼ぶ eval 系スクリプトの漏れ、seed=0 の truthy 判定、schema 互換の記述不足が残っていた。\nMust/Should 指摘は設計方針書に反映し、ソースコードは変更していない。",
+  "findings": [
+    {
+      "id": "DR3-001",
+      "severity": "Must Fix",
+      "category": "API影響",
+      "title": "pipeline.query(seed) の波及先から retrieval_grid_search/run_stress_eval が漏れている",
+      "description": "設計方針書 §2/§3/§10 は eval script の seed 伝播対象を run_baseline_eval.py、run_multi_turn_eval.py、compare_generators.py 中心に扱っていた。しかし実コードには pipeline.query を直接呼ぶ eval/benchmark script として retrieval_grid_search.py と run_stress_eval.py も存在する。これらが seed=None のままだと cfg.run.seed が source of truth にならず、生成依存の no-citation/latency metric が silent に揺れる。",
+      "evidence": "scripts/retrieval_grid_search.py:141-145 `result = pipeline.query(... repo_id=repo_id)` / scripts/run_stress_eval.py:132-136 `result = pipeline.query(... repo_id=repo_id)` / design §2 before Stage3 listed only run_baseline_eval.py, run_multi_turn_eval.py, compare_generators.py",
+      "suggested_fix": "§2/§3/§9/§10 に scripts/retrieval_grid_search.py と scripts/run_stress_eval.py を追加し、両方で resolve_eval_seed(cfg) の結果を pipeline.query(seed=seed) に渡す設計と対応テストを明記する。"
+    },
+    {
+      "id": "DR3-002",
+      "severity": "Must Fix",
+      "category": "silent_bug",
+      "title": "seed=0 が有効値なのに architecture 図が truthy 判定を示している",
+      "description": "設計方針書は seed の範囲を 0 <= seed < 2**32 として seed=0 を有効にしている一方、§2 の図は `if seed: mx.random.seed(seed)` と読める記述だった。実装者がこの通り実装すると seed=0 だけ RNG seed が設定されず、再現性の silent bug になる。",
+      "evidence": "workspace/design/issue-143-eval-reproducibility-design-policy.md:49 (Stage3反映前) `if seed: mx.random.seed(seed)` / 同doc:218,244 `0 <= seed < 2**32` / 同doc:455-460 は `if seed is not None` を正としている",
+      "suggested_fix": "§2 の architecture 図を `if seed is not None: mx.random.seed(seed)` に統一し、truthy 判定を使わない方針を崩さない。"
+    },
+    {
+      "id": "DR3-003",
+      "severity": "Must Fix",
+      "category": "後方互換",
+      "title": "predictions schema が §3 と ADR-5/§5/§12 で不一致、旧 JSONL 互換も未明示",
+      "description": "ADR-5 では追加 fields を run_index/run_seed の 2 種に絞り run_id を保持しない方針だが、§3 の run_baseline_eval.py 行には run_index/run_seed/run_id 出力が残っていた。また Step 5/6 分離では旧 predictions JSONL を壊さない loader 方針が必要だが、run_index/run_seed を REQUIRED_FIELDS に入れないこと、欠落時の扱いが明示されていなかった。",
+      "evidence": "workspace/design/issue-143-eval-reproducibility-design-policy.md:77 (Stage3反映前) `run_index/run_seed/run_id` / 同doc:305 `run_id は ... 別 field にしない` / scripts/aggregate_institutional_baseline.py:40-51 は REQUIRED_FIELDS で欠損を KeyError にする実装",
+      "suggested_fix": "§3 の schema 表記を run_index/run_seed の 2 fields に修正し、ADR-6/§5 に aggregator では run_index/run_seed を REQUIRED_FIELDS に含めず、欠落時は単一 run として正規化する後方互換方針を追加する。"
+    },
+    {
+      "id": "DR3-004",
+      "severity": "Should Fix",
+      "category": "依存関係",
+      "title": "Issue #156 との衝突点が aggregator REQUIRED_FIELDS に偏り、run_multi_turn_eval.py の出力 schema が明示不足",
+      "description": "設計方針書は #156 との merge order を固定しているが、衝突理由の説明が predictions JSONL/aggregator REQUIRED_FIELDS に寄っていた。実コードでは run_multi_turn_eval.py の pred dict が #156 の is_refusal 追加と #143 の run_index/run_seed 追加の直接衝突点になるため、Step 5/6 着手前の再確認対象に明記すべき。",
+      "evidence": "scripts/run_multi_turn_eval.py:101-112 `pred = { session_id, turn_id, question, answer, cited_chunk_ids, no_citation, ... }` / workspace/design/issue-143-eval-reproducibility-design-policy.md:611-613 (Stage3反映前) は REQUIRED_FIELDS/aggregator 中心の説明",
+      "suggested_fix": "§9 の #156 前提と §11 リスクに、run_multi_turn_eval.py の pred dict、predictions JSONL schema、aggregator REQUIRED_FIELDS が衝突点であることを明記する。"
+    },
+    {
+      "id": "DR3-005",
+      "severity": "Should Fix",
+      "category": "テスト影響",
+      "title": "Config 層の変更先が config.py と run_config.py で揺れている",
+      "description": "設計方針書 §3 は baseline_reporag/config.py に cfg.run.seed/run.deterministic 型検証を入れるように読めるが、ADR-2/Step 1 は新規 baseline_reporag/eval/run_config.py の helper を source of truth としている。config.py を変更対象に残すと Step 1 の影響範囲とテスト対象がずれ、TypedConfig の permissive 性を壊す過剰実装を誘発する。",
+      "evidence": "workspace/design/issue-143-eval-reproducibility-design-policy.md:71 (Stage3反映前) `baseline_reporag/config.py ... 型検証` / 同doc:218 `resolve_eval_seed(cfg)` で型検証 / 同doc:655 Step 1 の影響ファイルは run_config.py と test_run_config.py",
+      "suggested_fix": "§3 の Config 行を変更なしに修正し、型/範囲 validation は baseline_reporag/eval/run_config.py の resolve_eval_seed(cfg) に集約する方針へ統一する。"
+    }
+  ],
+  "must_fix_count": 3,
+  "should_fix_count": 2,
+  "nice_to_have_count": 0,
+  "overall_assessment": "approve_with_changes"
+}
