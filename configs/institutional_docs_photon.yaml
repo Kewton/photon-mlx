@@ -195,9 +195,12 @@ model:
   #   - 採用判定エビデンス: reports/institutional_photon_mt_eval_v2_3k.md
   #     bug 検証レポート:    reports/institutional_photon_mt_eval_v2_3k_bug_check.md
   #
-  # PHOTON_CHECKPOINT_ROOT は本 worktree の checkpoints/ を指定 (新採用 ckpt は本 worktree 配下):
-  #   PHOTON_CHECKPOINT_ROOT=/Users/maenokota/share/work/github_kewton/photon-mlx-feature-issue-135-photon-retrain/checkpoints
-  # 旧 mulmoclaude step_000600 は develop worktree (.../photon-mlx-develop/checkpoints/) で温存。
+  # PHOTON_CHECKPOINT_ROOT は **develop worktree** の checkpoints/ を指す (#135 完了後に
+  # photon-mlx-feature-issue-135-photon-retrain から develop に移行済、worktree cleanup 耐性を確保):
+  #   PHOTON_CHECKPOINT_ROOT=/Users/maenokota/share/work/github_kewton/photon-mlx-develop/checkpoints
+  # 配備内容: photon_institutional_retrain_20260428/{step_003000, best}/ (各 ~1.4GB、計 2.8GB)
+  # 旧 mulmoclaude step_000600 (val_loss=1.6238) も同 develop checkpoints/ で温存。
+  # 詳細運用ガイド: docs/deployment.md「PHOTON Checkpoint Distribution」セクション。
   checkpoint_path: "photon_institutional_retrain_20260428/step_003000"
 
   # PHOTON-specific: 本 Issue baseline では参照されないが、#113 切替時のため継承値を保持。
