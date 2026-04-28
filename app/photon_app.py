@@ -403,13 +403,51 @@ def save():
 
 
 def _is_process_running(pid: int | None) -> bool:
+    """Return True only if pid corresponds to a *live* process.
+
+    ``os.kill(pid, 0)`` alone is not enough on macOS / Linux: a zombie
+    (defunct) process whose parent has not yet ``wait()``-ed for it still
+    exists in the process table and ``os.kill(pid, 0)`` returns success.
+    The Streamlit driver is the parent of the index/eval subprocesses, so
+    finished children remain zombies until Streamlit shuts down — which
+    keeps ``_sync_index_job`` stuck on ``running`` (observed twice with
+    Issue #170 / non-git ingest).
+
+    The fix: after the kill-0 probe we ask ``ps -o stat=`` for the state
+    code; any state starting with ``Z`` (e.g. ``Z+``) means the kernel
+    has reaped the process body and only the exit-status entry remains
+    — semantically equivalent to "not running" for our scheduler.
+    """
     if pid is None:
         return False
     try:
         os.kill(pid, 0)
-        return True
     except (OSError, ProcessLookupError):
         return False
+
+    # ``ps`` is part of POSIX and ships on every macOS / Linux box this
+    # Streamlit app runs on, so we don't add ``psutil`` just for this.
+    try:
+        result = subprocess.run(
+            ["ps", "-o", "stat=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        # ``ps`` itself failing should not flip a real running process to
+        # "dead"; preserve the legacy os.kill-only behaviour as a fallback.
+        return True
+
+    if result.returncode != 0:
+        # pid disappeared between os.kill and ps — definitely not running.
+        return False
+
+    state = result.stdout.strip()
+    if state.startswith("Z"):
+        return False
+    return True
 
 
 def _read_training_progress(log_file: str) -> dict[str, Any]:
