@@ -101,13 +101,13 @@ PHOTON の本領は **Turn 5-6 の長期文脈維持**。単発質問（Static, 
 | fallback recall | ≥ 0.80 | スクリプト化済・計測運用中 | ✅ |
 | テスト通過率 | 100% | 832/834（pre-existing 2 除外）| ✅ |
 
-### Phase 2（汎用化）— ❌ 未達
+### Phase 2（汎用化）— ✅ 達成（2026-04-28、#135 採用 / Issue #116 完了レポート）
 
 | 指標 | 基準 | 現状 | 判定 |
 |------|------|------|------|
-| 他 repo MT NC | < 15% | FastAPI のみで 7.8% | ❌ 未検証 |
-| 他 repo latency 改善 | baseline -20%+ | FastAPI のみで -34% | ❌ 未検証 |
-| FastAPI 改善の再現率 | 70%+ | 未計測 | ❌ |
+| 他 repo MT NC | < 15% | 制度文書 8.33% raw / 0.00% refusal-aware (#135 step_003000) | ✅ |
+| 他 repo latency 改善 | baseline -20%+ | 制度文書 -37.7% (12,092 ms vs baseline 19,426 ms、#135) | ✅ |
+| FastAPI 改善の再現率 | 70%+ | Indicator A: 100% / Indicator B: 110%（`reports/phase2_cross_domain_validation.md`） | ✅ |
 
 ### Phase 3（配布）— ❌ 未達
 
