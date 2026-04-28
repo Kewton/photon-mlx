@@ -95,12 +95,17 @@ def run_real(
     """
     from baseline_reporag.config import load_config
 
+    # Issue #143 / Step 3 (DR3-001): stress eval observes the same Qwen
+    # sampling stream as production eval scripts via ``cfg.run.seed``.
+    from baseline_reporag.eval.run_config import resolve_eval_seed
+
     # CB-004 (codex-fix): lightweight factory import — baseline-only envs
     # no longer need MLX installed to run the stress eval.
     from baseline_reporag.pipeline_factory import build_pipeline
 
     cfg = load_config(config_path)
     repo_id = cfg.repo.repo_id
+    seed = resolve_eval_seed(cfg)
     run_id = f"stress_eval_{repo_id}_{time.strftime('%Y%m%d_%H%M%S')}"
 
     pipeline = build_pipeline(cfg)
@@ -133,6 +138,7 @@ def run_real(
                     question=turn["question"],
                     session_id=f"stress-{sid}",
                     repo_id=repo_id,
+                    seed=seed,
                 )
                 elapsed_ms = (time.perf_counter() - t0) * 1000
 
