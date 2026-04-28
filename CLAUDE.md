@@ -165,7 +165,7 @@ reports/                # ベンチマークレポート
   - **Val_loss**: 0.4777 (-70.6% vs mulmoclaude 600-step 1.6238、perplexity 5.07 → 1.61)
   - 訓練データ: institutional_documents 4,228 docs + mulmoclaude train_multi (JP:0.7/EN:0.3)
   - エビデンス: `reports/institutional_photon_mt_eval_v2_3k_bug_check.md` (refusal-aware 検証)
-  - 計測 bug: `scripts/run_multi_turn_eval.py` の `is_refusal` 出力欠落は Issue #156 で別途対応
+  - 計測: `scripts/run_multi_turn_eval.py` は Issue #156 で `is_refusal` / `true_failure` を JSONL/summary に直接出力 (過去 logs は `scripts/regrade_eval_with_refusal.py` で再集計可能)
 - **過去メトリクス参考**:
   - Gate 2 v4 (#113 / mulmoclaude 600-step): Turn 5-6 NC 10.83%, follow-up p50 10,707 ms
   - Gate 2 v5 (#148 Phase A): institutional baseline 7.78% NC、PHOTON random-init bug 修正
