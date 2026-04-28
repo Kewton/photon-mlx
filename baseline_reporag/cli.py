@@ -8,6 +8,11 @@ Usage (single question):
 
 Usage (interactive):
     python -m baseline_reporag.cli --repo-id fastapi_fastapi
+
+Usage (PHOTON pipeline shortcut):
+    python -m baseline_reporag.cli --use-photon \
+        --repo-id fastapi_fastapi \
+        --question "..."
 """
 
 from __future__ import annotations
@@ -22,16 +27,43 @@ from .config import load_config
 # only when ``cfg.model.provider == "photon"``.
 from .pipeline_factory import build_pipeline
 
+# A-1 Phase 2: ``--use-photon`` のショートカットが指す PHOTON config。
+# baseline.yaml は PHOTON 専用フィールド (checkpoint_path, base_embed_dim 等)
+# を持たないため provider のみ override しても動かない。専用 config を使う。
+_PHOTON_DEFAULT_CONFIG = "configs/photon_small.yaml"
+_BASELINE_DEFAULT_CONFIG = "configs/baseline.yaml"
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Baseline RepoRAG CLI")
-    parser.add_argument("--config", default="configs/baseline.yaml")
+    parser.add_argument(
+        "--config",
+        default=None,
+        help=(
+            f"Config path (default: {_BASELINE_DEFAULT_CONFIG}; "
+            f"with --use-photon: {_PHOTON_DEFAULT_CONFIG})"
+        ),
+    )
+    parser.add_argument(
+        "--use-photon",
+        action="store_true",
+        help=(
+            "Shortcut to use the PHOTON pipeline. Equivalent to "
+            f"--config {_PHOTON_DEFAULT_CONFIG}. Cannot be combined with --config."
+        ),
+    )
     parser.add_argument("--repo-id", default="")
     parser.add_argument("--question", default="")
     parser.add_argument("--session-id", default="")
     args = parser.parse_args()
 
-    cfg = load_config(args.config)
+    if args.use_photon and args.config is not None:
+        parser.error("--use-photon cannot be combined with --config")
+    config_path = args.config or (
+        _PHOTON_DEFAULT_CONFIG if args.use_photon else _BASELINE_DEFAULT_CONFIG
+    )
+
+    cfg = load_config(config_path)
     repo_id = args.repo_id or cfg.repo.repo_id
 
     # Route via ``build_pipeline`` so ``model.provider`` (baseline vs
