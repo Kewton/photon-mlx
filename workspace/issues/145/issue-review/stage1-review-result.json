@@ -1,0 +1,102 @@
+{
+  "stage": 1,
+  "focus": "通常（1回目）",
+  "reviewer": "claude-opus",
+  "iteration": 1,
+  "findings": [
+    {
+      "id": "S1-001",
+      "severity": "Must Fix",
+      "category": "正確性",
+      "title": "依存ステータス記述が古い (#135 / #139 は既にマージ済み)",
+      "description": "Issue 本文「背景」「依存」セクションは Issue 起票日 2026-04-26 時点の状況 (\"#135 は feature ブランチ上のみ存在\" / \"現行 main の baseline_reporag/photon_pipeline.py には checkpoint_path 設定も load_checkpoint 呼び出しも存在しない\") を前提として書かれているが、2026-04-28 時点で #135 は main にマージ済 (commit 8c13517 / PR #157, 2026-04-28)、#139 も PR #147 で main にマージ済 (2026-04-27)。仮説検証 H2/H3 で Rejected が確定しており、Issue を読んだ実装者が現状を誤認するリスクがある (依存未解消だと誤読 → 着手保留判断につながる)。",
+      "current_text": "理由:\n- #139 Task 2 は #135 (S7-001 fix, commit `2dbf458` で導入された `model.checkpoint_path` 機構) を前提に設計されている\n- 2026-04-26 時点で #135 は `feature/issue-135-photon-retrain` 上のみ存在し main にマージされていない\n- 現行 main の `baseline_reporag/photon_pipeline.py` には `checkpoint_path` 設定も `load_checkpoint` 呼び出しも存在しない\n- 本 Issue 単独では着手不能なため、#135 マージ後の follow-up とする\n\n## 依存\n\n- **必須**: #135 (本格再学習 / S7-001 fix の checkpoint loading 機構) が main にマージされていること\n- 推奨: #139 (Task 1 + Task 3 / scaffolding audit + invariant test) が先行マージされていること",
+      "suggested_change": "「背景」を起票時点の経緯と現状ステータスに分離し、依存解消事実を追記する:\n\n## 背景\n#139 Stage 1 review (S1-001 / S1-002 / S1-008) で、当初 #139 Task 2 として含まれていた real-weight integration test を本 Issue に切り出した。Issue 起票時 (2026-04-26) は #135 が未マージであったため follow-up に分離したが、2026-04-28 時点で:\n- #135 は main にマージ済 (commit 8c13517 / PR #157)。`baseline_reporag/photon_pipeline.py:365-419` で `cfg.model.checkpoint_path` を resolve し `_load_photon_checkpoint` (line 626-633) → `photon_mlx.trainer.load_checkpoint` (trainer.py:80) で実 weight を読む経路が main 上に存在する\n- #139 (Task 1 + Task 3) も PR #147 で main にマージ済 (2026-04-27)\n\nしたがって本 Issue は **着手可能状態**。\n\n## 依存\n- 必須 (解消済): #135 main マージ — commit 8c13517\n- 推奨 (解消済): #139 main マージ — PR #147",
+      "rationale": "古い依存記述を残したまま実装に入ると、実装者が「依存未解消」と誤認して着手を保留したり、既存の checkpoint_path 機構を二重実装するリスクがある。仮説検証で Rejected が確定した H2/H3 を Issue 本文に反映するのは Stage 1 の必須対応。"
+    },
+    {
+      "id": "S1-002",
+      "severity": "Must Fix",
+      "category": "正確性",
+      "title": "受入条件 (3) が架空の API `pipeline.last_pruning_score_distribution` に依存",
+      "description": "候補方針 A/B のサンプルコードと受入条件 (3) で参照されている `pipeline.last_pruning_score_distribution.std()` は、実コードベース (`baseline_reporag/`, `photon_mlx/`) のいずれにも存在しない (grep -rn 'pruning_score' で 0 件、`last_pruning_score_distribution` で 0 件)。実在するのは `photon_mlx/inference.py:536` の `_score_prune_candidates` (private method, `(index, raw_score)` の list を返す) と line 29 の `weighted_hierarchical_score` のみ。pipeline 公開面に `last_pruning_score_distribution` のような stats 保持属性は無く、本受入条件のままでは実装不能。",
+      "current_text": "    assert pipeline.last_pruning_score_distribution.std() > 0.01  # random だと std ≈ 0\n...\n- [ ] random-init detector (例: pruning_score 分布の std > 閾値) で「checkpoint が読まれていない」ケースを検出可能であること",
+      "suggested_change": "受入条件 (3) の random-init detector を、実在する API に基づいた選択肢に書き換える:\n\n受入条件 (3) を以下のいずれか (Stage 3 影響範囲レビュー or 設計フェーズで 1 つ確定) に変更:\n  (a) checkpoint integrity hash 検証 — `photon_mlx/checkpoint.py` の `integrity.json` (DR4-003) が存在し、test 内で `_verify_integrity` 経由で SHA-256 一致を確認できること (構造的に \"checkpoint が読まれた\" を保証)\n  (b) weight identity 検証 — random-init `PhotonModel(cfg)` のパラメータと、checkpoint load 後のパラメータの L2 norm / sample tensor が異なることを assert (random seed 固定で実装可能)\n  (c) PHOTON_ALLOW_RANDOM_INIT bypass のネガティブテスト — checkpoint_path 未設定時に WARNING ログが出る + production-safe path では RuntimeError が出ることを assert (line 415-419 / 408-413 の挙動を pin する)\n  (d) `_score_prune_candidates` を private API として直接呼び、raw_score の std を比較する (private API 依存のリスクあり)\n\nサンプルコードからも `pipeline.last_pruning_score_distribution.std()` の行を削除し、(a)-(d) のいずれかを採用したコードに置換する。",
+      "rationale": "現状の受入条件 (3) は実装者が \"そのまま書いて assert\" を書こうとしても AttributeError になる。random-init bug 検出という Issue ゴール (#135 S7-001 retrospective) は実コードベース上の手段で達成可能であり、Issue 本文時点で実在 API への参照に修正する必要がある。仮説検証 H5 Rejected の必須反映。"
+    },
+    {
+      "id": "S1-003",
+      "severity": "Should Fix",
+      "category": "明確性",
+      "title": "「実用最小 checkpoint」 の取得手段が未確定 (候補方針 A の実装可能性ゲートが空欄)",
+      "description": "候補方針 A は `path_to_smallest_committed_or_downloadable_ckpt()` という placeholder 関数で checkpoint 取得を表現しているが、HF Hub / S3 / committed binary のどれを採るかが未決のまま。実 ckpt である `photon_institutional_retrain_20260428/step_003000/` は val_loss=0.4777 の本番 ckpt であり、サイズ的に repo にコミットするのは現実的でない (configs/institutional_docs_photon_retrain.yaml:194)。CI で download する場合は HF Hub allowlist (`_validate_repo_id`, photon_pipeline.py:340-342) を満たす公開先を用意する必要がある。",
+      "current_text": "### 候補方針 A: 既存最小 checkpoint を使用 (#135 マージ後の実 ckpt 利用)\n\n```python\n@pytest.mark.integration\n@pytest.mark.slow\ndef test_photon_pipeline_with_real_checkpoint(tmp_path):\n    \"\"\"E2E: 実 checkpoint + 実 tokenizer + 実 retrieval で query が走る\"\"\"\n    ckpt = path_to_smallest_committed_or_downloadable_ckpt()  # configs/photon_tiny.yaml 等\n...\nただし、(a) checkpoint 取得手段 (HF Hub / S3 / committed binary etc.) を別途確定する必要あり。",
+      "suggested_change": "候補方針 A は本 Issue では follow-up に明示的に外し、フォロー Issue 化する旨を「scope 外」セクションに記載する:\n\n## scope 外 (follow-up Issue 化)\n候補方針 A (実 checkpoint を CI で取得して E2E test を回す) は、(a) `photon_institutional_retrain_20260428/step_003000` のような production ckpt を取得する手段 (HF Hub upload / self-hosted runner キャッシュ / S3 mirror) の決定、(b) CI runtime budget (現在 weekly_eval は 180 分タイムアウト) の評価、(c) HF allowlist 整備 (`_validate_repo_id`) が必要。本 Issue 完了後の follow-up Issue (タイトル例: \"test(photon): real production checkpoint integration test\") に分離する。",
+      "rationale": "候補方針 A は本 Issue の \"scope を方針 B に絞る\" 提案 (本文末尾) と整合させる必要がある。曖昧な未決事項を Issue 本文に残すと実装者の判断負荷が高い。"
+    },
+    {
+      "id": "S1-004",
+      "severity": "Should Fix",
+      "category": "テスト戦略",
+      "title": "CI 実行戦略 (nightly vs blocking) の判断材料が不足",
+      "description": "受入条件 (4) で「PR を blocking しない nightly か、毎 PR で 60 秒以内完結なら blocking」を Issue 着手時に確定するとあるが、判断材料となる現行 CI 構成と実行時間ガイダンスが提示されていない。`.github/workflows/weekly_eval.yml` のみ存在し、毎 PR で走る blocking ジョブは PR-level workflow が repo に未定義。runs-on: self-hosted (M3 Ultra) であり MLX 依存のテストはローカル MLX 必須。これらの制約 (1) self-hosted vs github-hosted runner、(2) 既存 PR-blocking workflow の有無、(3) `pytest -m integration` などマーカー登録 (pyproject.toml/pytest.ini が repo に存在しない) を Issue 段階で明示する必要がある。",
+      "current_text": "- [ ] CI 実行戦略を明記する (PR を blocking しない nightly か、毎 PR で 60 秒以内完結なら blocking) — どちらかを Issue 着手時に確定",
+      "suggested_change": "受入条件 (4) を以下に置き換え、Issue 着手時のチェックポイントを具体化する:\n\n- [ ] CI 実行戦略を以下の事実認識のもとで確定する (Stage 3 影響範囲レビュー or 設計フェーズで決定):\n   - 現行 main には blocking PR workflow が定義されておらず、`.github/workflows/weekly_eval.yml` (cron: Monday 00:00 UTC, runs-on: self-hosted, timeout 180min) のみ存在する\n   - MLX 依存テスト (PhotonModel 構築) は self-hosted Apple Silicon runner 必須\n   - pytest marker (`integration`, `slow`) は pyproject.toml/pytest.ini が repo に未存在のため、本 Issue で markers を新規登録する (e.g. 新規 `pyproject.toml [tool.pytest.ini_options] markers = [...]`)\n   - 推奨: weekly_eval.yml に `Run real-weight integration test` step を追加 (blocking ではない nightly 相当) + 毎 PR では `pytest -m \"not integration\"` で除外する形を採用",
+      "rationale": "実装者が CI 戦略を独立に判断するためには、現行 workflow 状況とマーカー設定有無の事実認識が前提として必要。曖昧な選択肢のまま着手すると pytest 設定漏れや self-hosted runner 不整合で実装後に手戻りが発生する。"
+    },
+    {
+      "id": "S1-005",
+      "severity": "Should Fix",
+      "category": "実装可能性",
+      "title": "候補方針 B の wire-up 経路 (`_build_photon_deps` 直接 vs pipeline_factory) が未確定",
+      "description": "候補方針 B のコメントは「保存した checkpoint を `_build_photon_deps` 経由で load」と書いているが、現実装では `_build_photon_deps` は内部関数 (snake_case prefix `_`) であり、E2E test として呼び出す場合は (1) `_build_photon_deps(cfg)` を直接呼ぶ (private API 依存)、または (2) `baseline_reporag.pipeline_factory` 経由で `build_pipeline(cfg_yaml)` 相当を呼んで PhotonRAGPipeline まで完成させる、の 2 通りがある。後者は実 retrieval/embedding/BM25 までフロー完走が必要で、tmp_path 内に最小 corpus を準備する負荷が高い。前者は private API 依存だが test 観点 (\"実 weight load 経路を通す\") は満たせる。Issue 段階でどちらを採るか方針表明があるべき。",
+      "current_text": "### 候補方針 B: セルフホスト型最小 e2e (推奨, repo 完結)\n\n```python\n@pytest.mark.integration\ndef test_photon_pipeline_with_self_trained_minimal_ckpt(tmp_path):\n    \"\"\"最小 PhotonConfig で 1 step 学習 → save → load → query が走る\"\"\"\n    # 1. 最小 config (vocab=256, hidden=64, layers=2 等) で PhotonModel を構築\n    # 2. ダミーデータで 1 step 学習し、tmp_path に checkpoint 保存\n    # 3. 保存した checkpoint を _build_photon_deps 経由で load\n    # 4. query を流して result.answer の non-emptiness を検証\n    # 5. random-init detector: pruning_score の std が学習前 (≈0) と学習後で異なることを assert",
+      "suggested_change": "候補方針 B のステップ 3-5 を、wire-up 経路の選択肢を明示しつつ書き換える:\n\n# 3. 保存した checkpoint dir を `cfg.model.checkpoint_path` に注入し、\n#    以下のいずれかで PhotonModel を実体化する (Stage 3 影響範囲レビューで確定):\n#    (i) `_build_photon_deps(cfg)` を直接呼ぶ — 軽量で test 観点を満たす\n#        (private API 依存だが、`baseline_reporag/tests/test_photon_pipeline_checkpoint_load.py` で既に同関数を patch ベースで叩いている前例あり)\n#    (ii) `pipeline_factory.build_pipeline(cfg_yaml)` 経由で PhotonRAGPipeline を完成させる\n#        — 実 retrieval/embedding まで通すが、tmp_path に最小 corpus + index 準備が必要\n# 4. (i) の場合は `deps['inference']` 経由で 1 query 相当を流す。(ii) の場合は `pipeline.query(...)` で result.answer を assert\n# 5. random-init detector は S1-002 の (a)-(d) いずれかを採用",
+      "rationale": "Issue 段階で wire-up 経路の選択肢を明示しないと、実装者が候補 (i) と (ii) を行き来して時間を浪費する。既存 `test_photon_pipeline_checkpoint_load.py` が patch ベースで `_build_photon_deps` を直接叩いている前例があるため、(i) を default 推奨にする方が実装コストが低い。"
+    },
+    {
+      "id": "S1-006",
+      "severity": "Should Fix",
+      "category": "scope",
+      "title": "受入条件と \"影響ファイル\" の記述に齟齬がある (configs / workflows の責務境界)",
+      "description": "「影響ファイル」セクションでは `configs/photon_tiny.yaml 等に test 用 minimal config を 1 件追加` および `.github/workflows/ に nightly trigger を追加する場合は別途` とあるが、受入条件側にこれらの追加作業を含めるかどうかが明示されていない。candidate B の \"vocab=256 / hidden=64\" は photon_tiny の \"base_embed_dim=160 / hidden_size=640\" よりも更に小さく、test 専用 fixture config として新規ファイル化する方が clean (e.g. `configs/photon_test_minimal.yaml`)。本 Issue で実施する作業範囲を Issue 本文時点で確定すべき。",
+      "current_text": "## 影響ファイル\n\n- `tests/integration/test_photon_real_weights.py` (新規)\n- 必要なら `configs/photon_tiny.yaml` 等に test 用 minimal config を 1 件追加\n- `.github/workflows/` に nightly trigger を追加する場合は別途\n- 本 Issue 完了後の `baseline_reporag/photon_pipeline.py` (#135 マージ後の `checkpoint_path` 仕様に応じて test を整合)",
+      "suggested_change": "「影響ファイル」「受入条件」を整合させ、本 Issue scope を明確化する:\n\n## 影響ファイル (scope 内)\n- `tests/integration/__init__.py` (新規, 既存 tests/ 配下に integration/ サブディレクトリは未存在)\n- `tests/integration/test_photon_real_weights.py` (新規)\n- `configs/photon_test_minimal.yaml` (新規, test 専用最小 PhotonConfig — 既存 `configs/photon_tiny.yaml` を流用しない理由: tiny も hidden=640 / 80M params で学習に分単位かかるため)\n- `pyproject.toml` (新規 or 更新, pytest markers `integration` / `slow` を登録)\n- `.github/workflows/weekly_eval.yml` (nightly に integration test step を追加する場合)\n\n## scope 外 (follow-up Issue 化)\n- 実 production ckpt (`step_003000`) の取得経路整備 — S1-003 参照\n- PR-level blocking integration workflow の新規追加",
+      "rationale": "Issue 本文と受入条件の責務境界が曖昧だと実装過剰 (gold-plating) や不足 (config 追加忘れ) を招く。\"必要なら\" や \"場合は別途\" の曖昧表現を具体的なファイルリストに置き換えるのが Stage 1 通常レビューの定型対応。"
+    },
+    {
+      "id": "S1-007",
+      "severity": "Should Fix",
+      "category": "明確性",
+      "title": "受入条件 (2) の \"mock を使わない\" は監視粒度が曖昧",
+      "description": "受入条件 (2) は「`PhotonModel` の実インスタンスが構築され、checkpoint からの weight load が経路として走ること (mock を使わない)」とあるが、(a) tokenizer は HF download or local fallback を許すか、(b) `_load_hf_tokenizer` を patch するのは可か、(c) MLX evaluation (`mx.eval`) を実際に走らせるか、の境界が不明瞭。既存 `baseline_reporag/tests/test_photon_pipeline_checkpoint_load.py` は `PhotonModel` / `_load_hf_tokenizer` / `_validate_tokenizer_id` を patch している (前述ファイル冒頭コメント参照) — 本 Issue の test がこれを越えるラインを引く必要がある。",
+      "current_text": "- [ ] その test 内で `PhotonModel` の実インスタンスが構築され、checkpoint からの weight load が経路として走ること (mock を使わない)",
+      "suggested_change": "受入条件 (2) を粒度を明示した複数項目に分解する:\n\n- [ ] `PhotonModel(photon_cfg)` の実インスタンスが構築されること (PhotonModel を patch しない)\n- [ ] `photon_mlx.trainer.load_checkpoint` が実 npz weight ファイルから state を復元すること (`load_checkpoint` を patch しない)\n- [ ] tokenizer は HF download を避けるため `_load_hf_tokenizer` を local fixture に置き換えてよい (test isolation のため許容)\n- [ ] checkpoint dir は test 内で `photon_mlx.trainer.save_checkpoint` を呼んで実生成する (mock dir を使わない)",
+      "rationale": "「mock を使わない」の解釈が実装者ごとにブレると test の検出力が下がる。S7-001 (random-init bug) の根本原因は \"weight load 経路が走っていなかった\" ことなので、PhotonModel + load_checkpoint の 2 つだけは patch 不可にする (= 最低限の構造的検出ライン) を Issue 本文で明示する。"
+    },
+    {
+      "id": "S1-008",
+      "severity": "Nice to Have",
+      "category": "実装可能性",
+      "title": "ダミーデータ 1 step 学習の所要時間と決定論的挙動の前提が未記載",
+      "description": "候補方針 B ステップ 2 「ダミーデータで 1 step 学習」は実装容易だが、(a) `mlx.optimizers.AdamW` 1 step が tmp_path I/O を含めて何秒以内に収まるか、(b) seed 固定 (deterministic=true) を使うか、(c) `mx.eval` 後に weight が確実に変化することをどう保証するか、の補足があると実装が早い。`configs/photon_tiny.yaml:9-11` の `seed: 42 / deterministic: true` 仕様は既に存在する。",
+      "current_text": "    # 2. ダミーデータで 1 step 学習し、tmp_path に checkpoint 保存\n...\n利点: 外部リソース不要、CI で確実に再現、20-60 秒程度で完了。",
+      "suggested_change": "ステップ 2 に以下の補足を追記:\n\n# 2. ダミーデータで 1 step 学習 (seed=42 固定で deterministic 挙動を保証;\n#    1 step の forward+backward+optimizer.step は最小 cfg でおよそ 1-3 秒 / save_checkpoint で +1-2 秒 / 学習前後で `model.parameters()` の sample tensor が確実に変化することを `mx.array_equal` の否定で確認可能)。\n#    tmp_path に checkpoint 保存する際は `photon_mlx.trainer.save_checkpoint(model, state, path)` を直接呼ぶ。\n\n利点 → 「20-60 秒程度で完了」を「最小 cfg + 1 step + tmp_path I/O で M3 Ultra 上で 5-15 秒程度、self-hosted runner なら blocking PR への組み込みも検討可能」に書き換える。",
+      "rationale": "1 step 学習の実装は誰でも書けるが、所要時間予測と decay-free な挙動の前提が無いと CI 戦略 (S1-004) の判断材料に欠ける。Nice to Have にとどまるが書ければ着手効率が上がる。"
+    },
+    {
+      "id": "S1-009",
+      "severity": "Nice to Have",
+      "category": "テスト戦略",
+      "title": "PHOTON_ALLOW_RANDOM_INIT bypass の負経路テストが受入条件に含まれていない",
+      "description": "現実装の `baseline_reporag/photon_pipeline.py:397-413` には `PHOTON_ALLOW_RANDOM_INIT=1` で random-init を許可する bypass が存在する。本 Issue の本来目的 (\"random-init weight が production で silently 動いていた構造的事故を CI で検出\") に直接対応するのは正経路 (load 成功) よりも負経路 (bypass 設定が production に紛れ込んだら検出) の方が高価値。受入条件に「PHOTON_ALLOW_RANDOM_INIT=1 を環境変数に set した状態で起動した場合に WARNING ログが出ること」「production-safe path (env 未設定) で checkpoint load 失敗時に RuntimeError が raise すること」を追加する余地がある。",
+      "current_text": "## 受入条件\n\n- [ ] `tests/integration/test_photon_real_weights.py` に real-weight integration test を 1 件以上追加\n- [ ] その test 内で `PhotonModel` の実インスタンスが構築され、checkpoint からの weight load が経路として走ること (mock を使わない)\n- [ ] random-init detector (例: pruning_score 分布の std > 閾値) で「checkpoint が読まれていない」ケースを検出可能であること",
+      "suggested_change": "受入条件に以下を追記 (S1-002 の (c) 案を独立項目化):\n\n- [ ] (推奨) `PHOTON_ALLOW_RANDOM_INIT` の挙動を pin する: env 未設定 + checkpoint 不在 → RuntimeError、env=1 + checkpoint 不在 → WARNING + 続行、を両方 assert (`baseline_reporag/photon_pipeline.py:397-413` の挙動を回帰防止)",
+      "rationale": "Issue ゴール (S7-001 retrospective) に対して bypass 経路の pin はもっとも費用対効果が高い。Must Fix までは要らないが、Issue 本文に option として明記しておくと実装フェーズで採否判断ができる。"
+    }
+  ],
+  "must_fix_count": 2,
+  "should_fix_count": 5,
+  "nice_to_have_count": 2,
+  "summary": "Issue #145 は Issue 起票後 (2026-04-26→2026-04-28) の状況変化を反映できておらず、依存記述 (#135 / #139) が古いまま (S1-001) かつ受入条件 (3) が架空の API `pipeline.last_pruning_score_distribution.std()` を参照している (S1-002) 点が Must Fix。仮説検証 H2/H3/H5 Rejected の必須反映が中心となる。Should Fix としては候補方針 A の scope 整理 (S1-003)、CI 実行戦略の判断材料整備 (S1-004)、候補方針 B の wire-up 経路選択 (S1-005)、影響ファイル/受入条件の整合 (S1-006)、\"mock を使わない\" の粒度明示 (S1-007) を指摘した。Nice to Have では 1 step 学習の所要時間補足 (S1-008) と PHOTON_ALLOW_RANDOM_INIT 負経路テスト (S1-009) を提案した。コードベース確認の結果、`_build_photon_deps` (line 256) と `_resolve_checkpoint_path` / `_load_photon_checkpoint` / `photon_mlx.trainer.load_checkpoint` は main 上に既に揃っており、本 Issue の実装着手は技術的に可能である。"
+}

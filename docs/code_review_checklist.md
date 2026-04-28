@@ -75,6 +75,7 @@ opus 単独レビューは「設計の論理整合性」を確認できるが、
 - [ ] caplog アサーションが既存の WARNING ログと衝突しないか確認
 - [ ] random-init モデルを使う test では起動時 sanity check の WARNING が pytest 出力を汚さないよう、test 用 cfg で閾値を抑制 (例: `embedding_random_init_threshold = 1e9` の有限大値、`float('inf')` は production validation との衝突回避のため不可 — Issue #140 / DR4-002)
 - [ ] string-existence test は具体フレーズ (例: 「Codex 担当 Stage は必須」) で完全一致 assert (既存類似文字列との衝突を避ける)
+- [ ] **private API (`_build_photon_deps` / `_resolve_checkpoint_path` / `_load_photon_checkpoint`) の signature を変更する場合**、`tests/integration/test_photon_real_weights.py` (Issue #145) と `baseline_reporag/tests/test_photon_pipeline_checkpoint_load.py` の両方が追従更新されているか確認。前者は real PhotonModel + 実 checkpoint で load path 全体を pin、後者は MagicMock 境界で code path を pin する補完関係 (DR3-001)
 
 ## 5. 関連リンク
 

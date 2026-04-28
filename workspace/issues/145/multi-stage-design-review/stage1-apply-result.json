@@ -1,0 +1,59 @@
+{
+  "stage": 1,
+  "applied": [
+    {
+      "finding_id": "DR1-001",
+      "status": "applied",
+      "summary": "deps['photon_model'] への参照を deps['photon_inference'].model (PhotonInference line 189 で self.model = model を保持) に置換。§3 設計判断 #2、§4-1 Step 7、§5 (b) サンプルコードの 3 箇所を修正"
+    },
+    {
+      "finding_id": "DR1-002",
+      "status": "applied",
+      "summary": "L2 norm 検出器を「random-init#1 vs load 後の差分 > 1e-4」から「trained 参照値 (save 直前に保持) との近接性 abs(norm_after - norm_trained) < 1e-5」に変更。§3 設計判断 #3 に検出器ロジックの failure mode 解説を追記、§4-1 Step 3 で norm_trained を save 直前に保持する旨を明記、§5 (b) サンプルコードを書き換え (mx.allclose 代替案も併記)"
+    },
+    {
+      "finding_id": "DR1-003",
+      "status": "applied",
+      "summary": "§4-2 で fixture typo `_phsoton_env_isolation` → `_photon_env_isolation` を訂正。§4-3 の autouse fixture 分離の根拠を testpaths 説明から monkeypatch teardown + conftest.py ディレクトリ局所性に訂正"
+    },
+    {
+      "finding_id": "DR1-004",
+      "status": "applied",
+      "summary": "§5 (c) の _make_corrupt_checkpoint で state.json を CheckpointState 仕様準拠の最小 valid schema (step, best_val_loss, best_step, patience_counter, train_losses, val_losses) に修正。不要 vocab_size key を除外し caplog assertion の brittleness を回避"
+    },
+    {
+      "finding_id": "DR1-005",
+      "status": "applied",
+      "summary": "§5 (b) の _flat_l2_norm を mlx.utils.tree_flatten ベースに書き換え (photon_mlx/model.py:741-743 count_parameters() と同 pattern)。nested dict / list を正しく走査"
+    },
+    {
+      "finding_id": "DR1-006",
+      "status": "applied",
+      "summary": "§5 (b) に _run_one_step 関数の中身 (photon_loss, mlx.optimizers.Adam(lr=1e-3), batch=(2,16), nn.value_and_grad) を inline で明示。photon_mlx/tests/test_training.py:264-292 と整合"
+    },
+    {
+      "finding_id": "DR1-007",
+      "status": "applied",
+      "summary": "§3 設計判断 #2 の private API 依存受容根拠を「(a) 2 重構造的圧力で signature 安定化を担保、(b) public API 経由は 60 秒予算違反」に強化。boundary test と integration test の責務の違いを明示"
+    },
+    {
+      "finding_id": "DR1-008",
+      "status": "applied",
+      "summary": "§4-2-1 を新設し fake_tokenizer の必要 method (vocab_size, pad_token_id, encode, decode) を明示。§10 P2 完了条件に必要 method 列挙作業を追加"
+    },
+    {
+      "finding_id": "DR1-009",
+      "status": "applied",
+      "summary": "§10 P1 完了条件に「testpaths 設定前後で python -m pytest --collect-only | wc -l の値が一致」を追加し discovery 不変を verify"
+    },
+    {
+      "finding_id": "DR1-010",
+      "status": "applied",
+      "summary": "§3 設計判断 #3 実装注意 3 の閾値文言を「abs(norm_before - norm_after) > 1e-4」から「近接性 abs(norm_after - norm_trained) < 1e-5 または mx.allclose(atol=1e-5)」に書き換え (DR1-002 と一貫)"
+    }
+  ],
+  "deferred": [],
+  "total_applied": 10,
+  "total_deferred": 0,
+  "design_doc_updated": true
+}

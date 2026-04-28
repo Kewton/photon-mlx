@@ -1,0 +1,46 @@
+# Issue #145: minimal PHOTON config used by the real-weight integration test
+# under ``tests/integration/test_photon_real_weights.py``.
+#
+# Mirrors ``photon_mlx/tests/test_training.py::_tiny_cfg`` so a single training
+# step + ``save_checkpoint`` finishes in 1-3 s on M3 Ultra (60-second budget,
+# §3 design judgement #5).
+#
+# YAML key conventions (DR2-002):
+# - ``model.num_heads`` is the field consumed by
+#   ``baseline_reporag.photon_pipeline._build_photon_deps``
+#   (``cfg.model.get("num_heads", 4)``).  ``num_attention_heads`` /
+#   ``num_key_value_heads`` are the dataclass field names used directly when
+#   constructing ``ModelConfig`` in unit tests; do NOT use those names here
+#   because the YAML loader path reads ``num_heads``.
+# - ``tokenizer.tokenizer_id`` is required (DR3-002):
+#   ``_build_photon_deps`` calls ``_validate_tokenizer_id`` and
+#   ``_load_hf_tokenizer`` even when the integration test injects a fake
+#   tokenizer via ``monkeypatch``.  The placeholder repo id below is
+#   syntactically valid for the HF allowlist regex but is never actually
+#   fetched (the loader is monkeypatched in the integration test fixtures).
+# - ``inference.safe_recgen_enabled: false`` keeps ``_build_photon_deps``
+#   from constructing a ``SafeRecGenController`` we do not need for load-path
+#   validation.
+
+model:
+  architecture: "photon_decoder"
+  provider: "photon"
+  base_embed_dim: 16
+  hidden_size: 64
+  intermediate_size: 128
+  num_heads: 4
+  head_dim: 16
+  max_position_embeddings: 128
+
+hierarchy:
+  levels: 2
+  chunk_sizes: [4, 4]
+  encoder_layers_per_level: [1, 1]
+  decoder_layers_per_level: [1, 1]
+
+tokenizer:
+  tokenizer_id: "Kewton/fake-photon-test-tokenizer"
+  vocab_size: 256
+
+inference:
+  safe_recgen_enabled: false

@@ -1,0 +1,7 @@
+{
+  "issue_number": "145",
+  "stage": 4,
+  "stage_name": "指摘事項反映（1回目影響範囲）",
+  "review_result_path": "workspace/issues/145/issue-review/stage3-review-result.json",
+  "instruction": "Stage 3 影響範囲レビューの Must Fix / Should Fix を全件 Issue 本文に反映する。Nice to Have は判断。"
+}
