@@ -164,7 +164,7 @@ def test_compute_overall_counts_refusal_with_citation_as_nc() -> None:
     """Issue #154 Bug 2: refusal answers with formal [C:N] must count as NC."""
     records = [
         _make_record(
-            answer="根拠が不足しています。提供されたコードチャンクには情報がありません。 [C:1]",
+            answer="根拠が不足しています。提供されたドキュメントには情報がありません。 [C:1]",
             no_citation=False,
             cited_chunk_ids=["c1"],
         ),

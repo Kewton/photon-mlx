@@ -204,6 +204,188 @@ class TestBuildMessagesLanguageBranching:
         assert "可能な範囲で条文番号" in sys_content
 
 
+class TestPromptDomainNeutrality:
+    """Issue #178: prompt template must be corpus-agnostic.
+
+    Production prompt (`baseline_reporag/generation/prompt.py`) must not
+    refer to evidence chunks as code chunks / `code repository` / `根拠 chunk`
+    etc., so non-code corpora (institutional documents) do not produce
+    confusing answers like "提供されたコードチャンクには…の情報がありません".
+    See `workspace/design/issue-178-prompt-domain-agnostic-design-policy.md`
+    Section 8.0 for the banned-substring SSoT.
+    """
+
+    BANNED_LITERALS = (
+        "code chunks",
+        "code chunk",
+        "コードチャンク",
+        "code repository analysis",
+        "code repository",
+        "根拠 chunk",
+        "根拠 chunks",
+        "chunks below",
+        "## Code Chunks",
+        "provided chunks",
+        "from the chunks",
+        "in the chunks",
+    )
+
+    @pytest.mark.parametrize("literal", BANNED_LITERALS)
+    def test_system_prompt_has_no_banned_literal(self, literal: str) -> None:
+        from baseline_reporag.generation.prompt import _SYSTEM
+
+        assert literal not in _SYSTEM, f"banned literal {literal!r} leaked into _SYSTEM"
+
+    @pytest.mark.parametrize("literal", BANNED_LITERALS)
+    def test_few_shot_examples_have_no_banned_literal(self, literal: str) -> None:
+        from baseline_reporag.generation.prompt import _FEW_SHOT_EXAMPLES
+
+        assert literal not in _FEW_SHOT_EXAMPLES, (
+            f"banned literal {literal!r} leaked into _FEW_SHOT_EXAMPLES"
+        )
+
+    @pytest.mark.parametrize("literal", BANNED_LITERALS)
+    def test_evidence_header_has_no_banned_literal(self, literal: str) -> None:
+        from baseline_reporag.generation.prompt import _EVIDENCE_HEADER
+
+        assert literal not in _EVIDENCE_HEADER, (
+            f"banned literal {literal!r} leaked into _EVIDENCE_HEADER"
+        )
+
+    @pytest.mark.parametrize("literal", BANNED_LITERALS)
+    def test_jp_institutional_hint_has_no_banned_literal(self, literal: str) -> None:
+        from baseline_reporag.generation.prompt import _JP_INSTITUTIONAL_HINT
+
+        assert literal not in _JP_INSTITUTIONAL_HINT, (
+            f"banned literal {literal!r} leaked into _JP_INSTITUTIONAL_HINT"
+        )
+
+    @pytest.mark.parametrize("literal", BANNED_LITERALS)
+    @pytest.mark.parametrize("include_few_shot", [True, False])
+    def test_build_messages_output_has_no_banned_literal(
+        self, literal: str, include_few_shot: bool
+    ) -> None:
+        """build_messages output must be free of banned literals for both
+        baseline pipeline (default include_few_shot=True) and PHOTON Turn 2+
+        (include_few_shot=False)."""
+        msgs = build_messages(
+            question="What is the main router?",
+            evidence_text="[C:1] app/main.py\ndef main(): pass",
+            include_few_shot=include_few_shot,
+        )
+        combined = msgs[0]["content"] + "\n" + msgs[1]["content"]
+        assert literal not in combined, (
+            f"banned literal {literal!r} leaked into build_messages output "
+            f"(include_few_shot={include_few_shot})"
+        )
+
+    def test_no_standalone_chunk_word_in_system(self) -> None:
+        r"""generic standalone `chunk(s)` (regex `\bchunks?\b`) must not
+        appear in `_SYSTEM` as a generic container name. Internal Python
+        identifiers (`Chunk`, `chunk_id`, `pack.chunks`) are excluded since
+        they are not LLM-visible."""
+        from baseline_reporag.generation.prompt import _SYSTEM
+
+        matches = re.findall(r"\bchunks?\b", _SYSTEM)
+        assert not matches, f"standalone chunk(s) leaked into _SYSTEM: {matches}"
+
+    def test_no_standalone_chunk_word_in_jp_institutional_hint(self) -> None:
+        r"""generic standalone `chunk(s)` must not appear in JP institutional
+        hint."""
+        from baseline_reporag.generation.prompt import _JP_INSTITUTIONAL_HINT
+
+        matches = re.findall(r"\bchunks?\b", _JP_INSTITUTIONAL_HINT)
+        assert not matches, (
+            f"standalone chunk(s) leaked into _JP_INSTITUTIONAL_HINT: {matches}"
+        )
+
+    def test_no_standalone_chunk_word_in_evidence_header(self) -> None:
+        r"""generic standalone `chunk(s)` must not appear in `_EVIDENCE_HEADER`."""
+        from baseline_reporag.generation.prompt import _EVIDENCE_HEADER
+
+        matches = re.findall(r"\bchunks?\b", _EVIDENCE_HEADER)
+        assert not matches, (
+            f"standalone chunk(s) leaked into _EVIDENCE_HEADER: {matches}"
+        )
+
+    def test_no_standalone_chunk_word_in_few_shot_examples(self) -> None:
+        r"""generic standalone `chunk(s)` (regex `\bchunks?\b`) must not
+        appear in `_FEW_SHOT_EXAMPLES` (Section 8.0 row #13)."""
+        from baseline_reporag.generation.prompt import _FEW_SHOT_EXAMPLES
+
+        matches = re.findall(r"\bchunks?\b", _FEW_SHOT_EXAMPLES)
+        assert not matches, (
+            f"standalone chunk(s) leaked into _FEW_SHOT_EXAMPLES: {matches}"
+        )
+
+    @pytest.mark.parametrize("include_few_shot", [True, False])
+    def test_no_standalone_chunk_word_in_build_messages(
+        self, include_few_shot: bool
+    ) -> None:
+        r"""generic standalone `chunk(s)` must not leak into
+        `build_messages(...)` output for either Few-shot mode (Section 8.0
+        row #13). Test fixtures use neutral question/evidence text so any
+        match comes from the prompt template, not user input."""
+        msgs = build_messages(
+            question="What is the registered handler?",
+            evidence_text="[C:1] x.py\npass",
+            include_few_shot=include_few_shot,
+        )
+        combined = msgs[0]["content"] + "\n" + msgs[1]["content"]
+        matches = re.findall(r"\bchunks?\b", combined)
+        assert not matches, (
+            f"standalone chunk(s) leaked into build_messages output "
+            f"(include_few_shot={include_few_shot}): {matches}"
+        )
+
+    def test_citation_pattern_present_in_system(self) -> None:
+        """positive control: `[C:N]` pattern must remain in `_SYSTEM` so
+        downstream `resolve_citations` keeps working (citation 機能後退なし)."""
+        from baseline_reporag.generation.prompt import _SYSTEM
+
+        assert re.search(r"\[C:N\]", _SYSTEM), (
+            "_SYSTEM must mention [C:N] notation for citation contract"
+        )
+
+    def test_jp_institutional_hint_intact(self) -> None:
+        """positive control: `_JP_INSTITUTIONAL_HINT` must keep the 条文
+        guidance phrases for #135 institutional retrain compatibility."""
+        from baseline_reporag.generation.prompt import _JP_INSTITUTIONAL_HINT
+
+        assert "条文番号" in _JP_INSTITUTIONAL_HINT
+        assert "該当条文なし" in _JP_INSTITUTIONAL_HINT
+
+    def test_jp_institutional_hint_in_build_messages_ja(self) -> None:
+        """ja routing must inject `_JP_INSTITUTIONAL_HINT` into the system
+        message (`detect_language` == 'ja' branch). Verifies that:
+        - 条文 hint is present
+        - 根拠ドキュメント (neutralized form) is present
+        - 根拠 chunk / コードチャンク (banned forms) are absent
+
+        DR2-008: combines the constant assert with a build_messages-level
+        contract assert to lock down #115 detect_language ja branch."""
+        msgs = build_messages(
+            question="葛飾区の行政組織について教えてください",
+            evidence_text="[C:1] doc.md\n葛飾区組織図 第3条",
+        )
+        sys_content = msgs[0]["content"]
+        assert "可能な範囲で条文番号" in sys_content
+        assert "該当条文なし" in sys_content
+        assert "根拠ドキュメント" in sys_content
+        assert "根拠 chunk" not in sys_content
+        assert "コードチャンク" not in sys_content
+
+    def test_user_section_header_uses_documents(self) -> None:
+        """user message must use `## Documents` instead of `## Code Chunks`."""
+        msgs = build_messages(
+            question="test",
+            evidence_text="[C:1] x.py\npass",
+        )
+        user_content = msgs[1]["content"]
+        assert "## Documents" in user_content
+        assert "## Code Chunks" not in user_content
+
+
 class TestFlattenMessagesForPlainLM:
     """flatten_messages_for_plain_lm serializes chat messages for plain LMs.
 
