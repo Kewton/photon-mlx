@@ -15,12 +15,49 @@ class LexicalResult(NamedTuple):
     score: float
 
 
+# CJK ranges that should be tokenized as character bigrams for BM25:
+# - U+3040–U+309F: Hiragana
+# - U+30A0–U+30FF: Katakana (incl. ・ and Katakana-Hiragana Prolonged Sound Mark)
+# - U+4E00–U+9FFF: CJK Unified Ideographs (Kanji / Hanzi / Hanja)
+# - U+3005, U+3007: Iteration mark (々) and zero ideograph (〇)
+# Whitespace, punctuation, and full-width forms are excluded so they act as
+# bigram boundaries — a query like ``認定基準`` produces ``[認定, 定基, 基準]``
+# while ``【認定の条件】`` (full-width brackets ignored as boundaries)
+# produces ``[認定, 定の, の条, 条件]``.
+_CJK_RUN = re.compile(r"[々〇぀-ゟ゠-ヿ一-鿿]+")
+
+
 def _tokenize(text: str) -> list[str]:
-    # Split camelCase: fooBar -> foo bar
-    text = re.sub(r"([a-z])([A-Z])", r"\1 \2", text)
-    text = text.lower()
-    tokens = re.split(r"[^a-z0-9_]+", text)
-    return [t for t in tokens if len(t) >= 2]
+    """Tokenize for BM25.
+
+    Combines two independent token streams:
+
+    - **ASCII alphanumeric tokens** (legacy code/English path): camelCase
+      split, lower-cased, split on non-``[a-z0-9_]``, filter ``len >= 2``.
+    - **CJK character bigrams** (Issue #174): Japanese/Chinese/Korean text
+      is split into runs of CJK characters, each run yields all overlapping
+      2-char windows. A 1-char run yields the single character to keep
+      retrievability for short kanji terms (e.g. ``区``).
+
+    Without the CJK path, BM25 contributes 0 signal for Japanese corpora
+    because the legacy regex strips every kana/kanji as a delimiter. This
+    let semantically-similar-but-wrong chunks dominate ranking via the
+    embedding signal alone.
+    """
+    # ASCII path (camelCase split + lowercase + alnum tokenization)
+    ascii_text = re.sub(r"([a-z])([A-Z])", r"\1 \2", text)
+    ascii_text = ascii_text.lower()
+    ascii_tokens = [t for t in re.split(r"[^a-z0-9_]+", ascii_text) if len(t) >= 2]
+
+    # CJK path (character bigrams per CJK run)
+    cjk_tokens: list[str] = []
+    for run in _CJK_RUN.findall(text):
+        if len(run) == 1:
+            cjk_tokens.append(run)
+        else:
+            cjk_tokens.extend(run[i : i + 2] for i in range(len(run) - 1))
+
+    return ascii_tokens + cjk_tokens
 
 
 class LexicalIndex:
