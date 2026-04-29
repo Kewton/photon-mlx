@@ -100,7 +100,7 @@ def test_refusal_with_citation_is_no_citation() -> None:
     lookup = _lookup({"cx": ("body unrelated to ref", "doc_b")})
     grade = grade_prediction(
         {
-            "answer": "根拠が不足しています。提供されたコードチャンクには情報がありません。",
+            "answer": "根拠が不足しています。提供されたドキュメントには情報がありません。",
             "cited_chunk_ids": ["cx"],
             "no_citation": False,
         },
