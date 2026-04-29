@@ -29,7 +29,10 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from baseline_reporag.config import load_config  # noqa: E402
-from baseline_reporag.pipeline_factory import build_pipeline  # noqa: E402
+from baseline_reporag.pipeline_factory import (  # noqa: E402
+    build_pipeline,
+    override_repo_for_pipeline,
+)
 
 
 # Issue #82 Wave 3: drift + turn-history panels (streamlit-free helpers).
@@ -97,23 +100,63 @@ def _atomic_write_text(path: Path, data: str) -> None:
     os.replace(tmp, path)
 
 
+# 除外パターン: backup / training-only / eval matrix
+# (UI から ingest 用に選んでも意味の無い config をフィルタする)
+_USER_CONFIG_EXCLUDE_SUFFIXES = (".wave6_backup",)
+_USER_CONFIG_EXCLUDE_PREFIXES = ("eval_",)
+_USER_CONFIG_EXCLUDE_STEMS = (
+    # training-only configs (ingest 用途では使わない)
+    "institutional_docs_photon_retrain",
+)
+
+
+def _discover_user_configs(configs_dir: Path | None = None) -> list[str]:
+    """Discover ``configs/*.yaml`` files suitable for ingest UI selection.
+
+    Returns project-relative paths (e.g. ``configs/baseline.yaml``) sorted
+    alphabetically. Excludes:
+
+    - ``*.wave6_backup`` (historical backups)
+    - ``eval_*.yaml`` (eval-matrix configs not meant for ingest)
+    - ``*_retrain.yaml`` (training-only configs)
+    """
+    base = configs_dir if configs_dir is not None else PROJECT_ROOT / "configs"
+    if not base.is_dir():
+        return []
+    out: list[str] = []
+    for path in sorted(base.glob("*.yaml")):
+        name = path.name
+        if any(name.endswith(suffix) for suffix in _USER_CONFIG_EXCLUDE_SUFFIXES):
+            continue
+        if any(name.startswith(prefix) for prefix in _USER_CONFIG_EXCLUDE_PREFIXES):
+            continue
+        if path.stem in _USER_CONFIG_EXCLUDE_STEMS:
+            continue
+        try:
+            rel = path.relative_to(PROJECT_ROOT)
+        except ValueError:
+            rel = path
+        out.append(str(rel))
+    return out
+
+
 # Driver executed in a child ``python -c`` to chain the 4 index-build
 # phases with argv-list subprocess.run calls (shell=False). No user input
 # is interpolated into this string — every user value arrives via sys.argv.
 _INDEX_PIPELINE_DRIVER = """
 import subprocess, sys
+
 repo_dir, repo_id, embed_model, config_path = sys.argv[1:5]
 
 def run(argv, phase):
     print(f'>>> {phase}: ' + ' '.join(argv), flush=True)
     subprocess.run(argv, check=True)
 
-# Phase 0: resolve commit SHA
-out = subprocess.run(
-    ['git', '-C', repo_dir, 'rev-parse', 'HEAD'],
-    check=True, capture_output=True, text=True,
-)
-commit = out.stdout.strip()
+# Phase 0: resolve commit (git SHA for git repos, synthesized
+# 'manual-<mtime>' id for non-git directories like 制度文書 corpora).
+# Shared with scripts/ingest_repo.py so all 3 phases agree on the same id.
+from scripts.ingest_repo import resolve_commit
+commit = resolve_commit(repo_dir, 'HEAD')
 print(f'Phase 1: Ingest (commit={commit})', flush=True)
 run(
     [
@@ -363,13 +406,51 @@ def save():
 
 
 def _is_process_running(pid: int | None) -> bool:
+    """Return True only if pid corresponds to a *live* process.
+
+    ``os.kill(pid, 0)`` alone is not enough on macOS / Linux: a zombie
+    (defunct) process whose parent has not yet ``wait()``-ed for it still
+    exists in the process table and ``os.kill(pid, 0)`` returns success.
+    The Streamlit driver is the parent of the index/eval subprocesses, so
+    finished children remain zombies until Streamlit shuts down — which
+    keeps ``_sync_index_job`` stuck on ``running`` (observed twice with
+    Issue #170 / non-git ingest).
+
+    The fix: after the kill-0 probe we ask ``ps -o stat=`` for the state
+    code; any state starting with ``Z`` (e.g. ``Z+``) means the kernel
+    has reaped the process body and only the exit-status entry remains
+    — semantically equivalent to "not running" for our scheduler.
+    """
     if pid is None:
         return False
     try:
         os.kill(pid, 0)
-        return True
     except (OSError, ProcessLookupError):
         return False
+
+    # ``ps`` is part of POSIX and ships on every macOS / Linux box this
+    # Streamlit app runs on, so we don't add ``psutil`` just for this.
+    try:
+        result = subprocess.run(
+            ["ps", "-o", "stat=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        # ``ps`` itself failing should not flip a real running process to
+        # "dead"; preserve the legacy os.kill-only behaviour as a fallback.
+        return True
+
+    if result.returncode != 0:
+        # pid disappeared between os.kill and ps — definitely not running.
+        return False
+
+    state = result.stdout.strip()
+    if state.startswith("Z"):
+        return False
+    return True
 
 
 def _read_training_progress(log_file: str) -> dict[str, Any]:
@@ -1054,6 +1135,25 @@ def page_index():
         help="インデックスの識別子。英数字とアンダースコアのみ",
     )
 
+    config_choices = _discover_user_configs()
+    if not config_choices:
+        st.error("configs/*.yaml が見つかりません")
+        return
+    default_config = "configs/baseline.yaml"
+    default_index = (
+        config_choices.index(default_config) if default_config in config_choices else 0
+    )
+    config_path = st.selectbox(
+        "Config",
+        options=config_choices,
+        index=default_index,
+        help=(
+            "ingestion / retrieval / generation の設定。制度文書 (markdown 中心) は "
+            "configs/institutional_docs.yaml、コードベース (Python など) は "
+            "configs/baseline.yaml が無難。Embedding モデルは下の選択で override されます。"
+        ),
+    )
+
     embedding_models = {
         "all-MiniLM-L6-v2 (軽量・英語向け)": "sentence-transformers/all-MiniLM-L6-v2",
         "multilingual-e5-small (多言語対応)": "intfloat/multilingual-e5-small",
@@ -1061,7 +1161,7 @@ def page_index():
         "all-MiniLM-L12-v2 (英語・高精度)": "sentence-transformers/all-MiniLM-L12-v2",
     }
     embedding_label = st.selectbox(
-        "Embedding モデル",
+        "Embedding モデル (config の値を override)",
         options=list(embedding_models.keys()),
         index=1,  # multilingual-e5-small をデフォルト
         help="ベクトル検索に使う embedding モデル。日本語を含む場合は multilingual 推奨",
@@ -1098,7 +1198,6 @@ def page_index():
             # config_path) arrive as argv and are never interpolated into a
             # shell string.
             driver = _INDEX_PIPELINE_DRIVER
-            config_path = "configs/baseline.yaml"
             cmd_argv = [
                 sys.executable,
                 "-u",
@@ -1650,6 +1749,13 @@ def _run_query(proj: Project, question: str, session_key: str) -> tuple[str, dic
         return f"エラー: config load failed ({type(exc).__name__}: {exc})", dict(
             metadata_default
         )
+
+    # UI で選択された ``proj.repo_id`` を真実とし、config 側の hardcoded な
+    # ``repo.repo_id`` / ``repo.repo_commit`` を上書きする (build_pipeline は
+    # ``data/indexes/{cfg.repo.repo_id}`` から index を読むため、ここで揃え
+    # ないと別 repo の index がロードされる)。``repo_commit`` は chunks.db
+    # から実際の値を解決し、graph_expansion の SQL filter にも整合させる。
+    override_repo_for_pipeline(cfg, proj.repo_id)
 
     if pipeline_key not in st.session_state:
         try:

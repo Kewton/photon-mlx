@@ -146,8 +146,41 @@ project-root/
 
 クイックスタート
 
-この README は開発中のリポジトリ向けです。
-下記のコマンド名は、この README と tasks.md に合わせて実装する前提です。
+> **採用構成 (2026-04-28)**: PHOTON + Qwen3.5-9B-MLX-4bit no-think モード。
+> 詳細は [`reports/qwen_model_matrix_20260428_400cmp_report.md`](reports/qwen_model_matrix_20260428_400cmp_report.md) と [`docs/playground.md`](docs/playground.md) 参照。
+
+### Makefile を使う最短手順
+
+```bash
+# 1. 環境作成 (.venv が無い場合のみ)
+make setup
+source .venv/bin/activate
+
+# 2. 対象 repo を ingest + index 構築 (一括)
+make prepare REPO=/path/to/target-repo REPO_ID=target_repo
+
+# 3. CLI で 1 問
+make ask REPO_ID=target_repo Q="認証処理の入口はどこですか？"
+
+# 4. server を起動
+make serve
+
+# 5. 評価ベンチマーク
+make eval
+
+# 6. 利用可能な target 一覧
+make help
+```
+
+PHOTON pipeline で動かす場合は `CONFIG` を切替えるだけ:
+
+```bash
+# PHOTON 採用 checkpoint で問い合わせ
+export PHOTON_CHECKPOINT_ROOT=/path/to/checkpoints  # 採用 checkpoint の親ディレクトリ
+make ask CONFIG=configs/photon_small.yaml REPO_ID=target_repo Q="..."
+```
+
+### 手動コマンド (Makefile を使わない場合)
 
 1. 環境作成
 ```

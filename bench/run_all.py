@@ -10,10 +10,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import time
 import uuid
 from pathlib import Path
 from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
 # ---------------------------------------------------------------------------
@@ -159,6 +162,10 @@ def _run_static_eval(pipeline: Any, ds_cfg: dict) -> list[dict]:
                 "answer": result.answer,
                 "cited_chunk_ids": result.cited_chunk_ids,
                 "no_citation": result.no_citation,
+                "generator_used": getattr(result, "generator_used", None),
+                "generator_fallback_reason": getattr(
+                    result, "generator_fallback_reason", None
+                ),
                 "latency_ms": result.latency.total_ms,
                 "retrieval_ms": result.latency.retrieval_ms,
                 "generation_ms": result.latency.generation_ms,
@@ -166,6 +173,42 @@ def _run_static_eval(pipeline: Any, ds_cfg: dict) -> list[dict]:
             }
         )
     return predictions
+
+
+def _iter_static_eval_predictions(pipeline: Any, ds_cfg: dict):
+    """Yield static eval predictions one by one."""
+    path = ds_cfg["path"]
+    max_cases = ds_cfg.get("max_cases", 0)
+
+    questions = []
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            questions.append(json.loads(line))
+    if max_cases > 0:
+        questions = questions[:max_cases]
+
+    for q in questions:
+        result = pipeline.query(
+            question=q["question"],
+            session_id=f"eval-{q['id']}",
+            repo_id="",
+        )
+        yield {
+            "eval_id": q["id"],
+            "category": q.get("category", ""),
+            "question": q["question"],
+            "answer": result.answer,
+            "cited_chunk_ids": result.cited_chunk_ids,
+            "no_citation": result.no_citation,
+            "generator_used": getattr(result, "generator_used", None),
+            "generator_fallback_reason": getattr(
+                result, "generator_fallback_reason", None
+            ),
+            "latency_ms": result.latency.total_ms,
+            "retrieval_ms": result.latency.retrieval_ms,
+            "generation_ms": result.latency.generation_ms,
+            "memory_peak_mb": result.memory.peak_mb,
+        }
 
 
 def _run_multi_turn_eval(pipeline: Any, ds_cfg: dict) -> list[dict]:
@@ -199,6 +242,10 @@ def _run_multi_turn_eval(pipeline: Any, ds_cfg: dict) -> list[dict]:
                     "answer": result.answer,
                     "cited_chunk_ids": result.cited_chunk_ids,
                     "no_citation": result.no_citation,
+                    "generator_used": getattr(result, "generator_used", None),
+                    "generator_fallback_reason": getattr(
+                        result, "generator_fallback_reason", None
+                    ),
                     "latency_ms": result.latency.total_ms,
                     "retrieval_ms": result.latency.retrieval_ms,
                     "generation_ms": result.latency.generation_ms,
@@ -208,9 +255,63 @@ def _run_multi_turn_eval(pipeline: Any, ds_cfg: dict) -> list[dict]:
     return predictions
 
 
+def _iter_multi_turn_eval_predictions(pipeline: Any, ds_cfg: dict):
+    """Yield multi-turn eval predictions one by one."""
+    path = ds_cfg["path"]
+    max_sessions = ds_cfg.get("max_sessions", 0)
+    max_turns = ds_cfg.get("max_turns_per_session", 99)
+
+    sessions = []
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            sessions.append(json.loads(line))
+    if max_sessions > 0:
+        sessions = sessions[:max_sessions]
+
+    for session in sessions:
+        sid = session["session_id"]
+        turns = session.get("turns", [])[:max_turns]
+        for turn in turns:
+            result = pipeline.query(
+                question=turn["question"],
+                session_id=sid,
+                repo_id="",
+            )
+            yield {
+                "session_id": sid,
+                "turn_id": turn.get("turn_id", 0),
+                "question": turn["question"],
+                "answer": result.answer,
+                "cited_chunk_ids": result.cited_chunk_ids,
+                "no_citation": result.no_citation,
+                "generator_used": getattr(result, "generator_used", None),
+                "generator_fallback_reason": getattr(
+                    result, "generator_fallback_reason", None
+                ),
+                "latency_ms": result.latency.total_ms,
+                "retrieval_ms": result.latency.retrieval_ms,
+                "generation_ms": result.latency.generation_ms,
+                "memory_peak_mb": result.memory.peak_mb,
+            }
+
+
 # ---------------------------------------------------------------------------
 # Variant runner
 # ---------------------------------------------------------------------------
+
+
+def iter_variant_predictions(variant_cfg: dict, eval_cfg: dict):
+    """Yield predictions for a single variant."""
+    pipeline = _build_variant_pipeline(variant_cfg)
+    datasets = eval_cfg.get("datasets", {})
+
+    static_cfg = datasets.get("static_eval", {})
+    if static_cfg.get("enabled"):
+        yield from _iter_static_eval_predictions(pipeline, static_cfg)
+
+    mt_cfg = datasets.get("multi_turn_eval", {})
+    if mt_cfg.get("enabled"):
+        yield from _iter_multi_turn_eval_predictions(pipeline, mt_cfg)
 
 
 def run_variant(variant_cfg: dict, eval_cfg: dict) -> list[dict]:
@@ -218,19 +319,7 @@ def run_variant(variant_cfg: dict, eval_cfg: dict) -> list[dict]:
     Run a single benchmark variant against all enabled eval sets.
     Returns a list of prediction records.
     """
-    pipeline = _build_variant_pipeline(variant_cfg)
-    datasets = eval_cfg.get("datasets", {})
-    predictions: list[dict] = []
-
-    static_cfg = datasets.get("static_eval", {})
-    if static_cfg.get("enabled"):
-        predictions.extend(_run_static_eval(pipeline, static_cfg))
-
-    mt_cfg = datasets.get("multi_turn_eval", {})
-    if mt_cfg.get("enabled"):
-        predictions.extend(_run_multi_turn_eval(pipeline, mt_cfg))
-
-    return predictions
+    return list(iter_variant_predictions(variant_cfg, eval_cfg))
 
 
 # ---------------------------------------------------------------------------
@@ -252,6 +341,70 @@ def save_run_predictions(
     return path
 
 
+def append_prediction(path: Path, prediction: dict) -> None:
+    """Append a single JSONL prediction record."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(prediction, ensure_ascii=False) + "\n")
+        f.flush()
+
+
+def _count_jsonl_records(path: Path) -> int:
+    if not path.exists():
+        return 0
+    return sum(
+        1 for line in path.read_text(encoding="utf-8").splitlines() if line.strip()
+    )
+
+
+def _dataset_case_count(
+    path: Path, max_items: int, *, multi_turn: bool, max_turns: int = 0
+) -> int:
+    records = [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    if max_items > 0:
+        records = records[:max_items]
+    if not multi_turn:
+        return len(records)
+    return sum(len(record.get("turns", [])[:max_turns]) for record in records)
+
+
+def _expected_predictions_for_eval(eval_cfg: dict) -> int:
+    datasets = eval_cfg.get("datasets", {})
+    total = 0
+
+    static_cfg = datasets.get("static_eval", {})
+    if static_cfg.get("enabled"):
+        total += _dataset_case_count(
+            Path(static_cfg["path"]),
+            int(static_cfg.get("max_cases", 0)),
+            multi_turn=False,
+        )
+
+    mt_cfg = datasets.get("multi_turn_eval", {})
+    if mt_cfg.get("enabled"):
+        total += _dataset_case_count(
+            Path(mt_cfg["path"]),
+            int(mt_cfg.get("max_sessions", 0)),
+            multi_turn=True,
+            max_turns=int(mt_cfg.get("max_turns_per_session", 99)),
+        )
+
+    return total
+
+
+def _write_progress(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    tmp_path.replace(path)
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -261,6 +414,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run all benchmark variants")
     parser.add_argument("--config", default="configs/eval.yaml")
     parser.add_argument("--run-id", default="")
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Skip variants whose output JSONL already exists with the expected record count.",
+    )
     parser.add_argument(
         "--variants",
         default=None,
@@ -280,6 +438,7 @@ def main() -> None:
         f"bench_{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
     )
     output_dir = Path(cfg["run"]["output_dir"]) / run_id
+    progress_path = output_dir / f"{run_id}_progress.json"
     print(f"run_id:     {run_id}")
     print(f"output_dir: {output_dir}\n")
 
@@ -297,11 +456,120 @@ def main() -> None:
     except argparse.ArgumentError as exc:
         parser.error(str(exc))
 
+    expected_per_variant = _expected_predictions_for_eval(cfg)
+    total_expected = expected_per_variant * len(variants_to_run)
+    total_completed = 0
+    completed_variants: list[str] = []
+
     for variant in variants_to_run:
-        print(f"  variant: {variant['id']} ...")
-        predictions = run_variant(variant, cfg)
-        path = save_run_predictions(run_id, variant["id"], predictions, output_dir)
-        print(f"    saved {len(predictions)} predictions -> {path}")
+        variant_id = variant["id"]
+        path = output_dir / f"{run_id}_{variant_id}.jsonl"
+        existing_count = _count_jsonl_records(path)
+
+        if (
+            args.resume
+            and existing_count == expected_per_variant
+            and existing_count > 0
+        ):
+            completed_variants.append(variant_id)
+            total_completed += existing_count
+            print(
+                f"  variant: {variant_id} ... skipped (resume, {existing_count}/{expected_per_variant})"
+            )
+            _write_progress(
+                progress_path,
+                {
+                    "run_id": run_id,
+                    "status": "running",
+                    "current_variant": None,
+                    "completed_variants": completed_variants,
+                    "total_variants": len(variants_to_run),
+                    "variant_expected_predictions": expected_per_variant,
+                    "total_expected_predictions": total_expected,
+                    "total_completed_predictions": total_completed,
+                },
+            )
+            continue
+
+        if path.exists():
+            if existing_count:
+                print(
+                    f"  variant: {variant_id} ... restarting from scratch "
+                    f"(existing partial output {existing_count}/{expected_per_variant})"
+                )
+            path.unlink()
+        else:
+            print(f"  variant: {variant_id} ...")
+
+        _write_progress(
+            progress_path,
+            {
+                "run_id": run_id,
+                "status": "running",
+                "current_variant": variant_id,
+                "completed_variants": completed_variants,
+                "total_variants": len(variants_to_run),
+                "variant_expected_predictions": expected_per_variant,
+                "current_variant_completed_predictions": 0,
+                "total_expected_predictions": total_expected,
+                "total_completed_predictions": total_completed,
+            },
+        )
+
+        variant_count = 0
+        for prediction in iter_variant_predictions(variant, cfg):
+            append_prediction(path, prediction)
+            variant_count += 1
+            total_completed += 1
+            if variant_count % 10 == 0 or variant_count == expected_per_variant:
+                print(
+                    f"    progress {variant_count}/{expected_per_variant}", flush=True
+                )
+            _write_progress(
+                progress_path,
+                {
+                    "run_id": run_id,
+                    "status": "running",
+                    "current_variant": variant_id,
+                    "completed_variants": completed_variants,
+                    "total_variants": len(variants_to_run),
+                    "variant_expected_predictions": expected_per_variant,
+                    "current_variant_completed_predictions": variant_count,
+                    "current_output_path": str(path),
+                    "total_expected_predictions": total_expected,
+                    "total_completed_predictions": total_completed,
+                },
+            )
+
+        completed_variants.append(variant_id)
+        print(f"    saved {variant_count} predictions -> {path}")
+        _write_progress(
+            progress_path,
+            {
+                "run_id": run_id,
+                "status": "running",
+                "current_variant": None,
+                "completed_variants": completed_variants,
+                "total_variants": len(variants_to_run),
+                "variant_expected_predictions": expected_per_variant,
+                "total_expected_predictions": total_expected,
+                "total_completed_predictions": total_completed,
+            },
+        )
+
+    _write_progress(
+        progress_path,
+        {
+            "run_id": run_id,
+            "status": "completed",
+            "current_variant": None,
+            "completed_variants": completed_variants,
+            "total_variants": len(variants_to_run),
+            "variant_expected_predictions": expected_per_variant,
+            "total_expected_predictions": total_expected,
+            "total_completed_predictions": total_completed,
+        },
+    )
 
     print(f"\nDone. Results in {output_dir}")
 

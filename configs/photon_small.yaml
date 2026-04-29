@@ -153,7 +153,11 @@ model:
 
   # Answer generator (shared with baseline for fair comparison):
   provider: "photon"
-  model_id: "mlx-community/Qwen2.5-Coder-14B-Instruct-4bit"
+  # 採用 (2026-04-28): Qwen3.5-9B-MLX-4bit no-think モード
+  # 評価エビデンス: reports/qwen_model_matrix_20260428_400cmp_report.md (400-sample 比較)
+  # PHOTON+Qwen3.5 が最良: static p50 11,781 ms (-44.3%), multi-turn p50 7,438 ms (-43.6%), NC 0.00%
+  # Note: tokenizer_id は PHOTON 訓練 checkpoint 互換性のため Qwen 2.5 を維持。
+  model_id: "mlx-community/Qwen3.5-9B-MLX-4bit"
 
   # Issue #148 Phase A0/A.1 (Gate 2 v5): PHOTON checkpoint loading.
   # Resolved against PHOTON_CHECKPOINT_ROOT (defaults to ./checkpoints/).

@@ -64,23 +64,23 @@ def detect_language(question: str) -> Literal["ja", "en", "other"]:
 
 
 _SYSTEM = f"""\
-You are a senior software engineer assistant specialized in code repository analysis.
+You are an evidence-grounded assistant for document analysis.
 
 Rules:
-1. Answer ONLY based on the provided code chunks labeled [C:N].
+1. Answer ONLY based on the provided documents labeled [C:N].
 2. Cite evidence with [C:N] notation (e.g., "The router is defined in [C:3]").
-3. If you quote code verbatim, copy it exactly from the chunk.
-4. If the chunks do not contain sufficient evidence, say "{ABSTAIN_MARKER}" and explain what is missing.
-5. Never assert facts without citing at least one chunk.
+3. If you quote source text or code verbatim, copy it exactly from the document.
+4. If the documents do not contain sufficient evidence, say "{ABSTAIN_MARKER}" and explain what is missing.
+5. Never assert facts without citing at least one document.
 6. Respond in the same language as the question.
 7. For design, comparison, change-planning, impact-analysis, or bug-localization \
-questions: you MAY reason from patterns visible in the code chunks. \
+questions: you MAY reason from patterns visible in the documents. \
 - Impact analysis: identify callers, subclasses, and dependent modules visible in \
-the chunks and describe what would break or need updating [C:N]. \
-- Bug localization: trace the code path in the chunks and name the component most \
+the documents and describe what would break or need updating [C:N]. \
+- Bug localization: trace the code path in the documents and name the component most \
 likely responsible for the described symptom [C:N]. \
 - Design/change-planning: provide a structured recommendation (pros/cons/recommendation). \
-Cite the relevant code with [C:N]. Do NOT abstain solely because there is no \
+Cite the relevant evidence with [C:N]. Do NOT abstain solely because there is no \
 explicit documentation — use the code structure itself as evidence.\
 """
 
@@ -116,7 +116,7 @@ and add a lightweight middleware only for blanket unauthenticated-request reject
 
 Example 4 — impact analysis question (reason from code structure):
 Q: What is the impact of changing the `Param` base class in params.py?
-A: Based on the code chunks, `Param` is the base class for all parameter types \
+A: Based on the documents, `Param` is the base class for all parameter types \
 in FastAPI [C:1]. The following are directly affected:
 
 1. **Subclasses** [C:1]: `Path`, `Query`, `Header`, `Cookie`, `Body`, `Form`, \
@@ -129,9 +129,9 @@ wrappers around `Param` instances — a signature change would break resolution.
 `field_info` attributes from `Param` to generate the schema; changing field \
 names would silently break the generated spec.
 
-Example 5 — bug localization question (trace code path from chunks):
+Example 5 — bug localization question (trace code path from documents):
 Q: What is the likely cause of a JSON response encoding error?
-A: Tracing the JSON serialization path in the chunks:
+A: Tracing the JSON serialization path in the documents:
 
 1. **`jsonable_encoder()`** [C:2] in `encoders.py` converts response objects to \
 JSON-serializable types. If a custom object is not handled by `ENCODERS_BY_TYPE` \
@@ -190,7 +190,7 @@ pattern already used for the database session in [C:3].\
 
 _EVIDENCE_HEADER = (
     "IMPORTANT: You MUST cite every factual claim"
-    " using [C:N] notation from the chunks below."
+    " using [C:N] notation from the documents below."
 )
 
 _FORMAT_HINT_SHORT = """\
@@ -216,8 +216,8 @@ _JP_INSTITUTIONAL_HINT = """\
 
 Additional rules for Japanese questions about institutional documents:
 - 制度文書を根拠に回答する場合は、可能な範囲で条文番号 (第◯条/第◯項/第◯号) を引用すること。
-- 制度文書に含まれる法令名・文書名は、根拠 chunk に正式名称がある場合は省略せず記載すること。
-- 質問が該当条文を求めており、根拠 chunk に該当条文が無い場合は「該当条文なし」と明記すること。
+- 制度文書に含まれる法令名・文書名は、根拠ドキュメントに正式名称がある場合は省略せず記載すること。
+- 質問が該当条文を求めており、根拠ドキュメントに該当条文が無い場合は「該当条文なし」と明記すること。
 """
 
 
@@ -245,7 +245,7 @@ def build_messages(
         parts.append(f"## Session Summary\n{session_summary}")
     if history_text:
         parts.append(f"## Conversation History\n{history_text}")
-    parts.append(f"## Code Chunks\n{evidence_text}")
+    parts.append(f"## Documents\n{evidence_text}")
     parts.append(f"## Question\n{question}")
     hint = _FORMAT_HINT if include_few_shot else _FORMAT_HINT_SHORT
     parts.append(f"## Instructions\n{hint}")

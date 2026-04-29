@@ -146,7 +146,10 @@ model:
   architecture: "photon_decoder"
 
   provider: "photon"
-  model_id: "mlx-community/Qwen2.5-Coder-14B-Instruct-4bit"
+  # 採用 (2026-04-28): Qwen3.5-9B-MLX-4bit no-think モード
+  # 評価エビデンス: reports/qwen_model_matrix_20260428_400cmp_report.md
+  # Note: tokenizer_id は PHOTON 訓練 checkpoint 互換性のため Qwen 2.5 を維持。
+  model_id: "mlx-community/Qwen3.5-9B-MLX-4bit"
 
   base_embed_dim: 256
   hidden_size: 1024

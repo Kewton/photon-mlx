@@ -77,6 +77,25 @@ opus 単独レビューは「設計の論理整合性」を確認できるが、
 - [ ] string-existence test は具体フレーズ (例: 「Codex 担当 Stage は必須」) で完全一致 assert (既存類似文字列との衝突を避ける)
 - [ ] **private API (`_build_photon_deps` / `_resolve_checkpoint_path` / `_load_photon_checkpoint`) の signature を変更する場合**、`tests/integration/test_photon_real_weights.py` (Issue #145) と `baseline_reporag/tests/test_photon_pipeline_checkpoint_load.py` の両方が追従更新されているか確認。前者は real PhotonModel + 実 checkpoint で load path 全体を pin、後者は MagicMock 境界で code path を pin する補完関係 (DR3-001)
 
+## 6. Prompt 中立性チェック (Issue #178 follow-up)
+
+production prompt template (`baseline_reporag/generation/prompt.py`) を変更する PR では:
+
+- [ ] corpus type に依存する語 (`code chunks` / `コードチャンク` / `code` / `repository` 等) を generic container として使っていない
+- [ ] specific な対象を「コード」「リポジトリ」と呼ぶのは可、generic container は `documents` / `ドキュメント` で統一
+- [ ] LLM-visible prompt の standalone `chunk(s)` (regex `\bchunks?\b`) / `根拠 chunk` を generic container として使っていない (内部 Python identifier `Chunk` / `chunk_id` / `pack.chunks` は除外)
+- [ ] system role が `code repository analysis` 固定になっていない (`evidence-grounded ... document analysis` 系の neutral 表現)
+- [ ] `[C:N]` citation marker は `resolve_citations` (`baseline_reporag/citation.py`) との契約のため改名しない
+- [ ] `ABSTAIN_MARKER = "根拠が不足しています"` (`prompt.py`) を変更しない (grader 互換)
+- [ ] ja / en 両 prompt (`_SYSTEM` + `_JP_INSTITUTIONAL_HINT`) を同期更新
+- [ ] 過去 Issue 設計書 (`workspace/design/issue-N-*-design-policy.md`) は履歴保全のため prompt 中立化と同期しない
+- [ ] PHOTON checkpoint 互換性: training input に `_SYSTEM` が含まれていないことを `configs/institutional_docs_photon_retrain.yaml` / `photon_mlx/data.py` / `scripts/generate_institutional_training_corpus.py` の grep で確認 (詳細は Issue #178 設計書 Section 8.1)。**grep 結果は PHOTON checkpoint 再訓練不要の根拠に限られる**
+- [ ] **institutional 軽量 eval (50 sample) は原則実施** (Issue #178 設計書 Section 8.3)。generation prompt distribution は変わるため、grep 結果のみで skip しない
+  - 実施する場合: NC rate ≤ 2% / no-citation rate +3pt 以内 / reasoning leak 0% を満たす
+  - skip する場合は **例外として** 以下を PR description に記録: (i) skip 理由 (時間/環境制約等)、(ii) Section 8.1 grep 結果、(iii) unit test (`baseline_reporag/tests/test_prompt.py::TestPromptDomainNeutrality`) + smoke check 結果
+
+回帰防止: `baseline_reporag/tests/test_prompt.py::TestPromptDomainNeutrality` が banned-substring assert を pin する SSoT。詳細禁止 literal 一覧は Issue #178 設計書 Section 8.0 を参照。
+
 ## 5. 関連リンク
 
 - 設計方針書テンプレート: `workspace/design/issue-{N}-*-design-policy.md`
@@ -85,4 +104,4 @@ opus 単独レビューは「設計の論理整合性」を確認できるが、
   - `/multi-stage-design-review`: `.claude/commands/multi-stage-design-review.md`
   - `/pm-auto-issue2dev`: `.claude/commands/pm-auto-issue2dev.md`
   - `/pm-auto-design2dev`: `.claude/commands/pm-auto-design2dev.md`
-- 関連 Issue: #140 (本 checklist), #139 (CI grep 自動化), #138 (tokenizer mismatch), #135 (PHOTON 再学習)
+- 関連 Issue: #140 (本 checklist), #139 (CI grep 自動化), #138 (tokenizer mismatch), #135 (PHOTON 再学習), #178 (prompt 中立性)

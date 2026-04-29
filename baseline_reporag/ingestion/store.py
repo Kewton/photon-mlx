@@ -56,12 +56,22 @@ def _row_to_chunk(row: tuple) -> Chunk:
 
 
 class ChunkStore:
-    """SQLite-backed persistent chunk store."""
+    """SQLite-backed persistent chunk store.
+
+    Streamlit's session_state caches the pipeline (and therefore this
+    ChunkStore) but reruns the script on a fresh thread on every UI
+    interaction. The default ``sqlite3.connect`` enforces same-thread
+    use and raises ``ProgrammingError`` on cross-thread reuse, breaking
+    multi-turn chat. We open with ``check_same_thread=False`` because
+    this app serialises queries per session — there is no concurrent
+    access to a single ``ChunkStore`` instance from multiple threads,
+    only sequential reuse from different threads across reruns.
+    """
 
     def __init__(self, db_path: str | Path) -> None:
         db_path = Path(db_path)
         db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(db_path))
+        self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
         self._conn.executescript(_SCHEMA)
         self._conn.commit()
 

@@ -7,6 +7,7 @@ path and relying only on the helper functions that do not touch ``st``.
 from __future__ import annotations
 
 import importlib.util
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -223,7 +224,11 @@ class TestRunQueryUsesBuildPipeline:
         fake_pipeline = MagicMock()
         fake_pipeline.query.return_value = result
 
-        fake_cfg = SimpleNamespace(model=SimpleNamespace(provider="baseline"))
+        fake_cfg = SimpleNamespace(
+            model=SimpleNamespace(provider="baseline"),
+            repo=SimpleNamespace(repo_id="demo_repo", repo_commit="orig"),
+            paths=SimpleNamespace(data_root=str(tmp_path)),
+        )
 
         fake_session_state = _FakeSessionState()
 
@@ -247,7 +252,11 @@ class TestRunQueryUsesBuildPipeline:
 
     def test_run_query_handles_mlx_import_error(self, tmp_path: Path) -> None:
         proj = _make_proj(tmp_path, name="demo_photon")
-        fake_cfg = SimpleNamespace(model=SimpleNamespace(provider="photon"))
+        fake_cfg = SimpleNamespace(
+            model=SimpleNamespace(provider="photon"),
+            repo=SimpleNamespace(repo_id="demo_repo", repo_commit="orig"),
+            paths=SimpleNamespace(data_root=str(tmp_path)),
+        )
 
         fake_session_state = _FakeSessionState()
 
@@ -335,7 +344,11 @@ class TestRunQueryUsesPhotonConfigPath:
         )
         fake_pipeline = MagicMock()
         fake_pipeline.query.return_value = result
-        fake_cfg = SimpleNamespace(model=SimpleNamespace(provider="photon"))
+        fake_cfg = SimpleNamespace(
+            model=SimpleNamespace(provider="photon"),
+            repo=SimpleNamespace(repo_id="demo_repo", repo_commit="orig"),
+            paths=SimpleNamespace(data_root=str(tmp_path)),
+        )
         fake_session_state = _FakeSessionState()
 
         with (
@@ -377,7 +390,11 @@ class TestRunQueryUsesPhotonConfigPath:
         )
         fake_pipeline = MagicMock()
         fake_pipeline.query.return_value = result
-        fake_cfg = SimpleNamespace(model=SimpleNamespace(provider="baseline"))
+        fake_cfg = SimpleNamespace(
+            model=SimpleNamespace(provider="baseline"),
+            repo=SimpleNamespace(repo_id="demo_repo", repo_commit="orig"),
+            paths=SimpleNamespace(data_root=str(tmp_path)),
+        )
         fake_session_state = _FakeSessionState()
 
         with (
@@ -420,7 +437,11 @@ class TestRunQueryUsesPhotonConfigPath:
         )
         fake_pipeline = MagicMock()
         fake_pipeline.query.return_value = result
-        fake_cfg = SimpleNamespace(model=SimpleNamespace(provider="baseline"))
+        fake_cfg = SimpleNamespace(
+            model=SimpleNamespace(provider="baseline"),
+            repo=SimpleNamespace(repo_id="demo_repo", repo_commit="orig"),
+            paths=SimpleNamespace(data_root=str(tmp_path)),
+        )
         fake_session_state = _FakeSessionState()
 
         with (
@@ -456,3 +477,112 @@ class TestRunQueryUsesPhotonConfigPath:
             assert first_key not in fake_session_state, (
                 "stale pipeline cache for the previous config path was not evicted"
             )
+
+
+class TestRunQueryOverridesRepoFromProject:
+    """``_run_query`` MUST override ``cfg.repo.repo_id`` / ``cfg.repo.repo_commit``
+    from the UI-selected ``proj.repo_id`` so ``build_pipeline`` loads the right
+    corpus's indexes (``data/indexes/{cfg.repo.repo_id}``). This guards the
+    silent-retrieval-failure trap observed when a project's ``repo_id`` differs
+    from the config's hardcoded value (e.g. ``inst_test`` paired with
+    ``configs/institutional_docs_photon.yaml`` whose ``repo_id`` is
+    ``institutional_documents``).
+    """
+
+    def test_run_query_mutates_cfg_repo_to_match_proj_repo_id(
+        self, tmp_path: Path
+    ) -> None:
+        # Create a chunks.db so override_repo_for_pipeline can resolve the
+        # actual repo_commit from disk.
+        idx_dir = tmp_path / "indexes" / "alpha_repo"
+        idx_dir.mkdir(parents=True)
+        db_path = idx_dir / "chunks.db"
+        conn = sqlite3.connect(str(db_path))
+        try:
+            conn.execute(
+                """CREATE TABLE chunks (
+                    chunk_id TEXT PRIMARY KEY,
+                    repo_id TEXT NOT NULL,
+                    repo_commit TEXT NOT NULL,
+                    rel_path TEXT NOT NULL,
+                    language TEXT,
+                    start_line INTEGER,
+                    end_line INTEGER,
+                    section_header TEXT,
+                    content TEXT
+                )"""
+            )
+            conn.execute(
+                "INSERT INTO chunks VALUES (?,?,?,?,?,?,?,?,?)",
+                (
+                    "alpha_repo::doc.md::1-10",
+                    "alpha_repo",
+                    "real-commit-abc",
+                    "doc.md",
+                    "markdown",
+                    1,
+                    10,
+                    "",
+                    "x",
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        proj = _make_proj(tmp_path)
+        proj.repo_id = "alpha_repo"  # UI selection
+        proj.config_path = str(tmp_path / "cfg.yaml")
+        Path(proj.config_path).write_text("model:\n  provider: baseline\n")
+
+        # config has the WRONG repo (the trap reproduced)
+        fake_cfg = SimpleNamespace(
+            model=SimpleNamespace(provider="baseline"),
+            repo=SimpleNamespace(
+                repo_id="institutional_documents",
+                repo_commit="9e500539",
+            ),
+            paths=SimpleNamespace(data_root=str(tmp_path)),
+        )
+
+        # capture cfg state at build_pipeline call time
+        captured = {}
+
+        def fake_build(cfg):
+            captured["repo_id"] = cfg.repo.repo_id
+            captured["repo_commit"] = cfg.repo.repo_commit
+            return MagicMock(
+                query=MagicMock(
+                    return_value=SimpleNamespace(
+                        answer="ok",
+                        session_id="s",
+                        turn_id=1,
+                        cited_chunk_ids=[],
+                        wrong_citation_indices=[],
+                        no_citation=False,
+                        latency=SimpleNamespace(total_ms=0.0),
+                        memory=SimpleNamespace(),
+                        drift_metrics=None,
+                    )
+                )
+            )
+
+        fake_session_state = _FakeSessionState()
+        with (
+            patch.object(photon_app, "load_config", create=True, return_value=fake_cfg),
+            patch.object(
+                photon_app, "build_pipeline", create=True, side_effect=fake_build
+            ),
+            patch.object(photon_app.st, "session_state", fake_session_state),
+        ):
+            photon_app._run_query(proj, "q?", "sess")
+
+        # build_pipeline saw the OVERRIDDEN repo metadata, not the config's hardcoded value
+        assert captured["repo_id"] == "alpha_repo", (
+            "cfg.repo.repo_id must be overridden to the project's repo_id "
+            "before build_pipeline is invoked"
+        )
+        assert captured["repo_commit"] == "real-commit-abc", (
+            "cfg.repo.repo_commit must be resolved from chunks.db "
+            "(otherwise graph_expansion's iter_repo SQL filter sees no rows)"
+        )

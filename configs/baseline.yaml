@@ -244,7 +244,10 @@ session_memory:
 
 model:
   provider: "mlx_lm"          # mlx_lm | transformers | mock
-  model_id: "mlx-community/Qwen2.5-Coder-14B-Instruct-4bit"
+  # 採用 (2026-04-28): Qwen3.5-9B-MLX-4bit no-think モード
+  # 評価エビデンス: reports/qwen_model_matrix_20260428_400cmp_report.md (400-sample 比較)
+  # baseline static p50 -38.6%, multi-turn p50 -46.2%, NC 2.50→0.00% / 1.67→0.00%
+  model_id: "mlx-community/Qwen3.5-9B-MLX-4bit"
   tokenizer_id: ""
   trust_remote_code: false
   use_quantized: true

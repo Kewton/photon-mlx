@@ -99,7 +99,7 @@ class TestIsRefusalAnswer:
         # The bug: baseline writes refusal + [C:1] and used to be counted as cited
         assert (
             is_refusal_answer(
-                "根拠が不足しています。提供されたコードチャンクには情報がありません [C:1]"
+                "根拠が不足しています。提供されたドキュメントには情報がありません [C:1]"
             )
             is True
         )
@@ -125,7 +125,7 @@ class TestResolveCitationsRefusalFlag:
 
     def test_refusal_with_citation_marks_is_refusal(self) -> None:
         pack = _make_pack(3)
-        answer = "根拠が不足しています。提供されたコードチャンクからは特定不能 [C:1]"
+        answer = "根拠が不足しています。提供されたドキュメントからは特定不能 [C:1]"
         result = resolve_citations(answer, pack)
         assert result.is_refusal is True
         # 既存挙動の互換性: 形式的な [C:1] は no_citation=False のまま

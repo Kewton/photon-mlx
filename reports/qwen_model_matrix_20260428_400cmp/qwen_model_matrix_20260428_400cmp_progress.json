@@ -1,0 +1,12 @@
+{
+  "run_id": "qwen_model_matrix_20260428_400cmp",
+  "status": "completed",
+  "current_variant": null,
+  "completed_variants": [
+    "photon_qwen35_nothink"
+  ],
+  "total_variants": 1,
+  "variant_expected_predictions": 100,
+  "total_expected_predictions": 100,
+  "total_completed_predictions": 100
+}

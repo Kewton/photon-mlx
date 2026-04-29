@@ -24,15 +24,64 @@ from baseline_reporag.ingestion.store import ChunkStore
 
 
 def resolve_commit(repo_path: str, ref: str) -> str:
+    """Resolve ``ref`` to a 40-char commit-id string used in chunks.db.
+
+    For git repositories, returns the actual commit SHA (legacy behaviour).
+    For non-git directories (PDF/markdown corpora 等の制度文書 use case)
+    falls back to a deterministic id derived from the maximum file mtime
+    under ``repo_path``: re-ingesting the same snapshot returns the same
+    id, while edits/additions produce a new id. The 40-char length matches
+    git SHA conventions so downstream tooling that assumes SHA-shape ids
+    keeps working.
+
+    Use a 40-char SHA explicitly (``--commit <SHA>``) to bypass both paths.
+    """
     if ref == "HEAD" or len(ref) < 40:
-        result = subprocess.run(
-            ["git", "-C", repo_path, "rev-parse", ref],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        return result.stdout.strip()
+        try:
+            result = subprocess.run(
+                ["git", "-C", repo_path, "rev-parse", ref],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            return result.stdout.strip()
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            return _synthesize_non_git_commit(repo_path)
     return ref
+
+
+def _synthesize_non_git_commit(repo_path: str) -> str:
+    """Make a stable 40-char ``manual-<mtime>`` id for non-git directories.
+
+    Falls back to top-level mtime when ``rglob`` finds no files (empty dir).
+    Per-file mtimes are walked so editing any file inside produces a fresh
+    id even when the parent directory's mtime would not change.
+    """
+    repo = Path(repo_path)
+    if not repo.exists():
+        raise FileNotFoundError(f"repo_path not found: {repo_path}")
+
+    max_mtime = repo.stat().st_mtime
+    for path in repo.rglob("*"):
+        try:
+            mtime = path.stat().st_mtime
+        except (OSError, FileNotFoundError):
+            # Broken symlinks etc — skip silently; they wouldn't affect
+            # the chunk content anyway.
+            continue
+        if mtime > max_mtime:
+            max_mtime = mtime
+
+    mtime_ms = int(max_mtime * 1000)
+    # ``manual-`` (7 chars) + 33 zero-padded digits = 40 chars total.
+    synthesized = f"manual-{mtime_ms:033d}"
+    print(
+        f"[warn] {repo_path} is not a git repository; "
+        f"using synthesized commit id {synthesized!r} "
+        f"(based on max file mtime).",
+        file=sys.stderr,
+    )
+    return synthesized
 
 
 def main() -> None:
