@@ -2,12 +2,31 @@
 
 from __future__ import annotations
 
+import subprocess
+import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from baseline_reporag.generation.evidence_pack import build_evidence_pack
 from baseline_reporag.retrieval.graph_expansion import ExpandedChunkRef
+
+
+def _mlx_metal_available() -> bool:
+    probe = "import mlx.core as mx; mx.array([1]); print('ok')"
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    return result.returncode == 0
+
+
+pytestmark = pytest.mark.skipif(
+    not _mlx_metal_available(),
+    reason="PHOTON pipeline tests require an accessible Metal device",
+)
 
 
 def _refs(chunk_ids: list[str]) -> list[ExpandedChunkRef]:
@@ -663,7 +682,7 @@ class TestBuildPhotonDepsRealTokenizer:
         cfg = load_config(str(cfg_file))
 
         fake_tokenizer = MagicMock()
-        fake_tokenizer.vocab_size = 32000  # mismatch
+        fake_tokenizer.vocab_size = 200000  # exceeds configured vocab
         fake_tokenizer.pad_token_id = 0
 
         with patch(

@@ -1,16 +1,56 @@
 from __future__ import annotations
 
-from typing import Callable
+import functools
+import subprocess
+import sys
+from typing import Any, Callable
 
 from .qwen_thinking import normalize_qwen_thinking
 
-try:
-    import mlx_lm
-    from mlx_lm.sample_utils import make_sampler
 
+class _UnavailableMlxLm:
+    def load(self, *_args: Any, **_kwargs: Any) -> Any:
+        raise ImportError("mlx_lm is required and must have an accessible Metal device")
+
+    def generate(self, *_args: Any, **_kwargs: Any) -> str:
+        raise ImportError("mlx_lm is required and must have an accessible Metal device")
+
+
+mlx_lm: Any = _UnavailableMlxLm()
+make_sampler: Callable[..., Callable] | None = None
+_HAS_MLX: bool | None = None
+
+
+@functools.lru_cache(maxsize=1)
+def _mlx_metal_available() -> bool:
+    probe = "import mlx.core as mx; mx.array([1]); print('ok')"
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    return result.returncode == 0
+
+
+def _ensure_mlx_lm() -> None:
+    global _HAS_MLX, make_sampler, mlx_lm
+
+    if _HAS_MLX is True:
+        return
+    if not _mlx_metal_available():
+        _HAS_MLX = False
+        raise ImportError("mlx_lm is required and must have an accessible Metal device")
+    try:
+        import mlx_lm as loaded_mlx_lm
+        from mlx_lm.sample_utils import make_sampler as loaded_make_sampler
+    except ImportError:
+        _HAS_MLX = False
+        raise
+
+    mlx_lm = loaded_mlx_lm
+    make_sampler = loaded_make_sampler
     _HAS_MLX = True
-except ImportError:
-    _HAS_MLX = False
 
 
 class Generator:
@@ -34,9 +74,9 @@ class Generator:
     def _load(self) -> None:
         if self._model is not None:
             return
-        if not _HAS_MLX:
-            raise ImportError("mlx_lm is required: pip install mlx-lm")
+        _ensure_mlx_lm()
         self._model, self._tokenizer = mlx_lm.load(self._model_id)
+        assert make_sampler is not None
         self._sampler = make_sampler(
             temp=self._temperature,
             top_p=self._top_p,

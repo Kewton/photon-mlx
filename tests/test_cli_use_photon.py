@@ -116,3 +116,33 @@ def test_use_photon_with_explicit_config_errors(monkeypatch, capsys) -> None:
     assert excinfo.value.code == 2  # argparse error exit code
     err = capsys.readouterr().err
     assert "--use-photon cannot be combined with --config" in err
+
+
+def test_subcommand_ask_preserves_query_flow(
+    mock_pipeline_and_config, monkeypatch
+) -> None:
+    monkeypatch.setattr(
+        "sys.argv",
+        ["photon-rag", "ask", "--question", "Q?", "--repo-id", "fake_repo"],
+    )
+
+    cli_module.main()
+
+    assert mock_pipeline_and_config["config_path"] == "configs/baseline.yaml"
+
+
+def test_ingest_subcommand_dispatches_existing_script(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_dispatch(module_name, forwarded_args):
+        captured["module_name"] = module_name
+        captured["forwarded_args"] = list(forwarded_args)
+
+    monkeypatch.setattr(cli_module, "_dispatch_script", fake_dispatch)
+
+    cli_module.main(["ingest", "--repo", "/tmp/repo", "--repo-id", "tmp_repo"])
+
+    assert captured == {
+        "module_name": "scripts.ingest_repo",
+        "forwarded_args": ["--repo", "/tmp/repo", "--repo-id", "tmp_repo"],
+    }

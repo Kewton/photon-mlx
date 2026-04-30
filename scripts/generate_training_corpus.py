@@ -113,7 +113,7 @@ def main() -> None:
     args = parser.parse_args()
 
     cfg = load_config(args.config)
-    repo_commit = args.commit if args.commit else cfg.repo.repo_commit
+    repo_commit = getattr(args, "commit", None) or cfg.repo.repo_commit
     idx_dir = Path(cfg.paths.data_root) / "indexes" / args.repo_id
     store = ChunkStore(idx_dir / "chunks.db")
 

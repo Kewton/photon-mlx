@@ -149,6 +149,52 @@ project-root/
 > **採用構成 (2026-04-28)**: PHOTON + Qwen3.5-9B-MLX-4bit no-think モード。
 > 詳細は [`reports/qwen_model_matrix_20260428_400cmp_report.md`](reports/qwen_model_matrix_20260428_400cmp_report.md) と [`docs/playground.md`](docs/playground.md) 参照。
 
+### pip install ベースの MVP 手順
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -U pip
+
+# ローカル検証では repository root から wheel / editable install する。
+# PyPI 公開後は `pip install photon-rag` に置き換える。
+pip install -e .
+```
+
+```bash
+# 1. 対象 repo / markdown corpus を ingest
+photon-rag ingest \
+  --repo /path/to/target-repo \
+  --repo-id target_repo \
+  --commit HEAD
+
+# 2. index を構築
+photon-rag index --repo-id target_repo
+
+# 3. Python repo では symbol graph、markdown corpus では heading graph を必要に応じて構築
+photon-rag symbol-graph --repo-id target_repo
+photon-rag heading-graph --repo-id target_repo --config configs/institutional_docs.yaml
+
+# 4. 1 問問い合わせ
+photon-rag ask --repo-id target_repo --question "認証処理の入口はどこですか？"
+
+# 5. server 起動
+photon-rag serve --config configs/baseline.yaml
+```
+
+PHOTON checkpoint を自動取得する場合は、公開先を `PHOTON_CHECKPOINT_REPO_ID`
+または `model.checkpoint_repo_id` に設定します。既に配置済みの場合は従来通り
+`PHOTON_CHECKPOINT_ROOT` 配下の `model.checkpoint_path` が使われます。
+
+```bash
+export PHOTON_CHECKPOINT_ROOT="$HOME/.cache/photon-rag/checkpoints"
+export PHOTON_CHECKPOINT_REPO_ID="<org>/<checkpoint-repo>"
+photon-rag ask \
+  --config configs/institutional_docs_photon.yaml \
+  --repo-id target_repo \
+  --question "..."
+```
+
 ### Makefile を使う最短手順
 
 ```bash

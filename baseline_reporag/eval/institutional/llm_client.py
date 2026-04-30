@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
+from functools import lru_cache
 from typing import Callable, Literal, Protocol
 
 from baseline_reporag.generation.qwen_thinking import normalize_qwen_thinking
@@ -66,6 +69,18 @@ class OpenAIAdapter:
         return content or ""
 
 
+@lru_cache(maxsize=1)
+def _mlx_metal_available() -> bool:
+    probe = "import mlx.core as mx; mx.array([1]); print('ok')"
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    return result.returncode == 0
+
+
 class QwenMLXAdapter:
     """Adapter for Qwen2.5-Coder served via mlx_lm (offline fallback)."""
 
@@ -115,12 +130,10 @@ class QwenMLXAdapter:
             **template_kwargs,
         )
         if seed is not None:
-            try:
+            if _mlx_metal_available():
                 import mlx.core as mx
 
                 mx.random.seed(seed)
-            except Exception:
-                pass
         sampler = self._make_sampler(temp=temperature)
         return self._generate_fn(
             self._model,

@@ -14,7 +14,38 @@ production stub which was removed in Issue #139.
 
 from __future__ import annotations
 
+import functools
+import subprocess
+import sys
+from pathlib import Path
+
 import pytest
+
+
+@functools.lru_cache(maxsize=1)
+def _mlx_metal_available() -> bool:
+    """Return whether MLX can create a Metal-backed array on this runner.
+
+    Some headless macOS / sandboxed sessions have the ``mlx`` package
+    installed but no accessible Metal device. Importing ``mlx.core`` in the
+    main pytest process can abort Python before tests can skip, so probe in a
+    subprocess and use the exit status as the collection guard.
+    """
+
+    probe = "import mlx.core as mx; mx.array([1]); print('ok')"
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    return result.returncode == 0
+
+
+def pytest_ignore_collect(collection_path: Path, config: pytest.Config) -> bool:
+    if collection_path.suffix == ".py" and not _mlx_metal_available():
+        return True
+    return False
 
 
 class _StubTokenizer:

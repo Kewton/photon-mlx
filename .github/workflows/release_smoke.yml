@@ -1,0 +1,48 @@
+name: Release Smoke
+
+on:
+  pull_request:
+    paths:
+      - "pyproject.toml"
+      - "baseline_reporag/**"
+      - "photon_mlx/**"
+      - "torch_ref/**"
+      - "scripts/**"
+      - "configs/**"
+      - ".github/workflows/release_smoke.yml"
+  workflow_dispatch:
+
+jobs:
+  package-smoke:
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install build tools
+        run: python -m pip install -U pip build pytest
+      - name: Build wheel
+        run: python -m build
+      - name: Install wheel
+        run: python -m pip install dist/*.whl
+      - name: Console entrypoint smoke
+        run: |
+          photon-rag --help
+          photon-rag ask --help
+          photon-rag ingest --help
+          baseline-reporag --help
+      - name: Import smoke
+        run: |
+          python - <<'PY'
+          import baseline_reporag.cli
+          import baseline_reporag.pipeline_factory
+          from importlib import resources
+
+          assert resources.files("configs").joinpath("baseline.yaml").is_file()
+          print("baseline imports ok")
+          PY
+      - name: Unit smoke
+        run: python -m pytest tests/test_cli_use_photon.py tests/test_checkpoint_download.py -q

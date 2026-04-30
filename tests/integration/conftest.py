@@ -15,7 +15,11 @@ Scope notes (DR1-003 / DR4-005):
 
 from __future__ import annotations
 
+import functools
 import importlib
+import subprocess
+import sys
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -26,6 +30,24 @@ import pytest
 # test entry so an environment leak (e.g. a developer-set
 # ``PHOTON_ALLOW_RANDOM_INIT=1``) cannot mask a real failure.
 _ISOLATED_ENV_VARS = ("PHOTON_CHECKPOINT_ROOT", "PHOTON_ALLOW_RANDOM_INIT")
+
+
+@functools.lru_cache(maxsize=1)
+def _mlx_metal_available() -> bool:
+    probe = "import mlx.core as mx; mx.array([1]); print('ok')"
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    return result.returncode == 0
+
+
+def pytest_ignore_collect(collection_path: Path, config: pytest.Config) -> bool:
+    if collection_path.suffix == ".py" and not _mlx_metal_available():
+        return True
+    return False
 
 
 @pytest.fixture(autouse=True)
@@ -58,10 +80,8 @@ def _mlx_available_or_skip() -> None:
     a self-hosted M-series runner where this always succeeds.  Local linux/x86
     development boxes hit ``ImportError`` and we skip there rather than fail.
     """
-    try:
-        importlib.import_module("mlx.core")
-    except ImportError as exc:  # pragma: no cover - platform-dependent
-        pytest.skip(f"MLX not available on this runner: {type(exc).__name__}: {exc}")
+    if not _mlx_metal_available():
+        pytest.skip("MLX Metal device is not available on this runner")
 
 
 # ---------------------------------------------------------------------------

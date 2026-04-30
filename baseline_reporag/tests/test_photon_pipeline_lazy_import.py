@@ -77,7 +77,11 @@ class TestBuildPhotonDepsLazyImport:
                 from baseline_reporag.photon_pipeline import _build_photon_deps
 
                 cfg = load_config({str(cfg_file)!r})
-                _build_photon_deps(cfg)
+                try:
+                    _build_photon_deps(cfg)
+                except ImportError as exc:
+                    if "Metal device" not in str(exc):
+                        raise
 
             forbidden = [
                 m for m in sys.modules
