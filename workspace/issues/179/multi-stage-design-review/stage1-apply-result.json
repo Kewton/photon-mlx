@@ -1,0 +1,15 @@
+{
+  "stage": 1,
+  "action": "指摘事項反映（設計原則）",
+  "applied_findings": ["DR1-001", "DR1-002", "DR1-003", "DR1-004"],
+  "changes": [
+    "アーキテクチャ図: comparison.py の API を2つ（run_variant_with_pipeline, compare）に絞り、_build_and_run を private 化",
+    "DeltaResult から answer_similarity を削除（MVP スコープ外）",
+    "判断 #1 を更新: run_variant_with_pipeline への一本化と compare 高レベル関数への整理を反映",
+    "実装方針 #1 を全面更新: 公開 API 2つ + private _build_and_run の設計を具体的コードで示す",
+    "実装方針 #2 を更新: scripts/compare_baseline_photon.py の run_variant を _build_and_run ラッパーとして再定義",
+    "変更履歴セクションを追加"
+  ],
+  "design_policy_updated": true,
+  "design_policy_path": "workspace/design/issue-179-comparison-mode-ui-design-policy.md"
+}

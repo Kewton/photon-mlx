@@ -25,29 +25,17 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from baseline_reporag.config import load_config
-from baseline_reporag.pipeline_factory import build_pipeline, override_repo_for_pipeline
-
-
-@dataclass
-class VariantResult:
-    """1 variant (baseline or photon) の実行結果。"""
-
-    variant_id: str
-    config_path: str
-    answer: str
-    cited_chunk_ids: list[str]
-    no_citation: bool
-    latency_total_ms: float
-    latency_retrieval_ms: float
-    latency_generation_ms: float
-    memory_peak_mb: float
+# Re-export from baseline_reporag.comparison for backward compatibility.
+# VariantResult and build_pipeline are imported into this module's namespace
+# so that tests using importlib + monkeypatch.setattr(module, ...) continue to work.
+from baseline_reporag.comparison import VariantResult, _build_and_run  # noqa: F401
+from baseline_reporag.pipeline_factory import build_pipeline, override_repo_for_pipeline  # noqa: F401
 
 
 def run_variant(
@@ -57,28 +45,22 @@ def run_variant(
     repo_id: str,
     session_id: str,
 ) -> VariantResult:
-    """1 variant 分の pipeline を立てて 1 question を実行。"""
+    """1 variant 分の pipeline を立てて 1 question を実行。
+
+    Uses module-level build_pipeline so tests can monkeypatch it via
+    monkeypatch.setattr(module, "build_pipeline", ...).
+    """
+    from baseline_reporag.config import load_config
+    from baseline_reporag.comparison import run_variant_with_pipeline
+
     cfg = load_config(config_path)
     resolved_repo_id = repo_id or cfg.repo.repo_id
-    # build_pipeline は cfg.repo.repo_id から index dir を解決するため、
-    # caller の repo_id と異なる場合は事前に cfg を override する。
     override_repo_for_pipeline(cfg, resolved_repo_id)
-    pipeline = build_pipeline(cfg)
-    result = pipeline.query(
-        question=question,
-        session_id=session_id,
-        repo_id=resolved_repo_id,
-    )
-    return VariantResult(
-        variant_id=variant_id,
-        config_path=config_path,
-        answer=result.answer,
-        cited_chunk_ids=list(result.cited_chunk_ids),
-        no_citation=bool(result.no_citation),
-        latency_total_ms=float(result.latency.total_ms),
-        latency_retrieval_ms=float(result.latency.retrieval_ms),
-        latency_generation_ms=float(result.latency.generation_ms),
-        memory_peak_mb=float(result.memory.peak_mb),
+    pipeline = build_pipeline(
+        cfg
+    )  # uses module-level build_pipeline (monkeypatch target)
+    return run_variant_with_pipeline(
+        pipeline, question, session_id, resolved_repo_id, variant_id, config_path
     )
 
 
