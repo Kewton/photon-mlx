@@ -1,0 +1,60 @@
+{
+  "stage": 1,
+  "focus": "通常レビュー（1回目）",
+  "reviewer": "claude-opus",
+  "findings": [
+    {
+      "id": "S1-001",
+      "severity": "Must Fix",
+      "title": "Streamlit 並列実行の技術的制約が未記載",
+      "description": "Issue は「baseline + PHOTON を並列実行」と明記しているが、Streamlit はスクリプト実行モデルがシングルスレッドであり、`st.spinner` はブロッキング呼び出しのため naive 実装では逐次実行になる。`threading.Thread` / `concurrent.futures.ThreadPoolExecutor` で並列化できるが、Streamlit の session_state はメインスレッドからのみ安全にアクセスできる制約があり、結果の書き戻し方針（スレッド完了後にメインスレッドで st.rerun() を呼ぶ等）を設計する必要がある。この制約と解決方針が Issue に一切記載されていない。",
+      "suggestion": "「## 実装上の注意」セクションを追加し、「並列実行は `concurrent.futures.ThreadPoolExecutor` を使用。各スレッドは `VariantResult` を返すのみとし、session_state への書き込みはメインスレッドで行う」旨を明記する。Acceptance criteria に「並列実行でも UI がフリーズしない（スピナー表示中）」を追加する。"
+    },
+    {
+      "id": "S1-002",
+      "severity": "Must Fix",
+      "title": "比較モードで使用する baseline / PHOTON config の指定方法が未定義",
+      "description": "既存の `page_chat` は1プロジェクト1 config（`proj.config_path` / `proj.photon_config_path`）だが、比較モードでは baseline 用 config と PHOTON 用 config の2つが必要。Issue の「UI側」セクションには「同一プロジェクトでも baseline/photon の config と checkpoint を切替可能」とあるが、どの UI 要素でそれを指定するのか（プロジェクト設定画面に追加? 比較モード専用セレクタ? 固定で `configs/baseline.yaml` と `configs/photon_small.yaml`?）が完全に未定義。",
+      "suggestion": "「UI 側」セクションに「比較モード時は、左列 config = `proj.config_path`（baseline）、右列 config = `proj.photon_config_path`（PHOTON wizard 生成 YAML）を使用。どちらかが未設定の場合はトグルを disabled にし警告を表示する」と明記する。Acceptance criteria に「baseline config / PHOTON config が両方設定されていない場合、比較モードトグルを非活性にしてエラーメッセージを表示」を追加する。"
+    },
+    {
+      "id": "S1-003",
+      "severity": "Should Fix",
+      "title": "`run_comparison` 関数シグネチャと session_id 管理が曖昧",
+      "description": "Issue は `run_comparison(question, baseline_proj, photon_proj)` と記載しているが、`run_variant` が必要とする `session_id` の管理方針が未記載。比較モードでは multi-turn 対話（2ターン目以降の前文脈送信）をどう扱うか—turn ごとに baseline/photon 双方の session_id を維持するのか、比較は常に1ショットか—が曖昧。",
+      "suggestion": "`run_comparison` シグネチャを `run_comparison(question, baseline_config, photon_config, repo_id, baseline_session_id, photon_session_id) -> ComparisonResult` と具体化し、multi-turn 対話をサポートする旨を明記する。session_key は `f\"{session_key}_baseline\"` / `f\"{session_key}_photon\"` で分離することを Issue に記載する。"
+    },
+    {
+      "id": "S1-004",
+      "severity": "Should Fix",
+      "title": "PHOTON 利用不可時（MLX 未インストール）の比較モード挙動が未定義",
+      "description": "既存の `page_chat` には `photon_unavailable_key` による MLX 未インストール時のフォールバック処理がある（L1574）。比較モードで PHOTON pipeline 構築に失敗した場合の UI 挙動（トグル非活性? 右列にエラー表示?）が Issue に記載されていない。",
+      "suggestion": "Acceptance criteria に「PHOTON pipeline が利用不可の場合、比較モードトグルを disabled にし `PHOTON パイプラインが利用不可です` と表示する」を追加する。"
+    },
+    {
+      "id": "S1-005",
+      "severity": "Should Fix",
+      "title": "テスト方針が曖昧（既存 compare スクリプトのテストが実際には存在しない）",
+      "description": "Issue は「既存 compare スクリプト test を comparison module 経由にリファクタ」と記載しているが、コードベース照合の結果 `tests/test_comparison.py` は現在存在しない。リファクタすべき既存テストがない状態で、新規 `comparison.py` に対するテスト戦略（何をモックするか、どのレベルのテストを書くか）が未定義。",
+      "suggestion": "影響範囲の記述を「`tests/test_comparison.py`（新規作成）: `run_variant` をモックして `run_comparison` の結果集計・Delta 計算ロジックをユニットテスト」に修正する。"
+    },
+    {
+      "id": "S1-006",
+      "severity": "Nice to Have",
+      "title": "Delta セクションの「cited overlap」計算方法が未定義",
+      "description": "「cited overlap: 1/3」とあるが、Jaccard 係数（|A∩B|/|A∪B|）なのか単純な交差数/baseline 件数なのか未定義。実装者が独自に判断することになる。",
+      "suggestion": "「cited overlap は Jaccard 係数 (|baseline ∩ photon| / |baseline ∪ photon|) で計算する」と明記する。"
+    },
+    {
+      "id": "S1-007",
+      "severity": "Nice to Have",
+      "title": "cosine similarity の実現手段に言及があると実装者の判断が楽になる",
+      "description": "「回答の一致度 (cosine similarity, optional)」とあるが、すでに `sentence-transformers` が依存に含まれており、追加インストールなしで実現可能。optional であることは残しつつ、使用するライブラリを明示すると実装判断が容易になる。",
+      "suggestion": "「cosine similarity は既存依存の `sentence-transformers` を使用（optional、`configs/baseline.yaml` に `comparison.similarity_enabled: false` フラグで制御）」と記載する。"
+    }
+  ],
+  "must_fix_count": 2,
+  "should_fix_count": 3,
+  "nice_to_have_count": 2,
+  "overall_assessment": "Issue の方向性・スコープは明確で既存コードベースとの整合性も高い。ただし並列実行の Streamlit 制約（S1-001）と比較モード用 config の指定 UI（S1-002）は実装者が迷う核心部分であり、着手前に明確化が必要。Should Fix 3件も実装品質に直結するため合わせて対応を推奨する。"
+}

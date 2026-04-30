@@ -20,6 +20,10 @@ REFUSAL_PATTERNS: tuple[str, ...] = (
     "わかりません",
     "判断できません",
     "特定できません",
+    # Issue #177: phrases observed in actual refusal responses
+    "該当する情報は含まれていません",
+    "該当する情報が含まれていません",
+    "見当たりません",
 )
 
 
@@ -28,6 +32,18 @@ def is_refusal_answer(answer: str) -> bool:
     if not answer:
         return False
     return any(p in answer for p in REFUSAL_PATTERNS)
+
+
+def compute_refusal_score(answer: str) -> tuple[float, list[str]]:
+    """Return (score, matched_phrases) for *answer*.
+
+    score is 1.0 when any REFUSAL_PATTERNS phrase is found, 0.0 otherwise.
+    matched_phrases lists every pattern that was detected.
+    """
+    if not answer:
+        return 0.0, []
+    matches = [p for p in REFUSAL_PATTERNS if p in answer]
+    return (1.0, matches) if matches else (0.0, [])
 
 
 @dataclass

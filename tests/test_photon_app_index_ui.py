@@ -131,3 +131,88 @@ class TestDriverPhase0SharedResolver:
         commit = result.stdout.strip()
         assert commit.startswith("manual-")
         assert len(commit) == 40
+
+
+class TestDriverPhase35HeadingGraph:
+    """_INDEX_PIPELINE_DRIVER contains Phase 3.5 heading graph step (DR2-004)."""
+
+    def test_driver_contains_phase35(self):
+        """Driver string must include 'Phase 3.5' heading graph invocation."""
+        mod = _load_photon_app_module()
+        driver = mod._INDEX_PIPELINE_DRIVER
+        assert "Phase 3.5" in driver
+
+    def test_driver_phase35_uses_shell_false(self):
+        """Phase 3.5 subprocess call must not use shell=True (DR4-003)."""
+        mod = _load_photon_app_module()
+        driver = mod._INDEX_PIPELINE_DRIVER
+        assert "shell=True" not in driver
+
+    def test_driver_phase35_passes_commit(self):
+        """Phase 3.5 must pass --commit to build_heading_graph (CB-002)."""
+        mod = _load_photon_app_module()
+        driver = mod._INDEX_PIPELINE_DRIVER
+        phase35_start = driver.find("Phase 3.5")
+        done_pos = driver.find("'DONE'")
+        phase35_block = driver[phase35_start:done_pos]
+        assert "'--commit'" in phase35_block or '"--commit"' in phase35_block
+
+    def test_driver_phase35_before_done(self):
+        """Phase 3.5 must appear before DONE sentinel in driver."""
+        mod = _load_photon_app_module()
+        driver = mod._INDEX_PIPELINE_DRIVER
+        phase35_pos = driver.find("Phase 3.5")
+        done_pos = driver.find("'DONE'")
+        assert phase35_pos != -1
+        assert done_pos != -1
+        assert phase35_pos < done_pos
+
+    def test_sync_index_job_phase35_detected_before_phase3(self, tmp_path):
+        """'Phase 3.5' in log content sets phase='heading_graph', not 'symbol_graph'."""
+        mod = _load_photon_app_module()
+        IndexJob = mod.IndexJob
+
+        job = IndexJob(
+            job_id="j1",
+            repo_dir="/repo",
+            repo_id="demo",
+            config_path="/cfg.yaml",
+            pid=None,
+            status="running",
+        )
+        log_path = tmp_path / "run.log"
+        log_path.write_text("Phase 1: Ingest\nPhase 3.5: Heading Graph\n")
+        job.log_file = str(log_path)
+
+        from unittest.mock import patch
+
+        with patch.object(mod, "_is_process_running", return_value=True):
+            mod._sync_index_job(job)
+
+        assert job.phase == "heading_graph"
+
+    def test_sync_index_job_phase35_failed_does_not_complete(self, tmp_path):
+        """'Phase 3.5: Heading Graph FAILED' without 'DONE' → job fails."""
+        mod = _load_photon_app_module()
+        IndexJob = mod.IndexJob
+
+        job = IndexJob(
+            job_id="j2",
+            repo_dir="/repo",
+            repo_id="demo",
+            config_path="/cfg.yaml",
+            pid=9999999,
+            status="running",
+        )
+        log_path = tmp_path / "run.log"
+        log_path.write_text(
+            "Phase 1: Ingest\nPhase 3: Symbol Graph\nPhase 3.5: Heading Graph FAILED\n"
+        )
+        job.log_file = str(log_path)
+
+        from unittest.mock import patch
+
+        with patch.object(mod, "_is_process_running", return_value=False):
+            mod._sync_index_job(job)
+
+        assert job.status == "failed"

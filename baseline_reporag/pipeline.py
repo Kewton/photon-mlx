@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import uuid
 
-from .citation import CitationResult, resolve_citations
+from .citation import CitationResult, compute_refusal_score, resolve_citations
 from .config import Config
 
 # CB2-001 (codex-fix): ``QueryResult`` moved to the MLX-free
@@ -24,11 +24,15 @@ from .generation.generator import Generator
 from .generation.prompt import ABSTAIN_MARKER, _EVIDENCE_HEADER, build_messages
 from .indexing.embedding import EmbeddingIndex
 from .indexing.lexical import LexicalIndex
-from .indexing.symbol_graph import SymbolGraph
+from .indexing.graph_protocol import GraphLike
 from .ingestion.store import ChunkStore
 from .logger import RunLogger
 from .memory.session import SessionManager
 from .profiler import TurnProfiler
+from .retrieval.debug_builder import (
+    build_retrieval_debug_rows,
+    finalise_retrieval_debug,
+)
 from .retrieval.graph_expansion import expand_with_graph
 from .retrieval.hybrid import apply_file_type_boost, hybrid_search
 from .retrieval.query_expansion import expand_query
@@ -94,7 +98,7 @@ class RepoRAGPipeline:
         store: ChunkStore,
         lexical: LexicalIndex,
         embedding: EmbeddingIndex,
-        graph: SymbolGraph | None,
+        graph: GraphLike | None,
         sessions: SessionManager,
         generator: Generator,
         logger: RunLogger,
@@ -153,16 +157,23 @@ class RepoRAGPipeline:
                 repo_id=repo_id,
             )
 
+        # Snapshot pre-rerank scores for debug rows (Issue #176)
+        raw_snapshot = list(raw)
+
         # --- Reranking (noise filter + optional cross-encoder) ---
+        reranked_top: list = []
+        rejected_debug: list = []
         with prof.phase("reranking"):
             if self.reranker is not None:
-                raw = self.reranker.rerank(
+                reranked_top, rejected_debug = self.reranker.rerank_with_debug(
                     query=question,
                     results=raw,
                     store=self.store,
                     top_k=cfg.retrieval.rerank_top_k,
-                    rerank_query=expansion_terms,  # English terms for cross-encoder
+                    rerank_query=expansion_terms,
+                    rejected_debug_top_n=10,
                 )
+                raw = reranked_top
 
         # --- File-type boost (post-reranking) ---
         file_type_boost = cfg.retrieval.get("file_type_boost", 0.0)
@@ -171,7 +182,7 @@ class RepoRAGPipeline:
 
         # --- Graph expansion ---
         with prof.phase("graph_expansion"):
-            expanded_ids = expand_with_graph(
+            expanded_refs = expand_with_graph(
                 results=raw,
                 store=self.store,
                 graph=self.graph,
@@ -183,10 +194,20 @@ class RepoRAGPipeline:
                 neighborhood_after=cfg.retrieval.neighborhood_expansion.after,
             )
 
+        # Build skeleton debug rows before evidence pack trims the set (Issue #176)
+        debug_rows = build_retrieval_debug_rows(
+            raw_snapshot=raw_snapshot,
+            reranked_top=reranked_top if self.reranker is not None else list(raw),
+            rejected=rejected_debug,
+            expanded_refs=expanded_refs,
+            store=self.store,
+        )
+
         # --- Evidence pack ---
+        chunk_ids = [ref.chunk_id for ref in expanded_refs]
         with prof.phase("evidence_pack"):
             pack = build_evidence_pack(
-                chunk_ids=expanded_ids,
+                chunk_ids=chunk_ids,
                 store=self.store,
                 session=session,
                 max_chunks=cfg.evidence_pack.max_chunks,
@@ -238,6 +259,14 @@ class RepoRAGPipeline:
                 answer, pack, citation, enabled=postprocess_enabled
             )
 
+        # Finalise debug rows: set used/citation_index now that pack + citations are known
+        pack_chunk_ids = [c.chunk_id for c in pack.chunks]
+        debug_rows = finalise_retrieval_debug(
+            rows=debug_rows,
+            pack_chunk_ids=pack_chunk_ids,
+            cited_chunk_ids=citation.cited_chunk_ids,
+        )
+
         latency, memory = prof.finish()
 
         # --- Session update ---
@@ -271,6 +300,7 @@ class RepoRAGPipeline:
             }
         )
 
+        r_score, r_matches = compute_refusal_score(answer)
         return QueryResult(
             answer=answer,
             session_id=session_id,
@@ -287,4 +317,7 @@ class RepoRAGPipeline:
             # reason when it falls back.
             generator_used="qwen",
             generator_fallback_reason=None,
+            retrieval_debug=debug_rows,
+            refusal_score=r_score,
+            refusal_matches=r_matches,
         )

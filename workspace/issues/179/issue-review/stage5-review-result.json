@@ -1,0 +1,32 @@
+{
+  "stage": 5,
+  "focus": "通常（2回目）",
+  "reviewer": "codex",
+  "findings": [
+    {
+      "id": "S5-001",
+      "severity": "Must Fix",
+      "title": "baseline / PHOTON config の provider 検証が未定義",
+      "description": "1回目指摘で config の使い分け方針は追記されたが、未設定チェックだけでは不十分。現行のプロジェクト登録では PHOTON 有効かつ wizard 未使用の場合に `photon_config_path = config_path` になり得るため、`proj.config_path` と `proj.photon_config_path` が同一、または両方とも photon/baseline provider という状態が発生する。そのまま比較モードを有効化すると、baseline と PHOTON の side-by-side ではなく同一 pipeline 同士の比較になり、機能の中核である比較結果が誤解を招く。",
+      "suggestion": "比較モード有効化条件に、左列 config の `model.provider != \"photon\"`、右列 config の `model.provider == \"photon\"`、必要に応じて `proj.config_path != proj.photon_config_path` の検証を追加する。条件を満たさない場合はトグルを disabled にし、baseline config と PHOTON config を別々に設定するよう警告する旨を Issue に明記する。"
+    },
+    {
+      "id": "S5-002",
+      "severity": "Should Fix",
+      "title": "`run_comparison` API と UI pipeline cache の責務が曖昧",
+      "description": "Issue は `baseline_reporag/comparison.py` に `run_comparison(question, baseline_config, photon_config, repo_id, baseline_session_id, photon_session_id)` を追加するとしている一方で、UI 側では baseline / PHOTON pipeline を `st.session_state` に cache し multi-turn をサポートするとしている。config path だけを受け取る `run_comparison` が内部で `run_variant` を呼んで毎回 `build_pipeline` すると、既存の `SessionManager` / PHOTON session state は pipeline インスタンス内のメモリにあるため、UI の multi-turn 文脈とモデルキャッシュを失う。実装者が共通 API をそのまま UI から呼ぶと、性能劣化だけでなく比較モードの multi-turn 要件を満たせない可能性がある。",
+      "suggestion": "Issue に「UI は `st.session_state` に保持した pipeline インスタンスを使って比較実行する」ことを明記し、`run_comparison` は prebuilt pipeline / runner callable を受け取れる形にする、または CLI 向け config-path API と UI 向け cached-pipeline API を分ける。テストにも cached pipeline を再利用した2ターン目で履歴が維持されるケースを追加する。"
+    },
+    {
+      "id": "S5-003",
+      "severity": "Nice to Have",
+      "title": "回答一致度計算の有効化条件とモデルキャッシュ方針が未記載",
+      "description": "cosine similarity は optional として `sentence-transformers` の使用が追記されたが、Streamlit 上で都度 SentenceTransformer をロードすると比較モード初回または各ターンで大きな待ち時間とメモリ使用が発生する。optional 機能なので必須ではないが、実装時の判断が分かれやすい。",
+      "suggestion": "`comparison.similarity_enabled` のような設定フラグで既定 OFF にするか、ON の場合は similarity model を `st.session_state` / `st.cache_resource` でキャッシュする方針を追記する。"
+    }
+  ],
+  "must_fix_count": 1,
+  "should_fix_count": 1,
+  "nice_to_have_count": 1,
+  "overall_assessment": "1回目レビューの Must/Should 指摘は概ね反映済み。残る主なリスクは、config が存在するだけでは baseline と PHOTON の比較であることを保証できない点と、共通 comparison API を UI から使った場合に pipeline cache / multi-turn state を失う可能性がある点。S5-001 は比較結果の正当性に直結するため着手前に明確化が必要。S5-002 も実装品質と性能に影響するため Issue 本文へ反映すべき。"
+}

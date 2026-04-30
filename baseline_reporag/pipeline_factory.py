@@ -31,7 +31,8 @@ import sqlite3
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .config import Config, is_symbol_graph_enabled, validate_repo_id
+from .config import Config, validate_repo_id
+from .indexing import load_active_graph
 from .contracts import QueryResult  # re-exported; MLX-free
 
 if TYPE_CHECKING:
@@ -71,6 +72,7 @@ def override_repo_for_pipeline(
     """
     if not repo_id:
         return
+    repo_id = validate_repo_id(repo_id)
     cfg.repo.repo_id = repo_id
     actual_commit = _lookup_repo_commit_from_db(
         repo_id, data_root or cfg.paths.data_root
@@ -165,7 +167,6 @@ def _build_baseline_deps_no_mlx(cfg: Config) -> dict:
     from .generation.generator import Generator
     from .indexing.embedding import EmbeddingIndex
     from .indexing.lexical import LexicalIndex
-    from .indexing.symbol_graph import SymbolGraph
     from .ingestion.store import ChunkStore
     from .logger import RunLogger
     from .memory.session import SessionManager
@@ -179,14 +180,9 @@ def _build_baseline_deps_no_mlx(cfg: Config) -> dict:
     store = ChunkStore(idx_dir / "chunks.db")
     lexical = LexicalIndex.load(idx_dir / "lexical.pkl")
     embedding = EmbeddingIndex.load(idx_dir / "embedding")
-    # Issue #109: ``indexing.symbol_graph.enabled=false`` skips graph load.
-    # The ``graph_expansion`` helper accepts ``graph=None`` and falls back
-    # to file-neighbors only (see ``retrieval/graph_expansion.py``).
-    graph: SymbolGraph | None = (
-        SymbolGraph.load(idx_dir / "symbol_graph.json")
-        if is_symbol_graph_enabled(cfg)
-        else None
-    )
+    # heading_graph takes priority; falls back to symbol_graph; None when both off.
+    # expand_with_graph accepts graph=None (file-neighbors-only fallback).
+    graph = load_active_graph(cfg, idx_dir)
     sessions = SessionManager(log_dir=Path(cfg.paths.log_root) / "sessions")
     generator = Generator(
         model_id=cfg.model.model_id,

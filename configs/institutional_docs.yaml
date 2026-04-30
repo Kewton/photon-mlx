@@ -93,6 +93,10 @@ indexing:
     # #109 で honor される。非 code 系 corpus のため無効化。
     enabled: false
 
+  heading_graph:
+    # #180: 本 PR merge 時点は false。別 PR で true 化 (DR2-002)。
+    enabled: false
+
 retrieval:
   mode: "hybrid"
   lexical_top_k: 20

@@ -7,6 +7,13 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from baseline_reporag.generation.evidence_pack import build_evidence_pack
+from baseline_reporag.retrieval.graph_expansion import ExpandedChunkRef
+
+
+def _refs(chunk_ids: list[str]) -> list[ExpandedChunkRef]:
+    """Convert a list of chunk ID strings to ExpandedChunkRef list (for mocks)."""
+    return [ExpandedChunkRef(chunk_id=cid, source="retrieval") for cid in chunk_ids]
+
 
 # Issue #139 / Task 2.5: stub _load_hf_tokenizer for tests that don't exercise
 # real HuggingFace loader behavior. Tests that test loader behavior (real
@@ -1048,7 +1055,7 @@ class TestPhotonQueryFlow:
             ),
             patch(
                 "baseline_reporag.photon_pipeline.expand_with_graph",
-                return_value=expanded_ids,
+                return_value=_refs(expanded_ids),
             ),
         ):
             baseline_deps["generator"].generate.return_value = "Answer [C:1]"
@@ -1119,7 +1126,7 @@ class TestPhotonQueryFlow:
             ),
             patch(
                 "baseline_reporag.photon_pipeline.expand_with_graph",
-                return_value=expanded_ids,
+                return_value=_refs(expanded_ids),
             ),
         ):
             baseline_deps["generator"].generate.return_value = "fallback answer [C:1]"
@@ -1212,7 +1219,7 @@ class TestPhotonInputContainsQuestionPlusEvidence:
             ),
             patch(
                 "baseline_reporag.photon_pipeline.expand_with_graph",
-                return_value=expanded_ids,
+                return_value=_refs(expanded_ids),
             ),
         ):
             baseline_deps["generator"].generate.return_value = "answer [C:1]"
@@ -1306,7 +1313,7 @@ class TestEvidencePruningTurn1:
             ),
             patch(
                 "baseline_reporag.photon_pipeline.expand_with_graph",
-                return_value=expanded_ids,
+                return_value=_refs(expanded_ids),
             ),
         ):
             # Generator returns a simple answer
@@ -1360,7 +1367,7 @@ class TestEvidencePruningTurn1:
             ),
             patch(
                 "baseline_reporag.photon_pipeline.expand_with_graph",
-                return_value=expanded_ids,
+                return_value=_refs(expanded_ids),
             ),
         ):
             baseline_deps["generator"].generate.return_value = "Answer [C:1]"
@@ -1421,7 +1428,7 @@ class TestEvidencePruningTurn2:
             ),
             patch(
                 "baseline_reporag.photon_pipeline.expand_with_graph",
-                return_value=expanded_ids,
+                return_value=_refs(expanded_ids),
             ),
         ):
             baseline_deps["generator"].generate.return_value = "Pruned answer [C:1]"
@@ -1483,7 +1490,7 @@ class TestEvidencePruningTurn2:
             ),
             patch(
                 "baseline_reporag.photon_pipeline.expand_with_graph",
-                return_value=expanded_ids,
+                return_value=_refs(expanded_ids),
             ),
         ):
             baseline_deps["generator"].generate.return_value = "Pruned [C:1]"
@@ -1575,7 +1582,7 @@ class TestSafeRecGenFallbackIntegration:
             ),
             patch(
                 "baseline_reporag.photon_pipeline.expand_with_graph",
-                return_value=expanded_ids,
+                return_value=_refs(expanded_ids),
             ),
         ):
             baseline_deps["generator"].generate.return_value = "Answer [C:1]"
@@ -1610,7 +1617,7 @@ class TestSafeRecGenFallbackIntegration:
             ),
             patch(
                 "baseline_reporag.photon_pipeline.expand_with_graph",
-                return_value=expanded_ids,
+                return_value=_refs(expanded_ids),
             ),
         ):
             baseline_deps["generator"].generate.return_value = "Answer [C:1]"
@@ -1664,7 +1671,7 @@ class TestSafeRecGenFallbackIntegration:
             ),
             patch(
                 "baseline_reporag.photon_pipeline.expand_with_graph",
-                return_value=expanded_ids,
+                return_value=_refs(expanded_ids),
             ),
         ):
             baseline_deps["generator"].generate.return_value = "Answer [C:1]"
@@ -1725,7 +1732,7 @@ class TestSafeRecGenFallbackIntegration:
             ),
             patch(
                 "baseline_reporag.photon_pipeline.expand_with_graph",
-                return_value=expanded_ids,
+                return_value=_refs(expanded_ids),
             ),
         ):
             baseline_deps["generator"].generate.return_value = "Answer [C:1]"
@@ -1756,7 +1763,7 @@ class TestSafeRecGenFallbackIntegration:
             ),
             patch(
                 "baseline_reporag.photon_pipeline.expand_with_graph",
-                return_value=expanded_ids,
+                return_value=_refs(expanded_ids),
             ),
         ):
             baseline_deps["generator"].generate.return_value = "Answer [C:1]"
@@ -1791,7 +1798,7 @@ class TestSafeRecGenFallbackIntegration:
             ),
             patch(
                 "baseline_reporag.photon_pipeline.expand_with_graph",
-                return_value=expanded_ids,
+                return_value=_refs(expanded_ids),
             ),
         ):
             baseline_deps["generator"].generate.return_value = "Answer [C:1]"
@@ -1889,7 +1896,7 @@ class TestTokenizeEvidencePackFailureFailsClosed:
             ),
             patch(
                 "baseline_reporag.photon_pipeline.expand_with_graph",
-                return_value=expanded_ids,
+                return_value=_refs(expanded_ids),
             ),
         ):
             baseline_deps["generator"].generate.return_value = "answer [C:1]"
@@ -1977,7 +1984,7 @@ class TestTokenizeEvidencePackFailureFailsClosed:
             ),
             patch(
                 "baseline_reporag.photon_pipeline.expand_with_graph",
-                return_value=expanded_ids,
+                return_value=_refs(expanded_ids),
             ),
         ):
             baseline_deps["generator"].generate.return_value = "answer [C:1]"
@@ -2406,7 +2413,7 @@ class TestTwoPassSearchPipeline:
             ),
             patch(
                 "baseline_reporag.photon_pipeline.expand_with_graph",
-                return_value=expanded_ids,
+                return_value=_refs(expanded_ids),
             ),
         ):
             baseline_deps["generator"].generate.return_value = "Answer [C:1]"
@@ -2485,7 +2492,7 @@ class TestTwoPassSearchPipeline:
             ),
             patch(
                 "baseline_reporag.photon_pipeline.expand_with_graph",
-                return_value=expanded_ids,
+                return_value=_refs(expanded_ids),
             ),
         ):
             baseline_deps["generator"].generate.return_value = "Answer [C:1]"
@@ -2545,7 +2552,7 @@ class TestTwoPassSearchPipeline:
             ),
             patch(
                 "baseline_reporag.photon_pipeline.expand_with_graph",
-                return_value=expanded_ids,
+                return_value=_refs(expanded_ids),
             ),
         ):
             baseline_deps["generator"].generate.return_value = "Answer [C:1]"
@@ -2596,7 +2603,7 @@ class TestTwoPassSearchPipeline:
             ),
             patch(
                 "baseline_reporag.photon_pipeline.expand_with_graph",
-                return_value=expanded_ids,
+                return_value=_refs(expanded_ids),
             ),
         ):
             baseline_deps["generator"].generate.return_value = "Answer [C:1]"
@@ -2808,7 +2815,7 @@ def _run_generation_branch_query(
         ),
         patch(
             "baseline_reporag.photon_pipeline.expand_with_graph",
-            return_value=expanded_ids,
+            return_value=_refs(expanded_ids),
         ),
     ):
         if seed is not None:
@@ -2979,7 +2986,7 @@ class TestPhotonGenerationBranch:
             ),
             patch(
                 "baseline_reporag.photon_pipeline.expand_with_graph",
-                return_value=expanded_ids,
+                return_value=_refs(expanded_ids),
             ),
             pytest.raises(RuntimeError, match="fallback policy=abort"),
         ):
@@ -3820,7 +3827,7 @@ class TestCodexCB002TokenizeEvidencePackLogHygiene:
                 ),
                 patch(
                     "baseline_reporag.photon_pipeline.expand_with_graph",
-                    return_value=expanded_ids,
+                    return_value=_refs(expanded_ids),
                 ),
             ):
                 baseline_deps["generator"].generate.return_value = "answer [C:1]"
@@ -4031,7 +4038,7 @@ def _run_query_with_mocks(
         ),
         patch(
             "baseline_reporag.photon_pipeline.expand_with_graph",
-            return_value=expanded_ids,
+            return_value=_refs(expanded_ids),
         ),
     ):
         return pipeline.query(question, session_id="s1", repo_id="test-repo")
@@ -4655,7 +4662,7 @@ class TestPhotonPipelineGraphNoneCompatibility:
             ),
             patch(
                 "baseline_reporag.photon_pipeline.expand_with_graph",
-                return_value=expanded_ids,
+                return_value=_refs(expanded_ids),
             ),
         ):
             baseline_deps["generator"].generate.return_value = "Answer [C:1]"

@@ -30,6 +30,9 @@ jobs:
           python -m pytest tests/integration/test_photon_real_weights.py -v \
             --junitxml="${LOG_BASENAME}.xml" 2>&1 \
             | tee "${LOG_BASENAME}.log"
+      - name: Run heading_graph unit tests
+        run: |
+          python -m pytest tests/ baseline_reporag/tests/ -k heading_graph -v
       - name: Run static eval
         run: |
           python -m scripts.run_baseline_eval \

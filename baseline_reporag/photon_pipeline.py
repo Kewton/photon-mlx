@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Any
 
 import mlx.core as mx
 
-from .citation import resolve_citations
+from .citation import compute_refusal_score, resolve_citations
 from .config import Config
 from .generation.evidence_pack import build_evidence_pack
 from .generation.prompt import (
@@ -30,7 +30,11 @@ from .generation.prompt import (
 from .memory.session import SessionState
 from .pipeline import QueryResult, RepoRAGPipeline, apply_citation_postprocess
 from .profiler import TurnProfiler
-from .retrieval.graph_expansion import expand_with_graph
+from .retrieval.debug_builder import (
+    build_retrieval_debug_rows,
+    finalise_retrieval_debug,
+)
+from .retrieval.graph_expansion import ExpandedChunkRef, expand_with_graph
 from .retrieval.hybrid import apply_file_type_boost, hybrid_search
 from .retrieval.query_expansion import expand_query
 
@@ -1139,21 +1143,28 @@ class PhotonRAGPipeline:
                 repo_id=repo_id,
             )
 
+        # Snapshot pre-rerank scores for debug rows (Issue #176)
+        raw_snapshot = list(raw)
+
         # --- Reranking ---
         # On follow-up turns, PHOTON pruning handles chunk selection.  On turn
         # 1 (or when no reranker is configured), reranking runs as usual.  The
         # current-turn Safe RecGen fallback decision is now computed *after*
         # the evidence pack is built (see design §5.3 / Issue #58), so it no
         # longer gates reranking or pruning within this turn.
+        reranked_top: list = []
+        rejected_debug: list = []
         with prof.phase("reranking"):
             if bl.reranker is not None and not is_follow_up:
-                raw = bl.reranker.rerank(
+                reranked_top, rejected_debug = bl.reranker.rerank_with_debug(
                     query=question,
                     results=raw,
                     store=bl.store,
                     top_k=cfg.retrieval.rerank_top_k,
                     rerank_query=expansion_terms,
+                    rejected_debug_top_n=10,
                 )
+                raw = reranked_top
 
         # --- File-type boost ---
         file_type_boost = cfg.retrieval.get("file_type_boost", 0.0)
@@ -1162,7 +1173,7 @@ class PhotonRAGPipeline:
 
         # --- Graph expansion ---
         with prof.phase("graph_expansion"):
-            expanded_ids = expand_with_graph(
+            expanded_refs: list[ExpandedChunkRef] = expand_with_graph(
                 results=raw,
                 store=bl.store,
                 graph=bl.graph,
@@ -1173,6 +1184,7 @@ class PhotonRAGPipeline:
                 neighborhood_before=cfg.retrieval.neighborhood_expansion.before,
                 neighborhood_after=cfg.retrieval.neighborhood_expansion.after,
             )
+        expanded_ids = [ref.chunk_id for ref in expanded_refs]
 
         # --- Evidence pruning (PHOTON-guided) and Pass 1 scoring (Issue #56) ---
         # Uses the *previous* turn's coarse state on Turn 2+ (1-pass constraint,
@@ -1192,6 +1204,7 @@ class PhotonRAGPipeline:
         effective_max_chunks = cfg.evidence_pack.max_chunks
         do_pass1 = two_pass_enabled and not is_follow_up
         do_pass2plus = pruning_enabled and is_follow_up
+        photon_pruned_ids: list[str] = []
         if do_pass1 or do_pass2plus:
             chunks_for_scoring = bl.store.get_many(expanded_ids)
             chunk_texts = [c.content for c in chunks_for_scoring]
@@ -1206,6 +1219,10 @@ class PhotonRAGPipeline:
                     max_chunks=scoring_max_chunks,
                     question=question if do_pass1 else None,
                 )
+            selected_set = {chunk_ids_for_scoring[i] for i in selected_indices}
+            photon_pruned_ids = [
+                cid for cid in chunk_ids_for_scoring if cid not in selected_set
+            ]
             expanded_ids = [chunk_ids_for_scoring[i] for i in selected_indices]
             effective_max_chunks = scoring_max_chunks
 
@@ -1228,6 +1245,29 @@ class PhotonRAGPipeline:
                     cached_turn,
                     working_memory_cfg.max_pinned_chunks,
                 )
+
+        # Build skeleton debug rows (Issue #176): expanded_refs holds source
+        # tags; photon_pruned and working_memory rows are appended after.
+        all_refs_for_debug: list[ExpandedChunkRef] = list(expanded_refs)
+        for cid in photon_pruned_ids:
+            all_refs_for_debug.append(
+                ExpandedChunkRef(chunk_id=cid, source="photon_pruned")
+            )
+        if additional_pinned_ids:
+            for cid in additional_pinned_ids:
+                all_refs_for_debug.append(
+                    ExpandedChunkRef(chunk_id=cid, source="working_memory")
+                )
+
+        debug_rows = build_retrieval_debug_rows(
+            raw_snapshot=raw_snapshot,
+            reranked_top=reranked_top
+            if bl.reranker is not None and not is_follow_up
+            else list(raw),
+            rejected=rejected_debug,
+            expanded_refs=all_refs_for_debug,
+            store=bl.store,
+        )
 
         # --- Evidence pack ---
         with prof.phase("evidence_pack"):
@@ -1453,6 +1493,14 @@ class PhotonRAGPipeline:
                 answer, pack, citation, enabled=postprocess_enabled
             )
 
+        # Finalise debug rows: used/citation_index now determinable (Issue #176)
+        pack_chunk_ids = [c.chunk_id for c in pack.chunks]
+        debug_rows = finalise_retrieval_debug(
+            rows=debug_rows,
+            pack_chunk_ids=pack_chunk_ids,
+            cited_chunk_ids=citation.cited_chunk_ids,
+        )
+
         latency, memory = prof.finish()
 
         # --- Session update ---
@@ -1496,6 +1544,7 @@ class PhotonRAGPipeline:
             }
         )
 
+        r_score, r_matches = compute_refusal_score(answer)
         result = QueryResult(
             answer=answer,
             session_id=session_id,
@@ -1512,6 +1561,9 @@ class PhotonRAGPipeline:
             # a Qwen fallback without having to parse the log stream.
             generator_used=generator_used,
             generator_fallback_reason=generator_fallback_reason,
+            retrieval_debug=debug_rows,
+            refusal_score=r_score,
+            refusal_matches=r_matches,
         )
 
         # Attach PHOTON metadata

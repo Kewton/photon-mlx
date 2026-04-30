@@ -183,6 +183,14 @@ run(
     ],
     'build_symbol_graph',
 )
+print('Phase 3.5: Heading Graph', flush=True)
+run(
+    [
+        sys.executable, '-m', 'scripts.build_heading_graph',
+        '--repo-id', repo_id, '--commit', commit, '--config', config_path,
+    ],
+    'build_heading_graph',
+)
 print('DONE', flush=True)
 """
 
@@ -255,7 +263,7 @@ class IndexJob:
     started_at: str = ""
     status: str = "pending"
     log_file: str = ""
-    phase: str = ""  # ingest | bm25_embed | symbol_graph | completed
+    phase: str = ""  # ingest | bm25_embed | symbol_graph | heading_graph | completed
     embedding_model: str = ""
 
 
@@ -568,7 +576,9 @@ def _sync_index_job(job: IndexJob) -> bool:
                 log_content = ""
 
     if log_content and job.status == "running":
-        if "Phase 3" in log_content:
+        if "Phase 3.5" in log_content:
+            new_phase = "heading_graph"
+        elif "Phase 3" in log_content:
             new_phase = "symbol_graph"
         elif "Phase 2" in log_content:
             new_phase = "bm25_embed"
@@ -1575,6 +1585,30 @@ def page_chat():
 
     history = state.chat_histories[session_key]
 
+    # Issue #179: comparison mode toggle
+    comparison_eligible = _check_comparison_eligible(proj)
+    comparison_photon_unavailable = st.session_state.get(
+        f"comparison_photon_unavailable_{project_name}"
+    )
+    if comparison_photon_unavailable:
+        st.warning(
+            f"比較モード: PHOTON パイプラインが利用不可です ({comparison_photon_unavailable})"
+        )
+    comparison_mode = st.toggle(
+        "⚖ 比較モード",
+        key=f"comparison_mode_{project_name}",
+        disabled=not comparison_eligible or bool(photon_unavailable),
+        help=(
+            "baseline と PHOTON を並列比較します"
+            if comparison_eligible
+            else "baseline/PHOTON config が両方設定されていないか、provider 設定が不正です"
+        ),
+    )
+
+    if comparison_mode:
+        _render_comparison_mode(proj, project_name, session_key)
+        return
+
     # Display history
     for msg in history:
         with st.chat_message(msg["role"]):
@@ -1613,6 +1647,14 @@ def page_chat():
             st.markdown(answer)
 
             if metadata:
+                # Issue #177: refusal_score badge
+                rs = metadata.get("refusal_score")
+                if rs is not None:
+                    if rs >= 0.7:
+                        st.markdown("🔘 **拒絶** — refusal_score: 1.0")
+                    else:
+                        st.markdown("🟢 **回答** — refusal_score: 0.0")
+
                 with st.expander("メトリクス"):
                     col1, col2, col3 = st.columns(3)
                     col1.metric("Latency", f"{metadata.get('latency_ms', 0):.0f} ms")
@@ -1683,12 +1725,58 @@ def page_chat():
                 except Exception as exc:
                     st.warning(f"turn history render failed: {exc}")
 
+                try:
+                    rm = metadata.get("refusal_matches")
+                    if rs is not None:
+                        with st.expander("🚦 Refusal score detail", expanded=False):
+                            st.write(f"**refusal_score**: {rs}")
+                            if rm:
+                                st.write("**検出フレーズ**:")
+                                for phrase in rm:
+                                    st.write(f"- `{phrase}`")
+                            else:
+                                st.write("検出フレーズなし（回答として判定）")
+                except Exception as exc:
+                    st.warning(f"refusal score detail render failed: {exc}")
+
+                try:
+                    debug_data = metadata.get("retrieval_debug")
+                    if debug_data:
+                        with st.expander("🔍 Retrieval debug", expanded=False):
+                            import pandas as pd
+
+                            df = pd.DataFrame(
+                                [
+                                    {
+                                        "chunk_id": r.chunk_id,
+                                        "rel_path": r.rel_path,
+                                        "section": r.section or "",
+                                        "source": r.source,
+                                        "BM25 (norm)": r.bm25_score,
+                                        "Embedding (norm)": r.embedding_score,
+                                        "Rerank score": r.reranker_score,
+                                        "Used": "✓" if r.used else "",
+                                        "Citation": (
+                                            f"[C:{r.citation_index}]"
+                                            if r.citation_index is not None
+                                            else ""
+                                        ),
+                                    }
+                                    for r in debug_data
+                                ]
+                            )
+                            st.dataframe(df, use_container_width=True)
+                except Exception as exc:
+                    st.warning(f"retrieval debug render failed: {exc}")
+
         history.append({"role": "assistant", "content": answer})
         save()
 
-    # Clear button
+    # Clear button — also clears comparison-mode session_state histories
     if history and st.button("会話をクリア"):
         state.chat_histories[session_key] = []
+        for suffix in ("_baseline", "_photon"):
+            st.session_state.pop(f"comparison_history_{project_name}{suffix}", None)
         save()
         st.rerun()
 
@@ -1716,6 +1804,34 @@ def _pipeline_cache_key(project_name: str, config_path: str) -> str:
     return f"pipeline_{project_name}_{config_path}"
 
 
+# Issue #179: comparison mode pipeline cache keys — excluded from normal eviction.
+_COMPARISON_SUFFIXES = ("_comparison_baseline", "_comparison_photon")
+
+
+def _is_comparison_pipeline_key(key: str) -> bool:
+    return any(key.endswith(s) for s in _COMPARISON_SUFFIXES)
+
+
+def _check_comparison_eligible(proj: Project) -> bool:
+    """Return True iff the project has both baseline and PHOTON configs and providers match."""
+    if not proj.photon_config_path:
+        return False
+    if proj.config_path == proj.photon_config_path:
+        return False
+    try:
+        baseline_cfg = load_config(proj.config_path)
+        photon_cfg = load_config(proj.photon_config_path)
+    except Exception:
+        return False
+    baseline_provider = (
+        getattr(getattr(baseline_cfg, "model", None), "provider", None) or "baseline"
+    )
+    photon_provider = (
+        getattr(getattr(photon_cfg, "model", None), "provider", None) or "baseline"
+    )
+    return baseline_provider != "photon" and photon_provider == "photon"
+
+
 def _run_query(proj: Project, question: str, session_key: str) -> tuple[str, dict]:
     """Run a query through the pipeline via ``build_pipeline(cfg)``.
 
@@ -1734,6 +1850,8 @@ def _run_query(proj: Project, question: str, session_key: str) -> tuple[str, dic
         "no_citation": False,
         "drift_metrics": None,
         "turn_id": 0,
+        "refusal_score": None,
+        "refusal_matches": None,
     }
 
     # The wizard-generated PHOTON YAML (proj.photon_config_path) takes
@@ -1776,11 +1894,16 @@ def _run_query(proj: Project, question: str, session_key: str) -> tuple[str, dic
         # CB-002: evict stale cached pipelines for the same project so a
         # config-path swap does not leak the previous pipeline (each
         # PhotonRAGPipeline pins MLX weights in memory).
+        # Issue #179: comparison-mode pipeline keys are excluded from eviction
+        # so both baseline and PHOTON pipelines can coexist in session_state.
         prefix = f"pipeline_{proj.name}_"
         stale_keys = [
             k
             for k in list(st.session_state.keys())
-            if isinstance(k, str) and k.startswith(prefix) and k != pipeline_key
+            if isinstance(k, str)
+            and k.startswith(prefix)
+            and k != pipeline_key
+            and not _is_comparison_pipeline_key(k)
         ]
         for k in stale_keys:
             del st.session_state[k]
@@ -1809,6 +1932,9 @@ def _run_query(proj: Project, question: str, session_key: str) -> tuple[str, dic
         "no_citation": result.no_citation,
         "drift_metrics": getattr(result, "drift_metrics", None),
         "turn_id": getattr(result, "turn_id", 0),
+        "retrieval_debug": getattr(result, "retrieval_debug", None),
+        "refusal_score": getattr(result, "refusal_score", None),
+        "refusal_matches": getattr(result, "refusal_matches", None),
     }
 
     # Issue #82 Wave 3 (W3-T3): surface turn-history for the chat panel.
@@ -1882,6 +2008,222 @@ def _build_drift_thresholds(cfg: Any) -> dict[str, float | None]:
         "top_level": getter("latent_cosine_drift", None),
         "topic_shift": getter("topic_shift_score", None),
     }
+
+
+def _get_or_build_comparison_pipeline(
+    proj: Project,
+    config_path: str,
+    suffix: str,
+) -> Any | None:
+    """Build and cache a comparison-mode pipeline in session_state.
+
+    Uses keys of the form ``pipeline_{proj.name}_comparison_{suffix}`` which
+    are excluded from the normal eviction loop (Issue #179).
+    Returns None and sets the comparison_photon_unavailable flag on failure.
+    """
+    key = f"pipeline_{proj.name}_comparison_{suffix}"
+    if key in st.session_state:
+        return st.session_state[key]
+    try:
+        cfg = load_config(config_path)
+        override_repo_for_pipeline(cfg, proj.repo_id)
+        pipeline = build_pipeline(cfg)
+        st.session_state[key] = pipeline
+        return pipeline
+    except (ImportError, ModuleNotFoundError) as exc:
+        st.session_state[f"comparison_photon_unavailable_{proj.name}"] = str(exc)
+        return None
+    except Exception as exc:
+        st.session_state[f"comparison_photon_unavailable_{proj.name}"] = str(exc)
+        return None
+
+
+def _render_comparison_mode(proj: Project, project_name: str, session_key: str) -> None:
+    """Render baseline vs PHOTON side-by-side comparison UI (Issue #179)."""
+    from baseline_reporag.comparison import compare as run_compare
+
+    baseline_session_id = f"comparison_{session_key}_baseline"
+    photon_session_id = f"comparison_{session_key}_photon"
+
+    # Per-session comparison history stored only in session_state (not persisted)
+    hist_key_b = f"comparison_history_{project_name}_baseline"
+    hist_key_p = f"comparison_history_{project_name}_photon"
+    if hist_key_b not in st.session_state:
+        st.session_state[hist_key_b] = []
+    if hist_key_p not in st.session_state:
+        st.session_state[hist_key_p] = []
+
+    # Display previous comparison turns
+    b_history: list[dict] = st.session_state[hist_key_b]
+    p_history: list[dict] = st.session_state[hist_key_p]
+    if b_history or p_history:
+        col_b, col_p = st.columns(2)
+        with col_b:
+            st.caption("**Baseline**")
+            for msg in b_history:
+                with st.chat_message(msg["role"]):
+                    st.markdown(msg["content"])
+        with col_p:
+            st.caption("**PHOTON**")
+            for msg in p_history:
+                with st.chat_message(msg["role"]):
+                    st.markdown(msg["content"])
+
+    # Input
+    col_input, col_btn = st.columns([5, 1])
+    with col_input:
+        question_input = st.text_input(
+            "質問（比較モード）",
+            key=f"q_comparison_{session_key}",
+            label_visibility="collapsed",
+            placeholder="質問を入力すると baseline と PHOTON を並列実行します",
+        )
+    with col_btn:
+        send_clicked = st.button(
+            "送信",
+            type="primary",
+            key=f"send_comparison_{session_key}",
+        )
+
+    question = question_input if send_clicked and question_input else None
+
+    if question:
+        # Build / retrieve cached pipelines
+        baseline_pipeline = _get_or_build_comparison_pipeline(
+            proj, proj.config_path, "baseline"
+        )
+        photon_pipeline = _get_or_build_comparison_pipeline(
+            proj, proj.photon_config_path, "photon"
+        )
+        if baseline_pipeline is None or photon_pipeline is None:
+            st.error("パイプラインの初期化に失敗しました。設定を確認してください。")
+            return
+
+        # Add user messages to histories
+        st.session_state[hist_key_b].append({"role": "user", "content": question})
+        st.session_state[hist_key_p].append({"role": "user", "content": question})
+
+        col_b, col_p = st.columns(2)
+        with col_b:
+            st.caption("**Baseline**")
+            with st.chat_message("user"):
+                st.markdown(question)
+
+        with col_p:
+            st.caption("**PHOTON**")
+            with st.chat_message("user"):
+                st.markdown(question)
+
+        # Run parallel comparison
+        with st.spinner("baseline と PHOTON を並列実行中..."):
+            try:
+                cmp_result = run_compare(
+                    baseline_pipeline=baseline_pipeline,
+                    photon_pipeline=photon_pipeline,
+                    question=question,
+                    repo_id=proj.repo_id,
+                    baseline_session_id=baseline_session_id,
+                    photon_session_id=photon_session_id,
+                )
+            except Exception as exc:
+                st.error(f"比較実行エラー: {exc}")
+                return
+
+        b = cmp_result.baseline
+        p = cmp_result.photon
+        d = cmp_result.delta
+
+        # Add assistant messages to histories
+        st.session_state[hist_key_b].append({"role": "assistant", "content": b.answer})
+        st.session_state[hist_key_p].append({"role": "assistant", "content": p.answer})
+
+        # Render results side by side
+        col_b, col_p = st.columns(2)
+        with col_b:
+            st.caption("**Baseline**")
+            with st.chat_message("assistant"):
+                st.markdown(b.answer)
+            with st.expander("メトリクス (Baseline)"):
+                mc1, mc2, mc3 = st.columns(3)
+                mc1.metric("Latency", f"{b.latency_total_ms:.0f} ms")
+                mc2.metric("Citations", str(len(b.cited_chunk_ids)))
+                mc3.metric("No citation", "Yes" if b.no_citation else "No")
+
+        with col_p:
+            st.caption("**PHOTON**")
+            with st.chat_message("assistant"):
+                st.markdown(p.answer)
+            with st.expander("メトリクス (PHOTON)"):
+                mc1, mc2, mc3 = st.columns(3)
+                mc1.metric("Latency", f"{p.latency_total_ms:.0f} ms")
+                mc2.metric("Citations", str(len(p.cited_chunk_ids)))
+                mc3.metric("No citation", "Yes" if p.no_citation else "No")
+
+                # Drift panel (PHOTON side only)
+                try:
+                    photon_inference = getattr(
+                        photon_pipeline, "photon_inference", None
+                    )
+                    if photon_inference is not None:
+                        ps = getattr(photon_inference, "_sessions", {}).get(
+                            photon_session_id
+                        )
+                        dm_dict: dict | None = None
+                        if ps is not None:
+                            last_turn = (getattr(ps, "turn_history", None) or [None])[
+                                -1
+                            ]
+                            if last_turn is not None:
+                                dm_raw = getattr(last_turn, "drift_metrics", None)
+                                if dm_raw is not None:
+                                    dm_dict = (
+                                        dm_raw.as_dict()
+                                        if hasattr(dm_raw, "as_dict")
+                                        else dm_raw
+                                    )
+                        try:
+                            pcfg = load_config(proj.photon_config_path)
+                        except Exception:
+                            pcfg = None
+                        thresholds = _build_drift_thresholds(pcfg)
+                        panel = _drift_panel.format_drift_panel(dm_dict, thresholds)
+                        with st.expander("Drift metrics (PHOTON)"):
+                            if not panel["available"]:
+                                st.info(panel["reason"])
+                            else:
+                                for row in panel["rows"]:
+                                    label = (
+                                        f"{row['badge']} {row['name']}".strip()
+                                        if row["badge"]
+                                        else row["name"]
+                                    )
+                                    st.metric(label, row["value_str"])
+                except Exception as exc:
+                    st.warning(f"drift panel render failed: {exc}")
+
+        # Delta section
+        st.divider()
+        st.subheader("Delta (PHOTON vs Baseline)")
+        dc1, dc2 = st.columns(2)
+        pct_sign = "+" if d.latency_delta_pct >= 0 else ""
+        dc1.metric(
+            "Latency delta",
+            f"{d.latency_delta_ms:+.0f} ms",
+            delta=f"{pct_sign}{d.latency_delta_pct:.1f}%",
+            delta_color="inverse",
+        )
+        dc2.metric("Cited overlap (Jaccard)", f"{d.cited_overlap_jaccard:.2f}")
+
+    # Comparison clear button
+    has_cmp_history = bool(
+        st.session_state.get(hist_key_b) or st.session_state.get(hist_key_p)
+    )
+    if has_cmp_history and st.button(
+        "比較履歴をクリア", key=f"clear_cmp_{session_key}"
+    ):
+        st.session_state[hist_key_b] = []
+        st.session_state[hist_key_p] = []
+        st.rerun()
 
 
 def _working_memory_enabled(cfg: Any) -> bool:

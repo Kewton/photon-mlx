@@ -1,0 +1,18 @@
+{
+  "stage": 2,
+  "action": "指摘事項反映（1回目）",
+  "applied_findings": ["S1-001", "S1-002", "S1-003", "S1-004", "S1-005", "S1-006", "S1-007"],
+  "changes": [
+    "Delta セクションの cited overlap を Jaccard 係数 (|baseline ∩ photon| / |baseline ∪ photon|) と明記",
+    "cosine similarity に使用ライブラリ (sentence-transformers) を明記",
+    "UI 側に「比較モード時の config 使用方針」を追記（proj.config_path / proj.photon_config_path を使用、未設定時は disabled）",
+    "session memory 分離方針に session_key の命名規則を追記",
+    "multi-turn 対話サポートを明記",
+    "「## 実装上の注意」セクションを追加（並列実行の ThreadPoolExecutor 方針、PHOTON 利用不可時の挙動）",
+    "run_comparison 関数シグネチャを具体化（baseline_config, photon_config, repo_id, baseline_session_id, photon_session_id -> ComparisonResult）",
+    "テスト方針を「新規作成」と「モック方針」を明記した記述に修正",
+    "Acceptance criteria に3件追加（config 未設定時の非活性、PHOTON 利用不可時の表示、UI フリーズなし）"
+  ],
+  "github_issue_updated": true,
+  "issue_url": "https://github.com/Kewton/photon-mlx/issues/179"
+}

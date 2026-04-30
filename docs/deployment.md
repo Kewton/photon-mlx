@@ -65,6 +65,18 @@ Constructs import/call/inheritance edges for graph-expanded retrieval.
 > mode `expand_with_graph` still returns file-neighbors, only the
 > graph-neighbor branch is skipped.
 
+### 5.5. Build the heading graph (optional, Issue #180)
+
+```bash
+python -m scripts.build_heading_graph --config configs/institutional_docs.yaml --repo-id institutional_documents
+```
+
+Constructs a markdown heading hierarchy graph (parent/sibling chunk expansion) for institutional document retrieval.
+Skipped automatically when `indexing.heading_graph.enabled: false` (default).
+
+> **Note**: heading_graph ships `enabled: false` in all production configs.
+> Enable in `institutional_docs*.yaml` separately after validating AC 5 multi-turn NC 0.00%.
+
 ### 6. Start the server
 
 ```bash
@@ -440,3 +452,22 @@ Skip される箇所:
 - `expand_with_graph` は `graph=None` の場合 graph-neighbors の展開を skip し、file-neighbors（`store.get_neighbors`）のみを返す
 
 この経路で pipeline を組み立てても retrieval / generation のインターフェースに変化はなく、既存 CLI / server も設定を変えるだけで動く。
+
+### `indexing.heading_graph.enabled` の運用パターン (Issue #180)
+
+Markdown 見出し階層グラフ（親/兄弟チャンク展開）を有効化するには:
+
+```yaml
+indexing:
+  heading_graph:
+    enabled: true
+```
+
+**build コマンド**:
+
+```bash
+python -m scripts.build_heading_graph --repo-id <repo_id> --config configs/<profile>.yaml
+```
+
+Skip 時: `Skipped: indexing.heading_graph.enabled=false (or not set)` を stdout に出して早期 return。
+`heading_graph` は `symbol_graph` より優先される (`load_active_graph` の heading > symbol 優先順位)。

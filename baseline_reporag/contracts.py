@@ -28,6 +28,27 @@ if TYPE_CHECKING:
 
 
 @dataclass
+class RetrievalDebugRow:
+    """Per-chunk retrieval debug info for Issue #176 UI panel.
+
+    score fields are None for graph/neighbor/photon_pruned/working_memory sources.
+    citation_index is None for non-adopted chunks; cited = (citation_index is not None).
+    source values: "retrieval" | "graph" | "neighbor" | "photon_pruned" | "working_memory"
+    """
+
+    chunk_id: str
+    rel_path: str
+    section: str | None
+    bm25_score: float | None
+    embedding_score: float | None
+    fused_score: float | None
+    reranker_score: float | None
+    used: bool
+    citation_index: int | None
+    source: str
+
+
+@dataclass
 class QueryResult:
     """Result of a single pipeline query turn.
 
@@ -56,3 +77,10 @@ class QueryResult:
     # Closed enum (§7.2): None | "_TokenizerEncodeFailure" | "ValueError"
     #                    | "RuntimeError" | "empty_output".
     generator_fallback_reason: str | None = None
+    # Issue #176: per-turn retrieval debug rows (normalized scores + source).
+    # None when debug is disabled or on pre-#176 historical rows.
+    retrieval_debug: list[RetrievalDebugRow] | None = None
+    # Issue #177: refusal score (0.0 = answer, 1.0 = refusal) and matched phrases.
+    # None on pre-#177 historical rows or when not yet computed.
+    refusal_score: float | None = None
+    refusal_matches: list[str] | None = None
