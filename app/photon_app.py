@@ -1623,6 +1623,14 @@ def page_chat():
             st.markdown(answer)
 
             if metadata:
+                # Issue #177: refusal_score badge
+                rs = metadata.get("refusal_score")
+                if rs is not None:
+                    if rs >= 0.7:
+                        st.markdown("🔘 **拒絶** — refusal_score: 1.0")
+                    else:
+                        st.markdown("🟢 **回答** — refusal_score: 0.0")
+
                 with st.expander("メトリクス"):
                     col1, col2, col3 = st.columns(3)
                     col1.metric("Latency", f"{metadata.get('latency_ms', 0):.0f} ms")
@@ -1692,6 +1700,20 @@ def page_chat():
                                     )
                 except Exception as exc:
                     st.warning(f"turn history render failed: {exc}")
+
+                try:
+                    rm = metadata.get("refusal_matches")
+                    if rs is not None:
+                        with st.expander("🚦 Refusal score detail", expanded=False):
+                            st.write(f"**refusal_score**: {rs}")
+                            if rm:
+                                st.write("**検出フレーズ**:")
+                                for phrase in rm:
+                                    st.write(f"- `{phrase}`")
+                            else:
+                                st.write("検出フレーズなし（回答として判定）")
+                except Exception as exc:
+                    st.warning(f"refusal score detail render failed: {exc}")
 
                 try:
                     debug_data = metadata.get("retrieval_debug")
@@ -1774,6 +1796,8 @@ def _run_query(proj: Project, question: str, session_key: str) -> tuple[str, dic
         "no_citation": False,
         "drift_metrics": None,
         "turn_id": 0,
+        "refusal_score": None,
+        "refusal_matches": None,
     }
 
     # The wizard-generated PHOTON YAML (proj.photon_config_path) takes
@@ -1850,6 +1874,8 @@ def _run_query(proj: Project, question: str, session_key: str) -> tuple[str, dic
         "drift_metrics": getattr(result, "drift_metrics", None),
         "turn_id": getattr(result, "turn_id", 0),
         "retrieval_debug": getattr(result, "retrieval_debug", None),
+        "refusal_score": getattr(result, "refusal_score", None),
+        "refusal_matches": getattr(result, "refusal_matches", None),
     }
 
     # Issue #82 Wave 3 (W3-T3): surface turn-history for the chat panel.

@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from baseline_reporag.citation import is_refusal_answer, resolve_citations
+from baseline_reporag.citation import (
+    compute_refusal_score,
+    is_refusal_answer,
+    resolve_citations,
+)
 from baseline_reporag.generation.evidence_pack import EvidencePack
 from baseline_reporag.ingestion.chunker import Chunk
 
@@ -143,3 +147,51 @@ class TestResolveCitationsRefusalFlag:
         answer = "The function is in [C:1]."
         result = resolve_citations(answer, pack)
         assert result.is_refusal is False
+
+
+# Issue #177: compute_refusal_score ----------------------------------------
+
+
+class TestComputeRefusalScore:
+    """compute_refusal_score(answer) -> tuple[float, list[str]] の動作検証。"""
+
+    def test_refusal_phrase_returns_score_one(self) -> None:
+        score, matches = compute_refusal_score("根拠が不足しています。")
+        assert score == 1.0
+        assert "根拠が不足しています" in matches
+
+    def test_normal_answer_returns_score_zero(self) -> None:
+        score, matches = compute_refusal_score("The router is in [C:1].")
+        assert score == 0.0
+        assert matches == []
+
+    def test_empty_string_returns_score_zero(self) -> None:
+        score, matches = compute_refusal_score("")
+        assert score == 0.0
+        assert matches == []
+
+    def test_multiple_phrases_returns_all_matches(self) -> None:
+        score, matches = compute_refusal_score("根拠不足。わかりません。")
+        assert score == 1.0
+        assert "根拠不足" in matches
+        assert "わかりません" in matches
+
+    def test_new_pattern_gaitou_jouhou(self) -> None:
+        """Issue #177: 「該当する情報は含まれていません」が検出されること。"""
+        score, matches = compute_refusal_score("該当する情報は含まれていません。")
+        assert score == 1.0
+        assert len(matches) > 0
+
+    def test_new_pattern_miatarimasen(self) -> None:
+        """Issue #177: 「見当たりません」が検出されること。"""
+        score, matches = compute_refusal_score("コードチャンクには見当たりません。")
+        assert score == 1.0
+        assert len(matches) > 0
+
+    def test_returns_float_type(self) -> None:
+        score, _ = compute_refusal_score("任意の文字列")
+        assert isinstance(score, float)
+
+    def test_returns_list_type(self) -> None:
+        _, matches = compute_refusal_score("任意の文字列")
+        assert isinstance(matches, list)

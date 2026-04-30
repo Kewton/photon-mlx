@@ -80,3 +80,7 @@ class QueryResult:
     # Issue #176: per-turn retrieval debug rows (normalized scores + source).
     # None when debug is disabled or on pre-#176 historical rows.
     retrieval_debug: list[RetrievalDebugRow] | None = None
+    # Issue #177: refusal score (0.0 = answer, 1.0 = refusal) and matched phrases.
+    # None on pre-#177 historical rows or when not yet computed.
+    refusal_score: float | None = None
+    refusal_matches: list[str] | None = None

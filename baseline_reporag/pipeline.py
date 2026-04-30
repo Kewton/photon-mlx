@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import uuid
 
-from .citation import CitationResult, resolve_citations
+from .citation import CitationResult, compute_refusal_score, resolve_citations
 from .config import Config
 
 # CB2-001 (codex-fix): ``QueryResult`` moved to the MLX-free
@@ -300,6 +300,7 @@ class RepoRAGPipeline:
             }
         )
 
+        r_score, r_matches = compute_refusal_score(answer)
         return QueryResult(
             answer=answer,
             session_id=session_id,
@@ -317,4 +318,6 @@ class RepoRAGPipeline:
             generator_used="qwen",
             generator_fallback_reason=None,
             retrieval_debug=debug_rows,
+            refusal_score=r_score,
+            refusal_matches=r_matches,
         )
