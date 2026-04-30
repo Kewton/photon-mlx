@@ -107,6 +107,9 @@ indexing:
     include_call_edges: true
     include_inheritance_edges: true
 
+  heading_graph:
+    enabled: false
+
   dependency_graph:
     enabled: true
     max_hops: 2

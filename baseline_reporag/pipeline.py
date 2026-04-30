@@ -24,7 +24,7 @@ from .generation.generator import Generator
 from .generation.prompt import ABSTAIN_MARKER, _EVIDENCE_HEADER, build_messages
 from .indexing.embedding import EmbeddingIndex
 from .indexing.lexical import LexicalIndex
-from .indexing.symbol_graph import SymbolGraph
+from .indexing.graph_protocol import GraphLike
 from .ingestion.store import ChunkStore
 from .logger import RunLogger
 from .memory.session import SessionManager
@@ -94,7 +94,7 @@ class RepoRAGPipeline:
         store: ChunkStore,
         lexical: LexicalIndex,
         embedding: EmbeddingIndex,
-        graph: SymbolGraph | None,
+        graph: GraphLike | None,
         sessions: SessionManager,
         generator: Generator,
         logger: RunLogger,

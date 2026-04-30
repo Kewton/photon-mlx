@@ -120,28 +120,45 @@ def load_config(path: str | Path) -> Config:
     return cfg
 
 
+def _get_graph_block_enabled(
+    cfg: Config | dict[str, Any], sub_block: str, *, default: bool
+) -> bool:
+    """Return ``indexing.<sub_block>.enabled`` with a configurable default.
+
+    Uses only the shared ``.get(key, default)`` protocol so both
+    :class:`Config` instances and plain dicts work without branching.
+    ``or {}`` guards against ``None`` values that would break ``.get()``.
+    NOTE: ``isinstance(dict)`` check is intentionally absent (DR2-001) —
+    Config objects are not dicts, so that check would silently fall back
+    to the default for every Config input.
+
+    CB-003: Non-bool values raise :class:`TypeError` (fail-fast).
+    """
+    indexing = cfg.get("indexing", {}) or {}
+    block = indexing.get(sub_block, {}) or {}
+    val = block.get("enabled", default)
+    if not isinstance(val, bool):
+        raise TypeError(
+            f"indexing.{sub_block}.enabled must be a bool (true/false), "
+            f"got {type(val).__name__}={val!r}"
+        )
+    return val
+
+
 def is_symbol_graph_enabled(cfg: Config | dict[str, Any]) -> bool:
     """Return whether ``indexing.symbol_graph.enabled`` is on (default True).
 
     Accepts a :class:`Config` instance (which exposes ``.get()`` and
-    recursively wraps nested dicts) or a plain ``dict``. The recursive
-    lookup relies only on the shared ``.get(key, default)`` protocol, so
-    both forms work without branching. Missing intermediate blocks resolve
-    to the default ``True`` so existing configurations that predate
-    Issue #109 keep their current behaviour.
-
-    CB-003: Non-bool YAML values (e.g. the quoted string ``"false"``, or
-    an integer) are rejected with :class:`TypeError`. ``bool("false")`` is
-    ``True`` in Python, so a silent truthy cast here would silently enable
-    the symbol graph on operator typos. Fail-fast keeps wiring bugs
-    visible in CI instead of surfacing as load-time errors later.
+    recursively wraps nested dicts) or a plain ``dict``. Missing blocks
+    default to ``True`` so configurations predating Issue #109 are unaffected.
     """
-    indexing = cfg.get("indexing", {}) or {}
-    symbol_graph = indexing.get("symbol_graph", {}) or {}
-    val = symbol_graph.get("enabled", True)
-    if not isinstance(val, bool):
-        raise TypeError(
-            "indexing.symbol_graph.enabled must be a bool (true/false), "
-            f"got {type(val).__name__}={val!r}"
-        )
-    return val
+    return _get_graph_block_enabled(cfg, "symbol_graph", default=True)
+
+
+def is_heading_graph_enabled(cfg: Config | dict[str, Any]) -> bool:
+    """Return whether ``indexing.heading_graph.enabled`` is on (default False).
+
+    Ships OFF by default (DR2-002 / release strategy: flag-off merge first).
+    Enable explicitly in config to activate heading-based graph expansion.
+    """
+    return _get_graph_block_enabled(cfg, "heading_graph", default=False)

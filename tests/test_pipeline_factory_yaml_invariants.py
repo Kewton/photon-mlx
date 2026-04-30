@@ -25,7 +25,7 @@ from pathlib import Path
 
 import pytest
 
-from baseline_reporag.config import load_config
+from baseline_reporag.config import is_heading_graph_enabled, load_config
 
 CONFIGS_DIR = Path(__file__).resolve().parent.parent / "configs"
 
@@ -224,4 +224,34 @@ def test_institutional_docs_photon_checkpoint_path_is_phase8_adopted() -> None:
         f"institutional_docs_photon.yaml の checkpoint_path が "
         f"Phase 8 採用 ckpt から逸脱: got {cfg.model.checkpoint_path!r}, "
         f"expected {INSTITUTIONAL_PHOTON_ADOPTED_CHECKPOINT!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Issue #180 — photon_*.yaml must NOT have heading_graph enabled (DR2-013).
+# heading_graph ships OFF for all production PHOTON profiles; it is enabled
+# only in the eval-only variant (institutional_docs_photon_retrain_heading_on.yaml).
+# ---------------------------------------------------------------------------
+
+_PHOTON_YAML_NAMES = [
+    "photon_tiny.yaml",
+    "photon_tiny_recgen.yaml",
+    "photon_small.yaml",
+    "photon_600m_paper.yaml",
+    "photon_long_context.yaml",
+]
+
+
+@pytest.mark.parametrize("yaml_name", _PHOTON_YAML_NAMES)
+def test_photon_yaml_heading_graph_disabled_by_default(yaml_name: str) -> None:
+    """photon_*.yaml must have heading_graph OFF (default False, DR2-013).
+
+    heading_graph is enabled only in institutional_docs_photon_retrain_heading_on.yaml
+    (eval-only variant). This invariant prevents accidental activation in
+    production PHOTON profiles before the multi-turn NC 0.00% gate is validated.
+    """
+    cfg = load_config(CONFIGS_DIR / yaml_name)
+    assert is_heading_graph_enabled(cfg) is False, (
+        f"{yaml_name} must not have heading_graph enabled (DR2-013). "
+        "Enable it only in the eval-only variant config."
     )
