@@ -51,6 +51,7 @@ class _MockQueryResult:
     confidence: float = None
     fallback_decision: dict = None
     citation_postprocessed: bool = False
+    retrieval_debug: list = None
 
     def __post_init__(self):
         if self.cited_chunk_ids is None:

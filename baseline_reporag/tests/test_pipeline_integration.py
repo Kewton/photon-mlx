@@ -30,6 +30,7 @@ from baseline_reporag.config import Config  # noqa: E402
 from baseline_reporag.ingestion.chunker import Chunk  # noqa: E402
 from baseline_reporag.memory.session import SessionManager  # noqa: E402
 from baseline_reporag.pipeline import RepoRAGPipeline  # noqa: E402
+from baseline_reporag.retrieval.graph_expansion import ExpandedChunkRef  # noqa: E402
 
 
 def _make_test_chunks() -> list[Chunk]:
@@ -131,8 +132,10 @@ def _mock_hybrid_search(**kwargs):  # noqa: ANN003
 
 
 def _mock_expand_with_graph(**kwargs):  # noqa: ANN003
-    """expand_with_graph のモック: chunk ID リストを返す。"""
-    return _MOCK_CHUNK_IDS
+    """expand_with_graph のモック: ExpandedChunkRef リストを返す。"""
+    return [
+        ExpandedChunkRef(chunk_id=cid, source="retrieval") for cid in _MOCK_CHUNK_IDS
+    ]
 
 
 @patch(
@@ -498,4 +501,67 @@ class TestSeedPropagation:
         call = mock_gen.generate.call_args
         assert call.kwargs.get("seed") == 0, (
             f"seed=0 silently dropped; kwargs={call.kwargs}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Issue #176: retrieval_debug populated in QueryResult
+# ---------------------------------------------------------------------------
+
+
+@patch(
+    "baseline_reporag.pipeline.expand_with_graph",
+    side_effect=_mock_expand_with_graph,
+)
+@patch(
+    "baseline_reporag.pipeline.hybrid_search",
+    side_effect=_mock_hybrid_search,
+)
+class TestRetrievalDebug:
+    """Issue #176: QueryResult.retrieval_debug must be populated after query."""
+
+    def test_retrieval_debug_is_not_none(
+        self,
+        mock_search: MagicMock,
+        mock_expand: MagicMock,
+    ) -> None:
+        """retrieval_debug must be a non-None list after a query turn."""
+        pipeline = _build_test_pipeline()
+        result = pipeline.query("test question", session_id="s1")
+        assert result.retrieval_debug is not None, (
+            "QueryResult.retrieval_debug must be populated (Issue #176)"
+        )
+
+    def test_retrieval_debug_sources_valid(
+        self,
+        mock_search: MagicMock,
+        mock_expand: MagicMock,
+    ) -> None:
+        """All retrieval_debug rows must have a recognized source value."""
+        pipeline = _build_test_pipeline()
+        result = pipeline.query("test question", session_id="s1")
+        assert result.retrieval_debug is not None
+        valid_sources = {
+            "retrieval",
+            "graph",
+            "neighbor",
+            "photon_pruned",
+            "working_memory",
+        }
+        for row in result.retrieval_debug:
+            assert row.source in valid_sources, (
+                f"Unexpected source={row.source!r} for chunk {row.chunk_id}"
+            )
+
+    def test_retrieval_debug_has_used_rows(
+        self,
+        mock_search: MagicMock,
+        mock_expand: MagicMock,
+    ) -> None:
+        """At least one row must have used=True (chunks were added to evidence pack)."""
+        pipeline = _build_test_pipeline()
+        result = pipeline.query("test question", session_id="s1")
+        assert result.retrieval_debug is not None
+        assert any(r.used for r in result.retrieval_debug), (
+            "At least one row must be used=True after evidence pack construction"
         )

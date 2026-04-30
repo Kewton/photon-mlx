@@ -586,3 +586,132 @@ class TestRunQueryOverridesRepoFromProject:
             "cfg.repo.repo_commit must be resolved from chunks.db "
             "(otherwise graph_expansion's iter_repo SQL filter sees no rows)"
         )
+
+
+class TestRetrievalDebugMetadataTransfer:
+    """Issue #176: _run_query transfers retrieval_debug from QueryResult to metadata."""
+
+    def _make_proj(self, tmp_path: Path):
+        return _make_proj(tmp_path)
+
+    def _make_result(self, retrieval_debug=None):
+        from baseline_reporag.contracts import RetrievalDebugRow
+
+        if retrieval_debug is None:
+            retrieval_debug = [
+                RetrievalDebugRow(
+                    chunk_id="c0",
+                    rel_path="a.py",
+                    section=None,
+                    bm25_score=0.8,
+                    embedding_score=0.7,
+                    fused_score=0.75,
+                    reranker_score=None,
+                    used=True,
+                    citation_index=1,
+                    source="retrieval",
+                )
+            ]
+        return SimpleNamespace(
+            answer="answer text",
+            session_id="s1",
+            turn_id=1,
+            cited_chunk_ids=["c0"],
+            wrong_citation_indices=[],
+            no_citation=False,
+            latency=SimpleNamespace(total_ms=50.0),
+            memory=SimpleNamespace(),
+            drift_metrics=None,
+            retrieval_debug=retrieval_debug,
+        )
+
+    def test_retrieval_debug_transferred_to_metadata(self, tmp_path: Path) -> None:
+        """metadata['retrieval_debug'] must equal result.retrieval_debug."""
+        proj = self._make_proj(tmp_path)
+        result = self._make_result()
+
+        fake_pipeline = MagicMock()
+        fake_pipeline.query.return_value = result
+
+        fake_cfg = SimpleNamespace(
+            model=SimpleNamespace(provider="baseline"),
+            repo=SimpleNamespace(repo_id="demo_repo", repo_commit="orig"),
+            paths=SimpleNamespace(data_root=str(tmp_path)),
+        )
+        fake_session_state = _FakeSessionState()
+
+        with (
+            patch.object(photon_app, "load_config", create=True, return_value=fake_cfg),
+            patch.object(
+                photon_app,
+                "build_pipeline",
+                create=True,
+                return_value=fake_pipeline,
+            ),
+            patch.object(photon_app.st, "session_state", fake_session_state),
+        ):
+            _, metadata = photon_app._run_query(proj, "q?", "sess")
+
+        assert metadata["retrieval_debug"] is result.retrieval_debug
+
+    def test_retrieval_debug_none_when_result_has_none(self, tmp_path: Path) -> None:
+        """metadata['retrieval_debug'] is None when result.retrieval_debug is None (AC-12)."""
+        proj = self._make_proj(tmp_path)
+        result = self._make_result(retrieval_debug=None)
+        result.retrieval_debug = None
+
+        fake_pipeline = MagicMock()
+        fake_pipeline.query.return_value = result
+
+        fake_cfg = SimpleNamespace(
+            model=SimpleNamespace(provider="baseline"),
+            repo=SimpleNamespace(repo_id="demo_repo", repo_commit="orig"),
+            paths=SimpleNamespace(data_root=str(tmp_path)),
+        )
+        fake_session_state = _FakeSessionState()
+
+        with (
+            patch.object(photon_app, "load_config", create=True, return_value=fake_cfg),
+            patch.object(
+                photon_app,
+                "build_pipeline",
+                create=True,
+                return_value=fake_pipeline,
+            ),
+            patch.object(photon_app.st, "session_state", fake_session_state),
+        ):
+            _, metadata = photon_app._run_query(proj, "q?", "sess")
+
+        assert metadata.get("retrieval_debug") is None
+
+    def test_retrieval_debug_not_in_session_state(self, tmp_path: Path) -> None:
+        """retrieval_debug must not appear in Streamlit session_state (security)."""
+        proj = self._make_proj(tmp_path)
+        result = self._make_result()
+
+        fake_pipeline = MagicMock()
+        fake_pipeline.query.return_value = result
+
+        fake_cfg = SimpleNamespace(
+            model=SimpleNamespace(provider="baseline"),
+            repo=SimpleNamespace(repo_id="demo_repo", repo_commit="orig"),
+            paths=SimpleNamespace(data_root=str(tmp_path)),
+        )
+        fake_session_state = _FakeSessionState()
+
+        with (
+            patch.object(photon_app, "load_config", create=True, return_value=fake_cfg),
+            patch.object(
+                photon_app,
+                "build_pipeline",
+                create=True,
+                return_value=fake_pipeline,
+            ),
+            patch.object(photon_app.st, "session_state", fake_session_state),
+        ):
+            photon_app._run_query(proj, "q?", "sess")
+
+        assert "retrieval_debug" not in fake_session_state, (
+            "retrieval_debug must not be stored in session_state "
+            "(security: avoids large object accumulation per turn)"
+        )

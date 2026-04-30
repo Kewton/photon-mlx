@@ -12,6 +12,7 @@ class RetrievalResult:
     score: float
     lexical_score: float
     embedding_score: float
+    reranker_score: float | None = None
 
 
 def _normalize(pairs: list[tuple[str, float]]) -> dict[str, float]:
@@ -168,6 +169,7 @@ def apply_file_type_boost(
                 score=new_score,
                 lexical_score=r.lexical_score,
                 embedding_score=r.embedding_score,
+                reranker_score=r.reranker_score,
             )
         )
     return sorted(boosted, key=lambda x: x.score, reverse=True)

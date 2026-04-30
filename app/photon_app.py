@@ -1693,6 +1693,36 @@ def page_chat():
                 except Exception as exc:
                     st.warning(f"turn history render failed: {exc}")
 
+                try:
+                    debug_data = metadata.get("retrieval_debug")
+                    if debug_data:
+                        with st.expander("🔍 Retrieval debug", expanded=False):
+                            import pandas as pd
+
+                            df = pd.DataFrame(
+                                [
+                                    {
+                                        "chunk_id": r.chunk_id,
+                                        "rel_path": r.rel_path,
+                                        "section": r.section or "",
+                                        "source": r.source,
+                                        "BM25 (norm)": r.bm25_score,
+                                        "Embedding (norm)": r.embedding_score,
+                                        "Rerank score": r.reranker_score,
+                                        "Used": "✓" if r.used else "",
+                                        "Citation": (
+                                            f"[C:{r.citation_index}]"
+                                            if r.citation_index is not None
+                                            else ""
+                                        ),
+                                    }
+                                    for r in debug_data
+                                ]
+                            )
+                            st.dataframe(df, use_container_width=True)
+                except Exception as exc:
+                    st.warning(f"retrieval debug render failed: {exc}")
+
         history.append({"role": "assistant", "content": answer})
         save()
 
@@ -1819,6 +1849,7 @@ def _run_query(proj: Project, question: str, session_key: str) -> tuple[str, dic
         "no_citation": result.no_citation,
         "drift_metrics": getattr(result, "drift_metrics", None),
         "turn_id": getattr(result, "turn_id", 0),
+        "retrieval_debug": getattr(result, "retrieval_debug", None),
     }
 
     # Issue #82 Wave 3 (W3-T3): surface turn-history for the chat panel.
