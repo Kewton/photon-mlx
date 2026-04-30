@@ -104,12 +104,70 @@ class CrossEncoderReranker:
             key=lambda x: x[1],
             reverse=True,
         )
+        # DR1-003: preserve fused ``score``; write cross-encoder score to
+        # ``reranker_score`` only.  Existing callers that read ``.score``
+        # after rerank() now get the fused score, not the cross-encoder score.
         return [
             RetrievalResult(
                 chunk_id=r.chunk_id,
-                score=float(s),
+                score=r.score,
                 lexical_score=r.lexical_score,
                 embedding_score=r.embedding_score,
+                reranker_score=float(s),
             )
             for r, s in reranked[:top_k]
         ]
+
+    def rerank_with_debug(
+        self,
+        query: str,
+        results: list[RetrievalResult],
+        store: ChunkStore,
+        top_k: int,
+        rerank_query: str | None = None,
+        rejected_debug_top_n: int = 10,
+    ) -> tuple[list[RetrievalResult], list[RetrievalResult]]:
+        """Rerank and return (top_k_rows, rejected_rows) each with reranker_score.
+
+        Runs cross-encoder on ``top_k + rejected_debug_top_n`` candidates so
+        that rejected rows also carry their cross-encoder score in
+        ``reranker_score`` (Issue #176 AC-4).
+
+        Existing ``rerank()`` is left unchanged for non-debug callers.
+        """
+        if not results:
+            return [], []
+
+        clean = [r for r in results if not self._is_noise(r.chunk_id)]
+        if not clean:
+            clean = results
+
+        scoring_query = rerank_query if rerank_query else query
+
+        chunks = store.get_many([r.chunk_id for r in clean])
+        content_map = {c.chunk_id: c.content[:600] for c in chunks}
+
+        pairs = [(scoring_query, content_map.get(r.chunk_id, "")) for r in clean]
+        scores: list[float] = self._model.predict(pairs).tolist()
+
+        ranked = sorted(
+            zip(clean, scores),
+            key=lambda x: x[1],
+            reverse=True,
+        )
+
+        def _with_reranker_score(r: RetrievalResult, s: float) -> RetrievalResult:
+            return RetrievalResult(
+                chunk_id=r.chunk_id,
+                score=r.score,
+                lexical_score=r.lexical_score,
+                embedding_score=r.embedding_score,
+                reranker_score=float(s),
+            )
+
+        top_k_rows = [_with_reranker_score(r, s) for r, s in ranked[:top_k]]
+        rejected_rows = [
+            _with_reranker_score(r, s)
+            for r, s in ranked[top_k : top_k + rejected_debug_top_n]
+        ]
+        return top_k_rows, rejected_rows

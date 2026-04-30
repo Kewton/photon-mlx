@@ -1,4 +1,8 @@
-"""Tests for ``expand_with_graph`` including ``graph=None`` support (Issue #109)."""
+"""Tests for ``expand_with_graph`` including ``graph=None`` support (Issue #109).
+
+Phase B-2 (Issue #176): assertions updated to use ``.chunk_id`` access on
+``ExpandedChunkRef`` objects returned by the new API (RED until Phase C-3).
+"""
 
 from __future__ import annotations
 
@@ -51,10 +55,10 @@ class TestExpandWithGraph:
             repo_commit="abc",
         )
 
-        assert out[0] == "c0"
-        assert out[1] == "c1"
-        assert "c3" in out  # graph-neighbor
-        assert "c2" in out  # file-neighbor
+        assert out[0].chunk_id == "c0"
+        assert out[1].chunk_id == "c1"
+        assert any(r.chunk_id == "c3" for r in out)  # graph-neighbor
+        assert any(r.chunk_id == "c2" for r in out)  # file-neighbor
         graph.get_related_chunks.assert_called()
 
     def test_graph_none_skips_graph_neighbors_keeps_file_neighbors(self):
@@ -74,10 +78,10 @@ class TestExpandWithGraph:
         )
 
         # original candidates preserved
-        assert out[0] == "c0"
-        assert out[1] == "c1"
+        assert out[0].chunk_id == "c0"
+        assert out[1].chunk_id == "c1"
         # file-neighbors preserved
-        assert "c2" in out
+        assert any(r.chunk_id == "c2" for r in out)
         # store continues to be consulted for file-neighbors
         store.get_many.assert_called_once()
         store.get_neighbors.assert_called()
@@ -94,7 +98,7 @@ class TestExpandWithGraph:
             repo_id="test",
             repo_commit="abc",
         )
-        assert out == []
+        assert out == []  # empty list of ExpandedChunkRef
 
     def test_heading_graph_accepted_as_graph_arg(self):
         """HeadingGraph instance satisfies GraphLike; expand_with_graph accepts it (LSP)."""
@@ -113,7 +117,7 @@ class TestExpandWithGraph:
             repo_id="test",
             repo_commit="abc",
         )
-        assert "c0" in out
+        assert any(r.chunk_id == "c0" for r in out)
 
     def test_lsp_common_fixture_symbol_and_heading(self):
         """SymbolGraph and HeadingGraph produce same expand_with_graph behavior for empty graphs."""
@@ -133,5 +137,5 @@ class TestExpandWithGraph:
                 repo_id="test",
                 repo_commit="abc",
             )
-            assert "c0" in out
+            assert any(r.chunk_id == "c0" for r in out)
             assert isinstance(out, list)
