@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import pytest
 
-from baseline_reporag.config import Config, deep_merge, is_symbol_graph_enabled
+from baseline_reporag.config import (
+    Config,
+    deep_merge,
+    is_heading_graph_enabled,
+    is_symbol_graph_enabled,
+)
 
 
 class TestDeepMerge:
@@ -140,3 +145,50 @@ class TestIsSymbolGraphEnabled:
         cfg = {"indexing": {"symbol_graph": {"enabled": [True]}}}
         with pytest.raises((TypeError, ValueError)):
             is_symbol_graph_enabled(cfg)
+
+
+class TestIsHeadingGraphEnabled:
+    """Mirror of TestIsSymbolGraphEnabled with default=False semantics."""
+
+    def test_explicit_true(self):
+        cfg = Config({"indexing": {"heading_graph": {"enabled": True}}})
+        assert is_heading_graph_enabled(cfg) is True
+
+    def test_explicit_false(self):
+        cfg = Config({"indexing": {"heading_graph": {"enabled": False}}})
+        assert is_heading_graph_enabled(cfg) is False
+
+    def test_missing_heading_graph_block_defaults_false(self):
+        cfg = Config({"indexing": {"other_key": 1}})
+        assert is_heading_graph_enabled(cfg) is False
+
+    def test_missing_indexing_block_defaults_false(self):
+        cfg = Config({"repo": {"repo_id": "x"}})
+        assert is_heading_graph_enabled(cfg) is False
+
+    def test_plain_dict_compatible(self):
+        cfg = {"indexing": {"heading_graph": {"enabled": True}}}
+        assert is_heading_graph_enabled(cfg) is True
+
+    def test_plain_dict_default_false(self):
+        assert is_heading_graph_enabled({}) is False
+
+    def test_quoted_string_false_raises(self):
+        cfg = Config({"indexing": {"heading_graph": {"enabled": "false"}}})
+        with pytest.raises((TypeError, ValueError)):
+            is_heading_graph_enabled(cfg)
+
+    def test_quoted_string_true_raises(self):
+        cfg = Config({"indexing": {"heading_graph": {"enabled": "true"}}})
+        with pytest.raises((TypeError, ValueError)):
+            is_heading_graph_enabled(cfg)
+
+    def test_integer_value_raises(self):
+        cfg = Config({"indexing": {"heading_graph": {"enabled": 1}}})
+        with pytest.raises((TypeError, ValueError)):
+            is_heading_graph_enabled(cfg)
+
+    def test_list_value_raises(self):
+        cfg = {"indexing": {"heading_graph": {"enabled": [True]}}}
+        with pytest.raises((TypeError, ValueError)):
+            is_heading_graph_enabled(cfg)

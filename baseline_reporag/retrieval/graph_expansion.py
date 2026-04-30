@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 from ..ingestion.store import ChunkStore
-from ..indexing.symbol_graph import SymbolGraph
+from ..indexing.graph_protocol import GraphLike
 from .hybrid import RetrievalResult
 
 
 def expand_with_graph(
     results: list[RetrievalResult],
     store: ChunkStore,
-    graph: SymbolGraph | None,
+    graph: GraphLike | None,
     repo_id: str,
     repo_commit: str,
     max_hops: int = 1,
@@ -19,8 +19,9 @@ def expand_with_graph(
     """Return deduplicated chunk IDs: original + graph neighbors + file neighbors.
 
     When ``graph is None`` (Issue #109: ``indexing.symbol_graph.enabled=false``
-    for non-Python repositories), the graph-neighbor expansion is skipped
-    but file-neighbor expansion via ``store.get_neighbors`` still runs.
+    for non-Python repositories, or heading_graph disabled), the graph-neighbor
+    expansion is skipped but file-neighbor expansion via ``store.get_neighbors``
+    still runs. Accepts any :class:`GraphLike` implementor (LSP contract).
     """
     seen: set[str] = set()
     ordered: list[str] = []

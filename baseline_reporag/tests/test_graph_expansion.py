@@ -95,3 +95,43 @@ class TestExpandWithGraph:
             repo_commit="abc",
         )
         assert out == []
+
+    def test_heading_graph_accepted_as_graph_arg(self):
+        """HeadingGraph instance satisfies GraphLike; expand_with_graph accepts it (LSP)."""
+        from baseline_reporag.indexing.heading_graph import HeadingGraph
+
+        results = [_make_result("c0")]
+        store = MagicMock()
+        store.get_many.return_value = [_make_chunk("c0")]
+        store.get_neighbors.return_value = []
+
+        hg = HeadingGraph()
+        out = expand_with_graph(
+            results=results,
+            store=store,
+            graph=hg,
+            repo_id="test",
+            repo_commit="abc",
+        )
+        assert "c0" in out
+
+    def test_lsp_common_fixture_symbol_and_heading(self):
+        """SymbolGraph and HeadingGraph produce same expand_with_graph behavior for empty graphs."""
+        from baseline_reporag.indexing.heading_graph import HeadingGraph
+        from baseline_reporag.indexing.symbol_graph import SymbolGraph
+
+        results = [_make_result("c0")]
+        store = MagicMock()
+        store.get_many.return_value = [_make_chunk("c0")]
+        store.get_neighbors.return_value = []
+
+        for graph in (SymbolGraph(), HeadingGraph()):
+            out = expand_with_graph(
+                results=results,
+                store=store,
+                graph=graph,
+                repo_id="test",
+                repo_commit="abc",
+            )
+            assert "c0" in out
+            assert isinstance(out, list)

@@ -1,15 +1,27 @@
-# 制度文書 (institutional_documents) corpus 専用 config。
-# - Issue #112: Phase 2 制度文書ドメイン検証の baseline Static NC 実測用。
-# - base: configs/photon_small.yaml のコピー + institutional_documents 向け override。
-#   #113 PHOTON 測定は本 config の `model.provider` を "photon" へ切り替えて流用する想定。
-# - Streamlit UI の repo_id と一致しない repo に対して使用すると空結果 (NC=100%) となるため注意。
-# - repo.repo_path はマシン A (M3 Ultra) の絶対パス。他環境では書き換えまたは --repo 引数で上書き。
-# - Streamlit UI の ingest は git rev-parse HEAD を前提とするため institutional_documents (非 git) では利用不可。
-#   本 config の ingest は scripts/ingest_repo.py CLI のみで実行する。
-# - sentinel repo_commit は hashlib.sha1(b"institutional_v1").hexdigest() (= 9e500539f29555364217b773368305e7f59aa026)。
-#   corpus 更新時は `institutional_v2` 等の tag を hash して 40 字 sentinel を更新。
-# - 3 重 handicap (設計 §1-4): (a) 解消済 (#125, prefix 付与) / (b) 英語 cross-encoder reranker 継承 /
-#   (c) 日本語未調整 chunker size。残り (b)/(c) は follow-up Issue で個別対応。
+# Eval-only variant: heading_graph ON for Multi-turn NC comparison (DR3-003).
+# Production retrain still uses institutional_docs_photon_retrain.yaml (heading off).
+# 制度文書 (institutional_documents) corpus PHOTON 再学習用 config。
+#
+# - Issue #135 専用。`configs/institutional_docs_photon.yaml` (旧) は
+#   #112/#126 ベースライン eval 再現性のため温存し、本 yaml は別ファイルとして
+#   分離する (S3-007 / DR3-007 に従う)。差分は training セクション + model
+#   セクションの一部に限定。
+# - training:
+#   - train_corpora_mix で mulmoclaude (英語コード) 50% / JP institutional 50%
+#     を混合 (DR1-005: val_corpora_mix dict は廃止し val_split で train pool
+#     内分割)。実 corpus は `data/training/` 配下に配置 (gitignore)。
+#   - 累計 step 採用 (S5-002): max_steps は state.step の通算値。既存 mulmoclaude
+#     600 step から 10K 追加するなら max_steps=10600 を指定し、
+#     `model.checkpoint_path` を resume_from の起点として渡す。
+#   - LR schedule (S5-001): lr=3e-5 → min_lr=3e-6 cosine decay。warmup_ratio=0.0
+#     のため _build_lr_schedule は cosine_decay 単体を返し、初回 step は lr=3e-5
+#     から開始。`min_lr=0` だと constant LR fallback に乗るので 0 にしない (DR2-009)。
+# - model.checkpoint_path: 本格再学習成果物の load 経路。Day 5 採用判定後に
+#   `./checkpoints/photon_institutional_step<NNNNNN>_<yyyymmdd>/` を埋める。
+#   現在は未確定なのでコメントアウト。S7-001: PHOTON eval は random-init weights
+#   を避けるため、本ファイル使用前に必ず checkpoint_path を埋める。
+# - DR4-003 integrity.json による checkpoint 改竄検出は `photon_mlx.checkpoint`
+#   が自動で実施 (本 yaml に追加設定不要)。
 
 version: 1
 
@@ -18,7 +30,7 @@ project:
   mode: "institutional_docs"
 
 run:
-  name_prefix: "institutional_docs"
+  name_prefix: "institutional_docs_retrain"
   seed: 42
   deterministic: true
 
@@ -80,22 +92,17 @@ indexing:
     enabled: true
     provider: "local"
     # 注意 1: `#125` で baseline_reporag/indexing/embedding.py へ "query: "/"passage: " prefix
-    # 付与済 (E5 系のみ動作、bge-m3 は prefix なし passthrough)。
-    # #137 Phase B: 5-variant A/B (V0 e5-small, V1 e5-base, V2 ruri 計測不能,
-    # V3 bge-reranker swap, V4 bge-m3) で V4 採用 (NC -6.90pt vs V0 12.93%)。
-    # 詳細: reports/institutional_retrieval_ab.md
-    model_id: "BAAI/bge-m3"
-    batch_size: 32  # bge-m3 (1024dim) のため batch を縮小
+    # 付与済、E5 本来性能を発揮 (handicap (a) 解消)。
+    model_id: "intfloat/multilingual-e5-small"
+    batch_size: 64
     normalize: true
-    max_input_chars: 8192  # #137 V4: bge-m3 token 上限 8192 と整合 (chars ≒ 4096-8192 tokens)
 
   symbol_graph:
     # #109 で honor される。非 code 系 corpus のため無効化。
     enabled: false
 
   heading_graph:
-    # #180: 本 PR merge 時点は false。別 PR で true 化 (DR2-002)。
-    enabled: false
+    enabled: true
 
 retrieval:
   mode: "hybrid"
@@ -111,10 +118,8 @@ retrieval:
 
   reranker:
     enabled: true
-    # 注意 2: #137 で多言語 reranker (bge-reranker-v2-m3) に切替済 (handicap (b) 解消)。
-    # global default は cross-encoder/ms-marco-MiniLM-L-6-v2 (#114 invariant test で保護)。
-    # institutional プロファイル限定で日本語制度文書向けに上書き。
-    model_id: "BAAI/bge-reranker-v2-m3"
+    # 注意 2: 英語 MS MARCO 学習モデルを継承。日本語 rerank で 5-10pt 下振れる可能性あり (handicap (b))。
+    model_id: "cross-encoder/ms-marco-MiniLM-L-6-v2"
     # #111 で外部化。FastAPI 向け _NOISE_PATTERNS fallback を抑止するため明示的に空 list。
     # 制度文書向け path-filter 候補は実データ調査後に別 Issue で追加。
     noise_patterns: []
@@ -126,10 +131,9 @@ retrieval:
     include_symbol_aliases: true
     include_filename_hints: true
     # Issue #175 (G2): institutional 用 Japanese-Japanese synonym dictionary.
-    # Issue #111 で外部化済の domain_map を JA→JA で利用 (値の性質が code-term から
-    # 同義語に変わるが、expand_query() の substring match + concat ロジックは型不変)。
-    # corpus 分析根拠: docs/issue-175-synonym-corpus-analysis.md
-    # 対象 corpus: institutional_documents (4,228 docs) + inst_test (制度文書 sub-set)
+    # Issue #111 で外部化済の domain_map を JA→JA で利用。corpus 分析根拠:
+    # docs/issue-175-synonym-corpus-analysis.md
+    # 3 institutional configs 間で内容を統一 (test_query_expansion.py の SoT 等価テストで保証)。
     domain_map:
       # === 認定 / 対象 系 ===
       "認定基準": ["対象事業者", "認定要件", "認定の基準"]
@@ -232,13 +236,21 @@ model:
   # **重要**: 本 Issue は baseline Static NC 実測のため provider=baseline に設定。
   # pipeline_factory.py:52-72 は provider=baseline で `_build_baseline_deps_no_mlx` 経由の
   # 純 baseline pipeline を返す。#113 PHOTON 測定時はこの行を "photon" に切替える。
-  provider: "baseline"
-  # 採用 (2026-04-28): Qwen3.5-9B-MLX-4bit no-think モード
-  # 評価エビデンス: reports/qwen_model_matrix_20260428_400cmp_report.md
-  # Note: tokenizer_id は PHOTON 訓練 checkpoint 互換性のため Qwen 2.5 を維持。
-  model_id: "mlx-community/Qwen3.5-9B-MLX-4bit"
+  provider: "photon"
+  model_id: "mlx-community/Qwen2.5-Coder-14B-Instruct-4bit"
+
+  # Issue #135 Day 5: 再学習成果物 (累計 step 3000、val_loss 0.4777、
+  # JP corpus 0.7 / EN 0.3 mix で 2400 step 追加学習)。
+  # PHOTON_CHECKPOINT_ROOT=$(pwd)/checkpoints の前提で resolve される。
+  # checkpoint_path 解決後の実体: <root>/photon_institutional_retrain_20260428/step_003000/
+  checkpoint_path: "photon_institutional_retrain_20260428/step_003000"
 
   # PHOTON-specific: 本 Issue baseline では参照されないが、#113 切替時のため継承値を保持。
+  # Issue #148 Phase A.2: num_heads matches mulmoclaude 600-step ckpt (10 × 64 = 640).
+  # 学習時は ModelConfig.num_attention_heads default=10 を使ったが、
+  # _build_photon_deps の cfg.model.get("num_heads", 4) で eval 時 4 にズレるため
+  # yaml で 10 を明示する必要あり。
+  num_heads: 10
   base_embed_dim: 256
   hidden_size: 1024
   intermediate_size: 2816
@@ -284,26 +296,69 @@ training:
   enabled: true
   stage: "small"
 
-  train_corpus: "./data/processed/train_multi.jsonl"
-  val_corpus: "./data/processed/val_multi.jsonl"
+  # Issue #135 / Phase 4-1: 混合 corpus 学習 (DR1-005 簡素化版)。
+  # - train_corpora_mix の sum は 1.0 (±1e-6) 必須。TrainingConfig.__post_init__ が
+  #   strict 検証する (DR1-003)。
+  # - 実 corpus は data/training/ 配下に配置 (gitignore)。本 commit 時点で
+  #   ファイル本体は未生成 — Phase 2 で
+  #   `scripts/generate_institutional_training_corpus.py` を作成し、実行は
+  #   #137 完了後にユーザー承認のもと走らせる。
+  # - val_split=0.05: train pool の 5% を sequence-level で hold-out。train/val
+  #   は同じ corpora ratio を共有する (DR1-005)。
+  # Issue #135 Day 3: per-user direction we point directly at the
+  # develop worktree's existing mulmoclaude-trained EN corpus (7188
+  # tokenized sequences from the original 600-step run) rather than
+  # symlinking or copying. The JP side is generated in this worktree by
+  # scripts/tokenize_institutional_corpus.py (raw markdown tokenized,
+  # not LLM Q&A — Day 4 pivot) and lands under
+  # data/training/institutional/. Both paths are absolute on purpose so
+  # `iterate_mixed_batches`'s DR4-002 approved-root check can be
+  # satisfied without ambiguous resolution.
+  #
+  # Day 4 mix ratio (JP:0.7 / EN:0.3): JP corpus has ~36K packed seqs
+  # vs EN ~7K, so 50/50 leaves JP under-exposed (~4 reps/seq vs EN ~22
+  # reps/seq). Bumping JP to 0.7 gives JP ~6 reps/seq for stronger
+  # institutional-domain learning while EN still gets ~14 reps/seq
+  # which preserves the original 600-step training signal.
+  train_corpora_mix:
+    "/Users/maenokota/share/work/github_kewton/photon-mlx-feature-issue-135-photon-retrain/data/training/institutional/train_jp.jsonl": 0.7
+    "/Users/maenokota/share/work/github_kewton/photon-mlx-develop/data/processed/train_multi.jsonl": 0.3
+  val_split: 0.05
+
+  # Legacy single-corpus fields。train_corpora_mix が設定されているため、
+  # trainer は混合経路に dispatch する。後方互換のため残置するが本 config
+  # では参照されない。
+  train_corpus: ""
+  val_corpus: ""
 
   context_length: 2048
+  # S5-004 反映: micro_batch=2 × grad_accum=16 = effective batch 32。
+  # tokens/step = 2 × 16 × 2048 = 65,536。
   micro_batch_size: 2
   gradient_accumulation_steps: 16
 
-  learning_rate: 0.00015
-  min_learning_rate: 0.000015
-  warmup_ratio: 0.03
+  # S5-001 反映: warmup_ratio=0.0 で cosine_decay 単体。init=3e-5, end=3e-6
+  # (= 1/10 flatten)。min_lr を 0 にすると constant LR fallback に落ちて
+  # cosine schedule が効かないので絶対 0 にしない (DR2-009)。
+  learning_rate: 3.0e-5
+  min_learning_rate: 3.0e-6
+  warmup_ratio: 0.0
   weight_decay: 0.1
   max_grad_norm: 1.0
 
-  max_steps: 2000
-  eval_every_steps: 100
-  save_every_steps: 100
+  # Day 4 段階的検証アプローチ (S5-002 累計 step):
+  # 既存 mulmoclaude 600 step → 累計 3000 = 追加 2400 step (~6-8h GPU)。
+  # 中間 eval で Turn 5-6 NC < 6% を確認後、必要なら resume_from で
+  # max_steps=10000 に拡張 (追加 7000 step = 16h GPU)。
+  # 全 25-33h を一度にコミットせず段階投資。
+  max_steps: 3000
+  eval_every_steps: 500   # 500 step 毎に英語コード eval (forgetting 早期検出)
+  save_every_steps: 500   # 500 step 毎の checkpoint = 1000/1500/2000/2500/3000 を保存
   log_every_steps: 20
 
   early_stopping:
     enabled: true
+    # patience=3: val_loss が 3 回連続非改善 (= 1500 step) で停止。
     patience: 3
     min_delta: 0.001
     restore_best: true

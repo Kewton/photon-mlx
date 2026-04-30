@@ -183,6 +183,14 @@ run(
     ],
     'build_symbol_graph',
 )
+print('Phase 3.5: Heading Graph', flush=True)
+run(
+    [
+        sys.executable, '-m', 'scripts.build_heading_graph',
+        '--repo-id', repo_id, '--commit', commit, '--config', config_path,
+    ],
+    'build_heading_graph',
+)
 print('DONE', flush=True)
 """
 
@@ -255,7 +263,7 @@ class IndexJob:
     started_at: str = ""
     status: str = "pending"
     log_file: str = ""
-    phase: str = ""  # ingest | bm25_embed | symbol_graph | completed
+    phase: str = ""  # ingest | bm25_embed | symbol_graph | heading_graph | completed
     embedding_model: str = ""
 
 
@@ -568,7 +576,9 @@ def _sync_index_job(job: IndexJob) -> bool:
                 log_content = ""
 
     if log_content and job.status == "running":
-        if "Phase 3" in log_content:
+        if "Phase 3.5" in log_content:
+            new_phase = "heading_graph"
+        elif "Phase 3" in log_content:
             new_phase = "symbol_graph"
         elif "Phase 2" in log_content:
             new_phase = "bm25_embed"

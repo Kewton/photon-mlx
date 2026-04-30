@@ -89,6 +89,9 @@ indexing:
     # #109 で honor される。非 code 系 corpus のため無効化。
     enabled: false
 
+  heading_graph:
+    enabled: false
+
 retrieval:
   mode: "hybrid"
   lexical_top_k: 20

@@ -102,7 +102,7 @@ PR レビュー時に **production code path** に scaffolding 命名 (`_Stub`, 
 ```
 baseline_reporag/       # Baseline RepoRAG (プロダクト線)
 ├── ingestion/          # ファイル抽出・chunking・SQLite store
-├── indexing/           # BM25・embedding・symbol graph
+├── indexing/           # BM25・embedding・symbol graph・heading graph (graph_protocol.py, heading_graph.py)
 ├── retrieval/          # hybrid retrieval・graph expansion
 ├── memory/             # session memory
 ├── generation/         # evidence pack・prompt・mlx_lm generator
