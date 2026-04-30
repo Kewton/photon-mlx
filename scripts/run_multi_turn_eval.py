@@ -47,7 +47,10 @@ def build_prediction_record(
     """
     answer = result.answer or ""
     no_citation = bool(not result.cited_chunk_ids)
-    is_refusal = is_refusal_answer(answer)
+    # Issue #177: use pipeline-computed refusal_score when available to keep
+    # eval and UI in sync; fall back to is_refusal_answer() for pre-#177 paths.
+    rs = getattr(result, "refusal_score", None)
+    is_refusal = (rs >= 0.5) if rs is not None else is_refusal_answer(answer)
     return {
         "session_id": session_id,
         "turn_id": turn_id,

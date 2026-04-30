@@ -47,6 +47,7 @@ class QueryResponse(BaseModel):
     cited_chunk_ids: list[str]
     latency_ms: float
     memory_peak_mb: float
+    refusal_score: float | None = None
 
 
 @app.post("/query", response_model=QueryResponse)
@@ -63,6 +64,7 @@ def query(req: QueryRequest) -> QueryResponse:
         cited_chunk_ids=result.cited_chunk_ids,
         latency_ms=result.latency.total_ms,
         memory_peak_mb=result.memory.peak_mb,
+        refusal_score=result.refusal_score,
     )
 
 

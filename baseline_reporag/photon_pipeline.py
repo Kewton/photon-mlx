@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Any
 
 import mlx.core as mx
 
-from .citation import resolve_citations
+from .citation import compute_refusal_score, resolve_citations
 from .config import Config
 from .generation.evidence_pack import build_evidence_pack
 from .generation.prompt import (
@@ -1544,6 +1544,7 @@ class PhotonRAGPipeline:
             }
         )
 
+        r_score, r_matches = compute_refusal_score(answer)
         result = QueryResult(
             answer=answer,
             session_id=session_id,
@@ -1561,6 +1562,8 @@ class PhotonRAGPipeline:
             generator_used=generator_used,
             generator_fallback_reason=generator_fallback_reason,
             retrieval_debug=debug_rows,
+            refusal_score=r_score,
+            refusal_matches=r_matches,
         )
 
         # Attach PHOTON metadata
