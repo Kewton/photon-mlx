@@ -179,7 +179,7 @@ model:
   num_heads: 10
 
 generation:
-  max_new_tokens: 768
+  max_new_tokens: 2048
   temperature: 0.2
   top_p: 0.9
   repetition_penalty: 1.05
@@ -252,12 +252,16 @@ inference:
   safe_recgen_enabled: true
   evidence_pruning_enabled: true
   pruned_max_chunks: 8  # follow-up turns use 8 instead of 16
+  pruning_protected_top_n: 4
+  pruning_photon_top_m: 4
+  related_past_questions_max: 3
+  related_past_evidence_top_k: 4
 
   # Issue #62 Phase 1: opt-in PHOTON single-path generation (default false).
   photon_generation_enabled: false
   generation_fallback_policy: "qwen"
 
-  answer_max_new_tokens: 768
+  answer_max_new_tokens: 2048
   temperature: 0.2
   top_p: 0.9
   do_sample: false

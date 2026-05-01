@@ -311,6 +311,55 @@ def generate_yaml_from_wizard(
     return yaml.safe_dump(doc, sort_keys=False, allow_unicode=True)
 
 
+def set_generated_repo_id(generated_yaml: str, repo_id: str) -> str:
+    """Return ``generated_yaml`` with ``repo.repo_id`` replaced by ``repo_id``.
+
+    Domain templates carry stable default repo ids, but the Streamlit app lets
+    users create arbitrary local indexes such as ``inst_test``. Persisting the
+    selected repo id in the generated project YAML keeps the saved config
+    aligned with the index chosen in the UI.
+    """
+    validate_repo_id(repo_id)
+    doc = yaml.safe_load(generated_yaml) or {}
+    if not isinstance(doc, dict):
+        raise ValueError("wizard YAML must be a mapping")
+    repo_section = doc.setdefault("repo", {})
+    if not isinstance(repo_section, dict):
+        raise ValueError("wizard YAML repo section must be a mapping")
+    repo_section["repo_id"] = repo_id
+    _assert_safe_yaml(doc)
+    return yaml.safe_dump(doc, sort_keys=False, allow_unicode=True)
+
+
+def configure_generated_photon_yaml(
+    generated_yaml: str,
+    *,
+    repo_id: str,
+    checkpoint_path: str,
+    model_id: str = "",
+) -> str:
+    """Apply project-specific PHOTON runtime fields to generated YAML."""
+    validate_repo_id(repo_id)
+    doc = yaml.safe_load(generated_yaml) or {}
+    if not isinstance(doc, dict):
+        raise ValueError("wizard YAML must be a mapping")
+    repo_section = doc.setdefault("repo", {})
+    if not isinstance(repo_section, dict):
+        raise ValueError("wizard YAML repo section must be a mapping")
+    model_section = doc.setdefault("model", {})
+    if not isinstance(model_section, dict):
+        raise ValueError("wizard YAML model section must be a mapping")
+    repo_section["repo_id"] = repo_id
+    model_section["provider"] = "photon"
+    if model_id:
+        model_section["model_id"] = model_id
+    model_section.setdefault("num_heads", 10)
+    if checkpoint_path:
+        model_section["checkpoint_path"] = checkpoint_path
+    _assert_safe_yaml(doc)
+    return yaml.safe_dump(doc, sort_keys=False, allow_unicode=True)
+
+
 def validate_generated_repo_id(
     generated_yaml: str, expected_repo_id: str
 ) -> str | None:

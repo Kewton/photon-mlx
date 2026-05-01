@@ -244,7 +244,7 @@ model:
   intermediate_size: 2816
 
 generation:
-  max_new_tokens: 768
+  max_new_tokens: 2048
   temperature: 0.2
   top_p: 0.9
   repetition_penalty: 1.05
@@ -318,7 +318,7 @@ inference:
   photon_generation_enabled: false
   generation_fallback_policy: "qwen"
 
-  answer_max_new_tokens: 768
+  answer_max_new_tokens: 2048
   temperature: 0.2
   top_p: 0.9
   do_sample: false

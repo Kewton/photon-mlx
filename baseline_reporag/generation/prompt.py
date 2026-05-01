@@ -238,6 +238,7 @@ def build_messages(
     evidence_text: str,
     history_text: str = "",
     session_summary: str = "",
+    related_questions: list[str] | None = None,
     include_few_shot: bool = True,
 ) -> list[dict]:
     parts: list[str] = []
@@ -245,6 +246,14 @@ def build_messages(
         parts.append(f"## Session Summary\n{session_summary}")
     if history_text:
         parts.append(f"## Conversation History\n{history_text}")
+    if related_questions:
+        lines = [
+            f"関連質問{i}: {related_question}"
+            for i, related_question in enumerate(related_questions, start=1)
+            if related_question.strip()
+        ]
+        if lines:
+            parts.append("## Related Past Questions\n" + "\n".join(lines))
     parts.append(f"## Documents\n{evidence_text}")
     parts.append(f"## Question\n{question}")
     hint = _FORMAT_HINT if include_few_shot else _FORMAT_HINT_SHORT

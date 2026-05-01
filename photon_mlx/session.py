@@ -1465,6 +1465,48 @@ class PhotonSessionState:
             return best_turn
         return None
 
+    def find_relevant_past_turns(
+        self,
+        current_state: HierarchicalState | None,
+        *,
+        max_turns: int | None = None,
+    ) -> list[TurnState]:
+        """Return relevant past turns selected by PHOTON similarity.
+
+        The ranking criterion matches :meth:`find_relevant_past_turn`, but the
+        returned turns are ordered by their original turn order so prompts can
+        present related questions in conversation order.
+        """
+        if max_turns is not None and max_turns <= 0:
+            return []
+        if not self.working_memory_cfg.enabled:
+            return []
+        if len(self.turn_history) <= 1:
+            return []
+        if current_state is None or not current_state.level_states:
+            return []
+
+        curr_top = current_state.level_states[-1]
+        scores: list[tuple[TurnState, float]] = []
+        for past_turn in self.turn_history[:-1]:
+            past_levels = past_turn.hierarchical_state.level_states
+            if not past_levels:
+                continue
+            sim = 1.0 - cosine_distance(curr_top, past_levels[-1])
+            if not math.isfinite(sim):
+                continue
+            if sim >= self.working_memory_cfg.relevant_turn_threshold:
+                scores.append((past_turn, sim))
+
+        if not scores:
+            return []
+
+        scores.sort(key=lambda x: (x[1], x[0].turn_id), reverse=True)
+        selected = [turn for turn, _score in scores]
+        if max_turns is not None:
+            selected = selected[:max_turns]
+        return sorted(selected, key=lambda turn: turn.turn_id)
+
     def reset_working_memory(self) -> None:
         """Clear stale latents and turn history for fail-closed recovery.
 

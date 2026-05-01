@@ -31,9 +31,9 @@ if TYPE_CHECKING:
 class RetrievalDebugRow:
     """Per-chunk retrieval debug info for Issue #176 UI panel.
 
-    score fields are None for graph/neighbor/photon_pruned/working_memory sources.
+    score fields are None for graph/neighbor/photon_pruned/working_memory/related_past/related_past_neighbor sources.
     citation_index is None for non-adopted chunks; cited = (citation_index is not None).
-    source values: "retrieval" | "graph" | "neighbor" | "photon_pruned" | "working_memory"
+    source values: "retrieval" | "graph" | "neighbor" | "photon_pruned" | "working_memory" | "related_past" | "related_past_neighbor"
     """
 
     chunk_id: str
@@ -46,6 +46,7 @@ class RetrievalDebugRow:
     used: bool
     citation_index: int | None
     source: str
+    photon_score: float | None = None
 
 
 @dataclass

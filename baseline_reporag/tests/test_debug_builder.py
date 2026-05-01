@@ -98,6 +98,30 @@ class TestBuildRetrievalDebugRows:
         assert row.fused_score is None
         assert row.reranker_score is None
 
+    def test_photon_scores_are_attached_by_chunk_id(self) -> None:
+        raw = [_make_result("c0", bm25=0.8, emb=0.7, fused=0.75)]
+        reranked: list[RetrievalResult] = []
+        rejected: list[RetrievalResult] = []
+        refs = [_make_ref("c0", "retrieval"), _make_ref("c1", "photon_pruned")]
+        store = _make_store("c0", "c1")
+
+        rows = build_retrieval_debug_rows(
+            raw,
+            reranked,
+            rejected,
+            refs,
+            store,
+            photon_scores={"c0": 0.42, "c1": -0.13},
+        )
+        finalised = finalise_retrieval_debug(
+            rows,
+            pack_chunk_ids=["c0"],
+            cited_chunk_ids=["c0"],
+        )
+
+        assert finalised[0].photon_score == pytest.approx(0.42)
+        assert finalised[1].photon_score == pytest.approx(-0.13)
+
     def test_neighbor_source_scores_are_none(self) -> None:
         """neighbor-source chunk has None bm25/embedding/fused scores."""
         raw: list[RetrievalResult] = []

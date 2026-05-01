@@ -957,6 +957,61 @@ class TestValidateGeneratedRepoId:
         msg = wizard.validate_generated_repo_id(gen, "foo;rm -rf /")
         assert msg is not None
 
+    def test_set_generated_repo_id_overrides_template_default(self) -> None:
+        gen = "repo:\n  repo_id: institutional_documents\nmodel:\n  provider: photon\n"
+
+        updated = wizard.set_generated_repo_id(gen, "inst_test")
+
+        assert wizard.validate_generated_repo_id(updated, "inst_test") is None
+        loaded = yaml.safe_load(updated)
+        assert loaded["repo"]["repo_id"] == "inst_test"
+
+    def test_set_generated_repo_id_rejects_unsafe_repo_id(self) -> None:
+        gen = "repo:\n  repo_id: institutional_documents\n"
+
+        with pytest.raises(ValueError):
+            wizard.set_generated_repo_id(gen, "../evil")
+
+    def test_configure_generated_photon_yaml_sets_runtime_fields(self) -> None:
+        gen = (
+            "repo:\n  repo_id: institutional_documents\nmodel:\n  provider: baseline\n"
+        )
+
+        updated = wizard.configure_generated_photon_yaml(
+            gen,
+            repo_id="inst_test",
+            checkpoint_path="photon_institutional_retrain_20260428/step_003000",
+            model_id="mlx-community/Qwen3.5-9B-MLX-4bit",
+        )
+
+        assert wizard.validate_generated_repo_id(updated, "inst_test") is None
+        loaded = yaml.safe_load(updated)
+        assert loaded["repo"]["repo_id"] == "inst_test"
+        assert loaded["model"]["provider"] == "photon"
+        assert loaded["model"]["model_id"] == "mlx-community/Qwen3.5-9B-MLX-4bit"
+        assert (
+            loaded["model"]["checkpoint_path"]
+            == "photon_institutional_retrain_20260428/step_003000"
+        )
+
+    def test_institutional_template_sets_checkpoint_compatible_num_heads(
+        self,
+    ) -> None:
+        cfg_path = PROJECT_ROOT / "configs" / "institutional_docs.yaml"
+        generated = wizard.generate_yaml_from_wizard(
+            "institutional_docs",
+            user_toggles={},
+            base_yaml_text=cfg_path.read_text(encoding="utf-8"),
+        )
+        updated = wizard.configure_generated_photon_yaml(
+            generated,
+            repo_id="inst_test",
+            checkpoint_path="photon_institutional_retrain_20260428/step_003000",
+        )
+
+        loaded = yaml.safe_load(updated)
+        assert loaded["model"]["num_heads"] == 10
+
 
 if __name__ == "__main__":  # pragma: no cover - manual run only
     import pytest as _pytest

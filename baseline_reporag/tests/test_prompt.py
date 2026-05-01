@@ -47,6 +47,24 @@ class TestBuildMessages:
         assert "Conversation History" in user_content
         assert history in user_content
 
+    def test_build_messages_with_related_questions_in_order(self) -> None:
+        """PHOTON-selected related questions are shown in turn order."""
+        msgs = build_messages(
+            question="2号との違いは？",
+            evidence_text="[C:1] evidence",
+            related_questions=[
+                "セーフティネット保証1号の認定基準を簡潔に教えて",
+                "申請方法も教えて",
+            ],
+        )
+        user_content = msgs[1]["content"]
+        assert "## Related Past Questions" in user_content
+        assert (
+            "関連質問1: セーフティネット保証1号の認定基準を簡潔に教えて" in user_content
+        )
+        assert "関連質問2: 申請方法も教えて" in user_content
+        assert user_content.index("関連質問1:") < user_content.index("関連質問2:")
+
 
 class TestFormatHintFewShot:
     """_FORMAT_HINT 内の few-shot example を検証する。"""

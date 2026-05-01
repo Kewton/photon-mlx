@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -121,6 +122,28 @@ class TestRunVariantWithPipeline:
         )
         assert result.config_path == ""
 
+    def test_transfers_optional_debug_and_generator_metadata(self) -> None:
+        pipeline = _make_mock_pipeline()
+        pipeline.config = SimpleNamespace(
+            model=SimpleNamespace(model_id="mlx-community/Qwen3.5-9B-MLX-4bit")
+        )
+        pipeline.query.return_value.generator_used = "photon"
+        pipeline.query.return_value.generator_fallback_reason = None
+        pipeline.query.return_value.retrieval_debug = ["row"]
+
+        result = run_variant_with_pipeline(
+            pipeline=pipeline,
+            question="Q?",
+            session_id="s",
+            repo_id="r",
+            variant_id="photon",
+        )
+
+        assert result.generator_used == "photon"
+        assert result.generator_fallback_reason is None
+        assert result.retrieval_debug == ["row"]
+        assert result.model_id == "mlx-community/Qwen3.5-9B-MLX-4bit"
+
 
 class TestComputeDelta:
     def _make_variant(
@@ -217,3 +240,31 @@ class TestCompare:
         )
         bp.query.assert_called_once()
         pp.query.assert_called_once()
+
+    def test_pipelines_run_sequentially_baseline_then_photon(self) -> None:
+        order: list[str] = []
+        bp = _make_mock_pipeline(answer="baseline")
+        pp = _make_mock_pipeline(answer="photon")
+
+        def baseline_query(**kwargs):
+            order.append("baseline")
+            assert "photon" not in order
+            return bp.query.return_value
+
+        def photon_query(**kwargs):
+            order.append("photon")
+            return pp.query.return_value
+
+        bp.query.side_effect = baseline_query
+        pp.query.side_effect = photon_query
+
+        compare(
+            baseline_pipeline=bp,
+            photon_pipeline=pp,
+            question="Q?",
+            repo_id="r",
+            baseline_session_id="sb",
+            photon_session_id="sp",
+        )
+
+        assert order == ["baseline", "photon"]
