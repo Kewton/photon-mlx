@@ -1,9 +1,0 @@
-{
-  "stage": 2,
-  "iteration": 1,
-  "source_review": "stage1-review-result.json",
-  "must_fix_ids": ["S1-001", "S1-002", "S1-003", "S1-004", "S1-005"],
-  "should_fix_ids": ["S1-006", "S1-007", "S1-008", "S1-009"],
-  "nice_to_have_ids": ["S1-010", "S1-011"],
-  "policy": "Must Fix と Should Fix はすべて Issue 本文に反映する。Nice to Have も簡潔に取り込む (背景の脚注、受入条件の細分化)。"
-}

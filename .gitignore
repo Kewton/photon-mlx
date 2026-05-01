@@ -14,6 +14,7 @@ data/training/
 
 # Checkpoints
 checkpoints/
+checkpoints*/
 
 # Cache
 .cache/
@@ -23,6 +24,11 @@ logs/
 
 # Reports (generated artifacts — committed manually after review)
 reports/benchmark_runs/
+reports/*.jsonl
+reports/*.log
+reports/*.summary.json
+reports/institutional_generation_summary_*.json
+bench/reports/*.json
 
 # Issue #82: eval job outputs (streamlit app)
 reports/eval_runs/
@@ -33,6 +39,12 @@ logs/eval/
 
 # Scratch / UAT test files
 test-uat*
+sandbox/
+workspace/
 
 # Issue #126: chunker A/B variant configs (not committed)
 configs/_experiments/
+
+# Local config backups
+configs/*.wave*_backup
+configs/*_backup.yaml

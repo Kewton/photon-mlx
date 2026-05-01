@@ -1,9 +1,0 @@
-{
-  "issue_number": "140",
-  "focus_area": "設計原則",
-  "stage": 1,
-  "stage_name": "通常レビュー",
-  "design_doc_path": "workspace/design/issue-140-review-process-design-policy.md",
-  "issue_review_summary": "workspace/issues/140/issue-review/summary-report.md",
-  "principles_to_check": ["SOLID", "KISS", "YAGNI", "DRY"]
-}
