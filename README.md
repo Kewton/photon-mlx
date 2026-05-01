@@ -149,9 +149,16 @@ project-root/
 > **採用構成 (2026-04-28)**: PHOTON + Qwen3.5-9B-MLX-4bit no-think モード。
 > 詳細は [`reports/qwen_model_matrix_20260428_400cmp_report.md`](reports/qwen_model_matrix_20260428_400cmp_report.md) と [`docs/playground.md`](docs/playground.md) 参照。
 
-### pip install ベースの MVP 手順
+### MVP 手順: Streamlit アプリで作成してから CLI で使う
+
+MVP では、まず Streamlit アプリで ingest / index / PHOTON 学習 / チャット確認を行い、そこで作成された config と checkpoint を CLI から再利用する流れを推奨します。
+
+#### 1. GitHub から clone して環境を作る
 
 ```bash
+git clone https://github.com/Kewton/photon-mlx.git
+cd photon-mlx
+
 python -m venv .venv
 source .venv/bin/activate
 pip install -U pip
@@ -159,40 +166,103 @@ pip install -U pip
 # ローカル検証では repository root から wheel / editable install する。
 # PyPI 公開後は `pip install photon-rag` に置き換える。
 pip install -e .
+
+# Streamlit 管理アプリを使う場合は追加で入れる。
+pip install streamlit
 ```
 
+#### 2. Streamlit アプリを起動して動作確認を始める
+
 ```bash
-# 1. 対象 repo / markdown corpus を ingest
+streamlit run app/photon_app.py --server.port 8501
+```
+
+ブラウザで表示された Streamlit 画面から、次の順で進めます。
+
+1. **ベクトルデータベース作成**
+   - 「対象リポジトリのディレクトリ」に RAG 対象 repo のローカルパスを入力
+   - `repo_id` を入力
+   - Config と Embedding モデルを選び、`作成開始`
+   - status が `completed` になるまで待つ
+
+2. **Training**
+   - 同じ対象 repo を選び、最大ステップ数などを設定して `学習開始`
+   - 完了すると checkpoint が `checkpoints/<repo_id>/<train_job_id>/` 配下に作成される
+   - 代表的には `best/`, `final/`, `step_XXXXXX/` のいずれかを CLI で使う
+
+3. **RAG プロジェクト登録**
+   - 作成済みの `repo_id` を選択
+   - PHOTON を使う場合は作成済み checkpoint を選択
+   - 必要なら **PHOTON settings** で YAML を生成する
+   - `登録`
+
+4. **チャット**
+   - 登録したプロジェクトを選び、質問して Streamlit 上で回答・citation・drift 表示を確認する
+
+#### 3. Streamlit で作成したモデルを CLI から使う
+
+CLI は Streamlit の `.cache/photon_app_state.json` を直接読むのではなく、同じ `repo_id`、config、checkpoint を明示して使います。
+
+Streamlit の Training で作成された config は通常 `configs/photon_<repo_id>.yaml`、checkpoint は `checkpoints/<repo_id>/<train_job_id>/` 配下にあります。CLI で使う checkpoint に合わせて config の `model.checkpoint_path` を `final`、`best`、または `step_XXXXXX` に設定してください。
+
+```bash
+# 例: Streamlit training job の final checkpoint を使う
+export PHOTON_CHECKPOINT_ROOT="$(pwd)/checkpoints/<repo_id>/<train_job_id>"
+
+photon-rag ask \
+  --config configs/photon_<repo_id>.yaml \
+  --repo-id <repo_id> \
+  --question "このリポジトリの主要な入口はどこですか？"
+```
+
+`PHOTON_CHECKPOINT_ROOT` は `model.checkpoint_path` の親ディレクトリとして解決されます。たとえば `model.checkpoint_path: "final"` なら、上の例では `checkpoints/<repo_id>/<train_job_id>/final` が読み込まれます。
+
+Streamlit の **PHOTON settings** で `projects/<project_name>/photon.yaml` を生成した場合は、その YAML を CLI に渡せます。
+
+```bash
+export PHOTON_CHECKPOINT_ROOT="$(pwd)/checkpoints/<repo_id>/<train_job_id>"
+
+photon-rag ask \
+  --config projects/<project_name>/photon.yaml \
+  --repo-id <repo_id> \
+  --question "前回の質問を踏まえて関連モジュールを教えてください"
+```
+
+PHOTON checkpoint を GitHub / Hugging Face Hub などから自動取得する場合は、公開先を `PHOTON_CHECKPOINT_REPO_ID` または `model.checkpoint_repo_id` に設定します。既に配置済みの場合は、従来通り `PHOTON_CHECKPOINT_ROOT` 配下の `model.checkpoint_path` が使われます。
+
+```bash
+export PHOTON_CHECKPOINT_ROOT="$HOME/.cache/photon-rag/checkpoints"
+export PHOTON_CHECKPOINT_REPO_ID="<org>/<checkpoint-repo>"
+
+photon-rag ask \
+  --config configs/institutional_docs_photon.yaml \
+  --repo-id <repo_id> \
+  --question "..."
+```
+
+#### 4. CLI だけで ingest / index する場合
+
+Streamlit を使わず CLI だけで準備する場合は以下を実行します。
+
+```bash
+# 対象 repo / markdown corpus を ingest
 photon-rag ingest \
   --repo /path/to/target-repo \
   --repo-id target_repo \
   --commit HEAD
 
-# 2. index を構築
+# index を構築
 photon-rag index --repo-id target_repo
 
-# 3. Python repo では symbol graph、markdown corpus では heading graph を必要に応じて構築
+# Python repo では symbol graph、markdown corpus では heading graph を必要に応じて構築
 photon-rag symbol-graph --repo-id target_repo
 photon-rag heading-graph --repo-id target_repo --config configs/institutional_docs.yaml
 
-# 4. 1 問問い合わせ
+# 1 問問い合わせ
 photon-rag ask --repo-id target_repo --question "認証処理の入口はどこですか？"
 
-# 5. server 起動
+# server 起動
 photon-rag serve --config configs/baseline.yaml
-```
-
-PHOTON checkpoint を自動取得する場合は、公開先を `PHOTON_CHECKPOINT_REPO_ID`
-または `model.checkpoint_repo_id` に設定します。既に配置済みの場合は従来通り
-`PHOTON_CHECKPOINT_ROOT` 配下の `model.checkpoint_path` が使われます。
-
-```bash
-export PHOTON_CHECKPOINT_ROOT="$HOME/.cache/photon-rag/checkpoints"
-export PHOTON_CHECKPOINT_REPO_ID="<org>/<checkpoint-repo>"
-photon-rag ask \
-  --config configs/institutional_docs_photon.yaml \
-  --repo-id target_repo \
-  --question "..."
 ```
 
 ### Makefile を使う最短手順

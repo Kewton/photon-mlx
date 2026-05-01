@@ -1,9 +1,0 @@
-{
-  "issue_number": "145",
-  "focus_area": "設計原則",
-  "stage": 1,
-  "stage_name": "通常レビュー",
-  "design_doc_path": "workspace/design/issue-145-real-weight-test-design-policy.md",
-  "issue_review_summary_path": "workspace/issues/145/issue-review/summary-report.md",
-  "hypothesis_verification_path": "workspace/issues/145/issue-review/hypothesis-verification.md"
-}

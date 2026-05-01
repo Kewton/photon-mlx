@@ -1,9 +1,0 @@
-{
-  "stage": 1,
-  "applied_findings": ["DR1-001", "DR1-002", "DR1-003", "DR1-004", "DR1-005", "DR1-006"],
-  "must_fix_applied": [],
-  "should_fix_applied": ["DR1-001", "DR1-002", "DR1-003"],
-  "nice_to_have_applied": ["DR1-004", "DR1-005", "DR1-006"],
-  "design_doc_updated": true,
-  "summary": "Stage 1 通常レビュー (設計原則) の Should Fix 3件 + Nice to Have 3件を設計書に反映。DR1-001 (DRY): _DOMAIN_TEMPLATES と institutional_docs.yaml の整合 CI guard test を完了条件 §10 必須項目 (#13) に格上げ。DR1-002 (KISS): detect_language を 1 ループ集計化、ja/en 分母非対称の理由をコメント化。DR1-003 (YAGNI): pre/post #137 確定運用ルール (PR 着手時 git diff で確定→不採用側削除) を §3-1 に明記。DR1-005 (SRP): _resolve_system_prompt helper 切り出しを §3-2 に追記。DR1-004/006: OCP 拡張コスト見える化と test substring assert 方針を §3-3 / §11 に追記。"
-}
