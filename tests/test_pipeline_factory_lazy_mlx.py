@@ -26,6 +26,8 @@ import subprocess
 import sys
 import textwrap
 
+import pytest
+
 
 def _run_subprocess(script: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
@@ -34,6 +36,11 @@ def _run_subprocess(script: str) -> subprocess.CompletedProcess[str]:
         text=True,
         check=False,
     )
+
+
+def _mlx_metal_available() -> bool:
+    result = _run_subprocess("import mlx.core as mx; mx.array([1]); print('OK')")
+    return result.returncode == 0
 
 
 def test_import_pipeline_factory_does_not_load_mlx() -> None:
@@ -80,15 +87,20 @@ def test_import_pipeline_factory_does_not_load_mlx() -> None:
     assert "OK" in result.stdout
 
 
-def test_build_pipeline_photon_branch_loads_mlx() -> None:
-    """Calling ``build_pipeline`` with ``provider="photon"`` MUST load MLX.
+def test_build_pipeline_photon_branch_imports_photon_pipeline_lazily() -> None:
+    """Calling ``build_pipeline`` with ``provider="photon"`` imports PHOTON lazily.
 
     This is the counterpart invariant to
     ``test_import_pipeline_factory_does_not_load_mlx``: we want
-    laziness, not avoidance — the PHOTON branch is expected to pull
-    in MLX when actually invoked.  We patch ``photon_pipeline`` builders
-    to no-ops so the test doesn't need real indexes.
+    laziness, not avoidance. The PHOTON branch may import the
+    ``photon_pipeline`` module, but ``mlx.core`` itself should stay
+    behind the module's lazy proxy until a real MLX operation is needed.
+    We patch ``photon_pipeline`` builders to no-ops so the test doesn't
+    need real indexes.
     """
+    if not _mlx_metal_available():
+        pytest.skip("MLX Metal device is not available on this runner")
+
     script = textwrap.dedent(
         """
         import sys
@@ -108,8 +120,6 @@ def test_build_pipeline_photon_branch_loads_mlx() -> None:
             class model:
                 provider = "photon"
 
-        # Importing photon_pipeline here IS expected to load MLX — that's
-        # the whole point of the "lazy, not avoided" property.
         import baseline_reporag.photon_pipeline as pp
 
         def _fake_baseline_deps(cfg):
@@ -137,11 +147,14 @@ def test_build_pipeline_photon_branch_loads_mlx() -> None:
 
         pf.build_pipeline(_Cfg())
 
-        # Post-invocation: MLX (at minimum mlx.core) must now be present
-        # because photon_pipeline does ``import mlx.core as mx`` at top.
-        assert "mlx.core" in sys.modules, (
-            "photon branch failed to load mlx.core"
+        # The branch imports photon_pipeline, but the module-level MLX proxy
+        # keeps mlx.core unloaded until an actual MLX operation is requested.
+        assert "baseline_reporag.photon_pipeline" in sys.modules
+        assert "mlx.core" not in sys.modules, (
+            "photon branch eagerly loaded mlx.core"
         )
+        pp.mx.array([1])
+        assert "mlx.core" in sys.modules
         print("OK")
         """
     )

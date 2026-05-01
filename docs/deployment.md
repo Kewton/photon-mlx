@@ -21,6 +21,30 @@
 
 ## Setup Steps
 
+### Install-based MVP path
+
+Phase 3 の配布導線では `photon-rag` console entrypoint を標準にする。
+ローカル検証では repository root から editable install し、PyPI / private index
+公開後は同じ手順の `pip install -e .` を `pip install photon-rag` に置き換える。
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -U pip
+pip install -e .
+```
+
+```bash
+photon-rag ingest --repo /path/to/target-repo --repo-id target_repo --commit HEAD
+photon-rag index --repo-id target_repo
+photon-rag symbol-graph --repo-id target_repo
+photon-rag ask --repo-id target_repo --question "How does FastAPI handle dependency injection?"
+photon-rag serve --config configs/baseline.yaml
+```
+
+The legacy `python scripts/...` and `python -m baseline_reporag...` commands
+remain supported for development and CI.
+
 ### 1. Clone the repository
 
 ```bash
@@ -177,16 +201,23 @@ production/eval では設定禁止 (S7-001 random-init eval の再発防止)。
 ### Phase 3 (将来) — External Storage への移行
 
 Production deploy 時には設計方針書 §11 リスク表「派生学習物 (corpus / checkpoint) は public 配布対象外」に準じ、
-private S3 / GCS / HuggingFace Private Hub にアップして、各環境は `download_checkpoint.sh` 等で取得する運用に切り替える予定。
+private S3 / GCS / HuggingFace Private Hub にアップする。Phase 3 では
+`model.checkpoint_repo_id` または `PHOTON_CHECKPOINT_REPO_ID` が設定されている場合、
+初回起動時に `model.checkpoint_path` が指す `weights.npz` / `state.json` /
+`integrity.json` を `PHOTON_CHECKPOINT_ROOT` 配下へ取得する。
 
 ```bash
-# 例: huggingface_hub 経由 (Phase 3 で実装予定)
-huggingface-cli download <org>/photon-institutional-retrain-20260428 \
-  --local-dir ./checkpoints/photon_institutional_retrain_20260428 \
-  --include "step_003000/*"
+export PHOTON_CHECKPOINT_ROOT="$HOME/.cache/photon-rag/checkpoints"
+export PHOTON_CHECKPOINT_REPO_ID="<org>/photon-institutional-retrain-20260428"
+
+photon-rag ask \
+  --config configs/institutional_docs_photon.yaml \
+  --repo-id institutional_documents \
+  --question "..."
 ```
 
-詳細は Phase 3 設計時に別 Issue で議論。
+`PHOTON_CHECKPOINT_REPO_ID` を設定しない場合は自動 download せず、従来通り
+ローカル checkpoint が存在しなければ fail-fast する。
 
 ### 配備時のチェックリスト
 

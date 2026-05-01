@@ -117,9 +117,7 @@ def main() -> None:
     )
 
     approved_roots = (
-        [Path(r) for r in args.approved_roots]
-        if args.approved_roots
-        else None
+        [Path(r) for r in args.approved_roots] if args.approved_roots else None
     )
 
     train(

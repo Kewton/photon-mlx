@@ -69,6 +69,8 @@ Then restart the server.
 | Checkpoint path outside `PHOTON_CHECKPOINT_ROOT` | Move the checkpoint under the allowed root, or set `PHOTON_CHECKPOINT_ROOT` to the parent directory: `export PHOTON_CHECKPOINT_ROOT=/data/photon_checkpoints` |
 | Symlink escaping the allowed root | Remove the symlink and copy the checkpoint directly under `PHOTON_CHECKPOINT_ROOT` |
 | Corrupted `weights.npz` | Re-run training or restore the checkpoint from backup |
+| Auto-download source missing | Set `PHOTON_CHECKPOINT_REPO_ID=<org>/<repo>` or `model.checkpoint_repo_id` in the PHOTON yaml. Without a source, missing checkpoints intentionally fail fast. |
+| Hugging Face auth / network failure | Set `HF_TOKEN` for private repos, verify network access to `huggingface.co`, then retry. The downloader writes under `PHOTON_CHECKPOINT_ROOT`. |
 
 **重要 (CB-003 / 設計方針書 §3 DR-1)**: `PHOTON_ALLOW_RANDOM_INIT=1` は **unit/CI の negative-path テスト専用** です。Phase A 評価や本番環境では使用しないでください。チェックポイントが手元にない場合は、checkpoint を配置するまで評価を開始しないでください (`PHOTON_ALLOW_RANDOM_INIT=1` で代替することは S7-001 random-init eval の再発を招きます)。
 

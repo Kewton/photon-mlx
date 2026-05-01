@@ -18,6 +18,10 @@ Usage (PHOTON pipeline shortcut):
 from __future__ import annotations
 
 import argparse
+import sys
+from collections.abc import Sequence
+from importlib import resources
+from pathlib import Path
 
 from .config import load_config
 
@@ -32,10 +36,18 @@ from .pipeline_factory import build_pipeline, override_repo_for_pipeline
 # を持たないため provider のみ override しても動かない。専用 config を使う。
 _PHOTON_DEFAULT_CONFIG = "configs/photon_small.yaml"
 _BASELINE_DEFAULT_CONFIG = "configs/baseline.yaml"
+_SCRIPT_COMMANDS = {
+    "ingest": ("scripts.ingest_repo", "Ingest a repository or markdown corpus"),
+    "index": ("scripts.build_indexes", "Build lexical and embedding indexes"),
+    "symbol-graph": ("scripts.build_symbol_graph", "Build the optional symbol graph"),
+    "heading-graph": (
+        "scripts.build_heading_graph",
+        "Build the optional heading graph",
+    ),
+}
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Baseline RepoRAG CLI")
+def _add_query_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--config",
         default=None,
@@ -55,13 +67,17 @@ def main() -> None:
     parser.add_argument("--repo-id", default="")
     parser.add_argument("--question", default="")
     parser.add_argument("--session-id", default="")
-    args = parser.parse_args()
+
+
+def _run_query_cli(args: argparse.Namespace) -> None:
+    """Run the existing single-question / interactive CLI flow."""
 
     if args.use_photon and args.config is not None:
-        parser.error("--use-photon cannot be combined with --config")
+        raise ValueError("--use-photon cannot be combined with --config")
     config_path = args.config or (
         _PHOTON_DEFAULT_CONFIG if args.use_photon else _BASELINE_DEFAULT_CONFIG
     )
+    config_path = _resolve_config_path(config_path)
 
     cfg = load_config(config_path)
     repo_id = args.repo_id or cfg.repo.repo_id
@@ -113,6 +129,107 @@ def main() -> None:
             if not q:
                 break
             run_query(q)
+
+
+def _run_server(args: argparse.Namespace) -> None:
+    from .server import main as server_main
+
+    server_argv = [
+        "--config",
+        _resolve_config_path(args.config),
+        "--host",
+        args.host,
+        "--port",
+        str(args.port),
+    ]
+    server_main(server_argv)
+
+
+def _dispatch_script(module_name: str, forwarded_args: Sequence[str]) -> None:
+    """Dispatch installable wrapper commands to existing script modules."""
+
+    import importlib
+
+    old_argv = sys.argv[:]
+    sys.argv = [module_name.rsplit(".", 1)[-1], *forwarded_args]
+    try:
+        module = importlib.import_module(module_name)
+        module.main()
+    finally:
+        sys.argv = old_argv
+
+
+def _resolve_config_path(config_path: str) -> str:
+    """Resolve packaged default configs when running after wheel install."""
+
+    path = Path(config_path)
+    if path.exists() or path.is_absolute() or path.parent.name != "configs":
+        return config_path
+    try:
+        packaged = resources.files("configs").joinpath(path.name)
+    except ModuleNotFoundError:
+        return config_path
+    if packaged.is_file():
+        return str(packaged)
+    return config_path
+
+
+def _build_command_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="photon-rag",
+        description="PHOTON RepoRAG command line interface",
+    )
+    subparsers = parser.add_subparsers(dest="command")
+
+    ask_parser = subparsers.add_parser("ask", help="Ask a question")
+    _add_query_args(ask_parser)
+    ask_parser.set_defaults(handler=_run_query_cli)
+
+    serve_parser = subparsers.add_parser("serve", help="Start the FastAPI server")
+    serve_parser.add_argument("--config", default=_BASELINE_DEFAULT_CONFIG)
+    serve_parser.add_argument("--host", default="127.0.0.1")
+    serve_parser.add_argument("--port", type=int, default=8080)
+    serve_parser.set_defaults(handler=_run_server)
+
+    for command, (_, help_text) in _SCRIPT_COMMANDS.items():
+        subparsers.add_parser(command, help=help_text)
+
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> None:
+    """Entry point for both ``python -m baseline_reporag.cli`` and ``photon-rag``.
+
+    Backwards compatibility: when no subcommand is present, arguments are
+    interpreted as the historical query CLI.
+    """
+
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    if raw_argv and raw_argv[0] in _SCRIPT_COMMANDS:
+        module_name, _ = _SCRIPT_COMMANDS[raw_argv[0]]
+        _dispatch_script(module_name, raw_argv[1:])
+        return
+
+    if raw_argv and raw_argv[0] in {"ask", "serve"}:
+        parser = _build_command_parser()
+        args = parser.parse_args(raw_argv)
+        try:
+            args.handler(args)
+        except ValueError as exc:
+            parser.error(str(exc))
+        return
+
+    if raw_argv and raw_argv[0] in {"-h", "--help"}:
+        _build_command_parser().print_help()
+        return
+
+    legacy_parser = argparse.ArgumentParser(description="Baseline RepoRAG CLI")
+    _add_query_args(legacy_parser)
+    args = legacy_parser.parse_args(raw_argv)
+    try:
+        _run_query_cli(args)
+    except ValueError as exc:
+        legacy_parser.error(str(exc))
 
 
 if __name__ == "__main__":

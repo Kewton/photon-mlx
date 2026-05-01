@@ -7,6 +7,9 @@ Start with:
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from importlib import resources
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from fastapi import FastAPI
@@ -32,6 +35,17 @@ def _build_pipeline(config: Config) -> "RepoRAGPipeline | PhotonRAGPipeline":
     to the right pipeline (Issue #62 Phase 1 Stage 3 DR3-001).
     """
     return build_pipeline(config)
+
+
+def _resolve_config_path(config_path: str) -> str:
+    path = Path(config_path)
+    if path.exists() or path.is_absolute() or path.parent.name != "configs":
+        return config_path
+    try:
+        packaged = resources.files("configs").joinpath(path.name)
+    except ModuleNotFoundError:
+        return config_path
+    return str(packaged) if packaged.is_file() else config_path
 
 
 class QueryRequest(BaseModel):
@@ -68,7 +82,7 @@ def query(req: QueryRequest) -> QueryResponse:
     )
 
 
-def main() -> None:
+def main(argv: Sequence[str] | None = None) -> None:
     import argparse
 
     import uvicorn
@@ -79,9 +93,9 @@ def main() -> None:
     parser.add_argument("--config", default="configs/baseline.yaml")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8080)
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
-    _pipeline = _build_pipeline(load_config(args.config))
+    _pipeline = _build_pipeline(load_config(_resolve_config_path(args.config)))
     uvicorn.run(app, host=args.host, port=args.port)
 
 

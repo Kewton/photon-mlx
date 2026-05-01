@@ -13,12 +13,31 @@ exercises the load + validation surface area only.
 from __future__ import annotations
 
 import logging
+import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from baseline_reporag.config import load_config
+
+
+def _mlx_metal_available() -> bool:
+    probe = "import mlx.core as mx; mx.array([1]); print('ok')"
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    return result.returncode == 0
+
+
+pytestmark = pytest.mark.skipif(
+    not _mlx_metal_available(),
+    reason="PHOTON checkpoint tests require an accessible Metal device",
+)
 
 
 # ---------------------------------------------------------------------------

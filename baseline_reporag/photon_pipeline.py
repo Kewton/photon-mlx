@@ -12,14 +12,16 @@ from __future__ import annotations
 import logging
 import os
 import re
+import subprocess
+import sys
 import uuid
+from functools import lru_cache
 from math import prod
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-import mlx.core as mx
-
 from .citation import compute_refusal_score, resolve_citations
+from .checkpoints import maybe_download_checkpoint
 from .config import Config
 from .generation.evidence_pack import build_evidence_pack
 from .generation.prompt import (
@@ -46,6 +48,45 @@ if TYPE_CHECKING:
     from photon_mlx.session import TurnState
 
 _logger = logging.getLogger(__name__)
+
+
+@lru_cache(maxsize=1)
+def _mlx_metal_available() -> bool:
+    probe = "import mlx.core as mx; mx.array([1]); print('ok')"
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    return result.returncode == 0
+
+
+def _require_mlx_metal() -> None:
+    if not _mlx_metal_available():
+        raise ImportError("PHOTON inference requires an accessible Metal device")
+
+
+class _MxProxy:
+    """Lazy ``mlx.core`` proxy so baseline-only imports do not require Metal."""
+
+    _module: Any | None = None
+
+    def _load(self) -> Any:
+        if self._module is not None:
+            return self._module
+        if not _mlx_metal_available():
+            raise ImportError("mlx.core requires an accessible Metal device")
+        import mlx.core as loaded_mx
+
+        self._module = loaded_mx
+        return loaded_mx
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._load(), name)
+
+
+mx = _MxProxy()
 
 
 # ---------------------------------------------------------------------------
@@ -259,6 +300,8 @@ def _extract_working_memory_cfg(cfg: Config) -> Any:
 
 def _build_photon_deps(cfg: Config) -> dict[str, Any]:
     """Construct PHOTON-specific dependencies from config."""
+    _require_mlx_metal()
+
     import sys
     from pathlib import Path
 
@@ -374,6 +417,17 @@ def _build_photon_deps(cfg: Config) -> dict[str, Any]:
             else None
         )
     if raw_ckpt_path:
+        checkpoint_repo_id = getattr(cfg.model, "checkpoint_repo_id", None)
+        if checkpoint_repo_id is None and hasattr(cfg.model, "get"):
+            checkpoint_repo_id = cfg.model.get("checkpoint_repo_id", None)
+        checkpoint_revision = getattr(cfg.model, "checkpoint_revision", None)
+        if checkpoint_revision is None and hasattr(cfg.model, "get"):
+            checkpoint_revision = cfg.model.get("checkpoint_revision", None)
+        maybe_download_checkpoint(
+            raw_ckpt_path,
+            repo_id=checkpoint_repo_id,
+            revision=checkpoint_revision,
+        )
         ckpt_path = _resolve_checkpoint_path(raw_ckpt_path)
         # Directory shape validation (weights.npz + state.json required).
         # CB-002 fix: use is_file() instead of exists() so that a directory

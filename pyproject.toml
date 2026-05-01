@@ -1,3 +1,69 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "photon-rag"
+version = "0.1.0"
+description = "PHOTON-enhanced multi-turn RepoRAG for local repositories and markdown corpora."
+readme = "README.md"
+requires-python = ">=3.12"
+license = "LicenseRef-Proprietary"
+authors = [{ name = "Kewton" }]
+dependencies = [
+    "fastapi",
+    "huggingface_hub",
+    "httpx",
+    "mlx",
+    "mlx-lm",
+    "numpy",
+    "python-dotenv",
+    "pyyaml",
+    "rank-bm25",
+    "sentence-transformers",
+    "torch",
+    "tqdm",
+    "transformers",
+    "uvicorn[standard]",
+]
+
+[project.optional-dependencies]
+dev = [
+    "build",
+    "pytest",
+    "ruff",
+]
+eval = [
+    "httpx",
+    "tqdm",
+]
+server = [
+    "fastapi",
+    "uvicorn[standard]",
+]
+
+[project.scripts]
+photon-rag = "baseline_reporag.cli:main"
+baseline-reporag = "baseline_reporag.cli:main"
+baseline-reporag-server = "baseline_reporag.server:main"
+
+[tool.setuptools.packages.find]
+include = [
+    "baseline_reporag*",
+    "configs*",
+    "photon_mlx*",
+    "torch_ref*",
+    "scripts*",
+]
+exclude = [
+    "baseline_reporag.tests*",
+    "photon_mlx.tests*",
+    "torch_ref.tests*",
+]
+
+[tool.setuptools.package-data]
+configs = ["*.yaml"]
+
 [tool.pytest.ini_options]
 # DR3-003: testpaths lists every directory previously surfaced by implicit
 # pytest discovery from the repo root.  ``bench/tests`` and ``evals/tests``
