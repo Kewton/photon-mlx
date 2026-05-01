@@ -277,10 +277,17 @@ project-root/
 - **運用品質**: P50 / P90 latency、memory peak、fallback rate
 - **説明可能性**: retrieval debug、引用差分、比較メトリクス
 
+## ライセンス
+
+このリポジトリのコードとドキュメントは MIT License で公開します。詳細は [LICENSE](LICENSE) を参照してください。
+
+依存ライブラリ、外部モデル、学習済み checkpoint、配布先から取得する重みは、それぞれの提供元ライセンスに従います。MVP リリース前の確認項目は [Release checklist](docs/release_checklist.md) を参照してください。
+
 ## 関連ドキュメント
 
 - [PHOTON technical overview](docs/photon_technical_overview.md): PHOTON の役割、技術要素、multi-turn RAG への転用方法
 - [Development notes](docs/development_notes.md): 開発モード、評価観点、Gate、Definition of Done
+- [Release checklist](docs/release_checklist.md): MIT MVP リリース前の確認項目
 - [Deployment guide](docs/deployment.md): checkpoint 配布とデプロイ運用
 - [Playground guide](docs/playground.md): ローカル検証の補足
 - [Troubleshooting](docs/troubleshooting.md): エラー時の確認ポイント
