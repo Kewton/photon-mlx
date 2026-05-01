@@ -1,157 +1,61 @@
 # PHOTON-RepoRAG
 
-PHOTON 系の階層 working memory を使って、**巨大 repo に対する multi-turn RepoRAG** を高速化・省メモリ化するための開発リポジトリです。
+PHOTON-RepoRAG は、業務文書・制度文書・コードリポジトリに対する **Multi-turn RAG** です。単発の文書検索ではなく、会話の流れを踏まえて、前の質問で扱った対象・条件・比較軸を引き継ぎながら回答します。
 
-本プロジェクトは 2 本立てで進めます。
+例えば、1 ターン目で「セーフティネット保証1号の認定基準」を聞いたあと、2 ターン目で「2号との違いは？」と質問するケースがあります。従来の RAG は現在の質問だけで検索しがちですが、業務利用ではこのような省略質問・比較質問・条件追加が頻繁に発生します。
 
-1. **Baseline RepoRAG**
-   - まず動く、比較可能なプロダクト線
-   - hybrid retrieval + citation 付き回答 + session memory
+このプロダクトは、現在の質問だけでは不足する文脈を会話履歴から補い、回答に使う根拠を選び直すことで、実務に近い対話型 RAG を実現することを目的にしています。
 
-2. **PHOTON-RAG**
-   - 階層 working memory を導入した研究開発線
-   - multi-turn follow-up のレイテンシとメモリを改善
-   - drift を検知して fallback する **Safe RecGen** を実装
+## 解決する業務課題
 
----
+- **省略質問への対応**: 「それは？」「2号との違いは？」「必要書類も同じ？」のような質問でも、前の会話文脈を踏まえて回答する
+- **条件引き継ぎ**: 対象制度、対象部門、前提条件、比較軸をターン間で維持する
+- **根拠の欠落防止**: 現在質問だけでは拾えない evidence を、関連する過去質問から補完する
+- **不要文脈の混入抑制**: 会話履歴を全部渡すのではなく、現在質問に関係する履歴だけを使う
+- **説明可能な回答**: 回答、引用、retrieval debug、比較メトリクスを確認できる形で出力する
+- **業務導入前の比較検証**: baseline RAG と multi-turn RAG の回答・引用・メトリクスを Streamlit 上で比較する
 
-## 目的
+## 従来の RAG / Agentic RAG との違い
 
-このリポジトリの目的は次の 3 つです。
+| 方式 | 得意なこと | 課題 | このプロダクトとの違い |
+|---|---|---|---|
+| 従来の RAG | 現在質問に対する文書検索と回答 | 省略質問、条件引き継ぎ、比較質問に弱い | 現在質問だけでなく、関連する過去質問と evidence を使って回答する |
+| 会話履歴を全部入れる RAG | 実装が簡単 | 不要な履歴が混ざり、長い会話ほど精度・コスト・レイテンシが悪化する | 必要な過去文脈だけを選び、回答に使う evidence を絞る |
+| 質問書き換え型 RAG | 「2号との違いは？」を完全な検索クエリに補正できる | 書き換え品質に依存し、誤った前提を補う可能性がある | 書き換えだけに頼らず、関連過去質問と evidence を明示的に扱う |
+| Agentic RAG | 複雑な調査、複数回検索、ツール利用 | 遅い、コストが高い、挙動が不安定、評価しにくい | 業務 Q&A に必要な文脈引き継ぎと根拠選別を、制御されたパイプラインで扱う |
 
-- **RepoRAG の baseline を最短で成立**させる
-- **PHOTON 系の working memory を比較可能な形で実装**する
-- **Safe RecGen を含む評価基盤**を作り、multi-turn 実用性で勝負する
+Agentic RAG は、何を調べるべきか自体を探索するタスクに向いています。一方、このプロダクトは、既存の文書・規程・制度・コードを対象に、ユーザーとの会話を引き継ぎながら正しい根拠へ着地する業務 Q&A に向いています。
 
----
+## 主な特徴
 
-## 何を解くか
+- **Multi-turn chat**: 過去質問を踏まえた follow-up 質問に対応
+- **関連過去質問の利用**: 現在質問と関係する過去質問を回答生成時の参考情報として渡す
+- **関連 evidence 補完**: 関連過去質問から取得した evidence を現在質問の evidence に追加
+- **根拠チャンク保護**: retrieval / reranker 上位チャンクを保護し、必要情報の欠落を抑える
+- **比較モード**: baseline と multi-turn variant の回答、引用、メトリクス、差分を比較
+- **Retrieval debug**: 使用されたチャンク、source、rank、score、引用差分を確認
+- **Streamlit 管理 UI**: ingest / index / training / project 登録 / chat / 比較確認を画面上で実行
+- **CLI 再利用**: Streamlit で作成した config と checkpoint を CLI から利用
 
-通常の RAG は 1 問目には強い一方で、同じ repo に対する連続質問では次の問題が起きやすいです。
+## 適したユースケース
 
-- 毎ターン大量の文脈を再読する
-- 会話が伸びるほどレイテンシとメモリが悪化する
-- 「いま何を調べているか」という作業状態を維持しにくい
-- repo 全体の構造理解と局所コード読解を何度も往復するのが重い
+- 制度文書・社内規程・業務マニュアルに対する問い合わせ対応
+- 自治体・行政文書の条件確認、制度比較、必要書類確認
+- 法務・契約・金融領域の根拠付き Q&A
+- コールセンターやヘルプデスクでの対話型ナレッジ検索
+- コードリポジトリのオンボーディング、影響範囲分析、関連モジュール探索
 
-このプロジェクトでは、次の役割分担を採用します。
+## 技術詳細
 
-- **検索**: Source of Truth
-- **Session Pack**: セッションで重要な証拠束
-- **PHOTON Working Memory**: 粗い全体状態と作業仮説
-- **最終回答**: 必ず局所証拠に再着地して生成
+README ではプロダクトの目的と始め方に絞っています。内部で使っている PHOTON の役割、working memory、hierarchical prefill、scoring、evidence pruning の詳細は [PHOTON technical overview](docs/photon_technical_overview.md) を参照してください。
 
----
+## クイックスタート
 
-## 対象ユースケース
+> **推奨ローカル LLM 構成 (2026-04-28)**: Qwen3.5-9B-MLX-4bit no-think モード。詳細は [`reports/qwen_model_matrix_20260428_400cmp_report.md`](reports/qwen_model_matrix_20260428_400cmp_report.md) と [`docs/playground.md`](docs/playground.md) 参照。
 
-- repo オンボーディング
-- 影響範囲分析
-- 障害解析
-- 変更計画の比較
-- 関連モジュール探索
-- 設計意図の把握
+### MVP 手順: Streamlit アプリで確認してから CLI で使う
 
----
-
-## 非対象
-
-v1 では以下は扱いません。
-
-- repo 全体の大規模自動リライト
-- 自律コミット
-- 出典なしの断定回答
-- 汎用チャットボット化
-- frontier 級基盤モデルのフル事前学習
-
----
-
-## 全体アーキテクチャ
-
-```text
-[Repo Ingestion]
-    -> Chunk Store
-    -> Symbol Graph
-    -> Lexical Index
-    -> Embedding Index
-    -> Metadata Store
-
-[User Query]
-    -> Query Router
-    -> Hybrid Retrieval
-    -> Graph Expansion
-    -> Evidence Pack Builder
-    -> Session Memory Manager
-        -> v0: Flat Session Memory
-        -> v1: PHOTON Working Memory
-        -> v1.1: PHOTON + Safe RecGen
-    -> Answer Generator
-    -> Citation Resolver
-    -> Logger / Evaluator
-```
-
-⸻
-
-リポジトリ構成
-
-```
-project-root/
-├─ spec.md
-├─ README.md
-├─ tasks.md
-├─ configs/
-│  ├─ baseline.yaml
-│  ├─ photon_tiny.yaml
-│  ├─ photon_small.yaml
-│  └─ eval.yaml
-├─ data/
-│  ├─ raw/
-│  ├─ processed/
-│  ├─ indexes/
-│  └─ eval_sets/
-├─ baseline_reporag/
-├─ photon_mlx/
-├─ torch_ref/
-├─ bench/
-├─ evals/
-├─ scripts/
-├─ reports/
-└─ demo/
-```
-
-⸻
-
-開発方針
-
-このプロジェクトでは、次の順番を崩しません。
-1.	まず baseline を作る
-2.	次に評価器を固める
-3.	その上で PHOTON を実装する
-4.	最後に Safe RecGen と最適化を入れる
-
-最初から新アーキテクチャ一本に賭けないことが重要です。
-
-⸻
-
-開発ステータス
- - v0 Baseline RepoRAG
- - v1 PHOTON Working Memory
- - v1.1 Safe RecGen
- - Benchmark Harness
- - Evaluation Set Freeze
- - Benchmark Report
- - Failure Case Catalog
-
-⸻
-
-クイックスタート
-
-> **採用構成 (2026-04-28)**: PHOTON + Qwen3.5-9B-MLX-4bit no-think モード。
-> 詳細は [`reports/qwen_model_matrix_20260428_400cmp_report.md`](reports/qwen_model_matrix_20260428_400cmp_report.md) と [`docs/playground.md`](docs/playground.md) 参照。
-
-### MVP 手順: Streamlit アプリで作成してから CLI で使う
-
-MVP では、まず Streamlit アプリで ingest / index / PHOTON 学習 / チャット確認を行い、そこで作成された config と checkpoint を CLI から再利用する流れを推奨します。
+MVP では、まず Streamlit アプリで ingest / index / チャット確認を行い、必要に応じて multi-turn 用の設定や checkpoint を作成します。その後、Streamlit で作成された config と checkpoint を CLI から再利用する流れを推奨します。
 
 #### 1. GitHub から clone して環境を作る
 
@@ -192,8 +96,8 @@ streamlit run app/photon_app.py --server.port 8501
 
 3. **RAG プロジェクト登録**
    - 作成済みの `repo_id` を選択
-   - PHOTON を使う場合は作成済み checkpoint を選択
-   - 必要なら **PHOTON settings** で YAML を生成する
+   - multi-turn variant を使う場合は作成済み checkpoint を選択
+   - 必要なら advanced settings で YAML を生成する
    - `登録`
 
 4. **チャット**
@@ -288,11 +192,11 @@ make eval
 make help
 ```
 
-PHOTON pipeline で動かす場合は `CONFIG` を切替えるだけ:
+multi-turn variant で動かす場合は `CONFIG` を切替えます。
 
 ```bash
-# PHOTON 採用 checkpoint で問い合わせ
-export PHOTON_CHECKPOINT_ROOT=/path/to/checkpoints  # 採用 checkpoint の親ディレクトリ
+# checkpoint を使って問い合わせ
+export PHOTON_CHECKPOINT_ROOT=/path/to/checkpoints  # checkpoint の親ディレクトリ
 make ask CONFIG=configs/photon_small.yaml REPO_ID=target_repo Q="..."
 ```
 
@@ -350,204 +254,41 @@ python bench/run_all.py --config configs/eval.yaml
 python scripts/export_report.py --run-id latest
 ```
 
-⸻
+## プロジェクト構成
 
-開発モード
+```text
+project-root/
+├─ app/                  # Streamlit 管理アプリ
+├─ baseline_reporag/     # ingest / index / retrieval / generation / comparison
+├─ photon_mlx/           # multi-turn variant で使うローカル推論・学習実装
+├─ configs/              # baseline / multi-turn / institutional docs 用 config
+├─ bench/                # 評価ベンチマーク
+├─ docs/                 # 技術詳細・運用メモ
+├─ reports/              # 評価レポート
+└─ tests/                # unit / component tests
+```
 
-v0: Baseline RepoRAG
- - open-weight instruct model
- - hybrid retrieval
- - lexical
- - embedding
- - symbol / graph expansion
- - citation 付き回答
- - simple session memory
- - benchmark 可能
+## 評価で見るポイント
 
-v1: PHOTON-RAG
- - hierarchical encoder
- - converter
- - local decoder
- - session-level working memory
- - follow-up ターン高速化
- - drift 記録
+このプロダクトの評価軸は、単発回答の正しさだけではありません。multi-turn で前提を引き継げているか、回答根拠が妥当か、引用が説明可能かを確認します。
 
-v1.1: Safe RecGen
- - drift 検知
- - topic shift 検知
- - exact quote / patch 生成時の強制再読
- - fallback reason の記録
- - baseline path への一時退避
+- **回答品質**: task correctness、session consistency、hallucination rate
+- **根拠品質**: citation precision、citation recall、evidence の過不足
+- **運用品質**: P50 / P90 latency、memory peak、fallback rate
+- **説明可能性**: retrieval debug、引用差分、比較メトリクス
 
-⸻
+## ライセンス
 
-評価の考え方
+このリポジトリのコードとドキュメントは MIT License で公開します。詳細は [LICENSE](LICENSE) を参照してください。
 
-このプロジェクトの成功条件は、単発回答ではなく multi-turn 実用性 に置きます。
+依存ライブラリ、外部モデル、学習済み checkpoint、配布先から取得する重みは、それぞれの提供元ライセンスに従います。MVP リリース前の確認項目は [Release checklist](docs/release_checklist.md) を参照してください。
 
-品質指標
- - task correctness
- - citation precision
- - citation recall
- - session consistency
- - hallucination rate
- - patch / diff grounding quality
+## 関連ドキュメント
 
-性能指標
- - P50 / P90 latency
- - tokens/sec
- - peak memory
- - memory / active session
- - retrieval time
- - prefill time
- - decode time
- - fallback rate
-
-安全指標
- - no-citation assertion rate
- - wrong citation rate
- - stale memory rate
- - missed fallback rate
-
-⸻
-
-成功条件
-
-詳細は spec.md を参照しますが、実務上の成功条件は次の通りです。
- - follow-up レイテンシが baseline 比で明確に改善する
- - session あたりメモリが baseline より減る
- - citation precision を落とさない
- - multi-turn の前提保持が向上する
- - Safe RecGen によって危険ケースで堅い経路へ戻れる
-
-⸻
-
-比較対象
-
-以下を同じ harness で比較します。
-1.	Baseline-RAG
-2.	Baseline-RAG + summary memory
-3.	PHOTON-RAG
-4.	PHOTON-RAG + Safe RecGen
-
-⸻
-
-ログ方針
-
-最低限、以下は全 run で保存します。
- - run_id
- - session_id
- - turn_id
- - repo_id
- - repo_commit
- - model_id
- - retrieval chunk IDs
- - evidence pack IDs
- - cited chunk IDs
- - fallback flag
- - fallback reason
- - latency breakdown
- - memory peak
- - answer text
- - grader score
-
-ログは後から failure analysis できる粒度で残します。
-
-⸻
-
-Gate
-
-Gate 1
-
-baseline RepoRAG が安定稼働し、benchmark が再現可能か。
-
-Gate 2
-
-PHOTON 系 forward / eval が安定し、tiny/small で改善の兆候があるか。
-
-Gate 3
-
-Safe RecGen によって誤答率改善とレイテンシ改善が両立するか。
-
-Gate 4
-
-baseline 統合、限定ベータ、研究枝公開のどれに進むか判断できるか。
-
-⸻
-
-実装ルール
- - benchmark を先に凍結する
- - repo snapshot を固定する
- - exact quote / diff / patch は必ず局所再読する
- - retrieval と generation の失敗を分離して分析する
- - すべての比較は同じ harness 上で行う
- - 「動いた」ではなく「比較できる」を Done とする
-
-⸻
-
-主要ディレクトリの役割
-
-baseline_reporag/
-
-最初に価値を出すプロダクト線。
-比較対象であり、最後まで control として維持する。
-
-photon_mlx/
-
-本命実装。
-Mac 向け最適化と PHOTON 系 working memory を入れる。
-
-torch_ref/
-
-正しさ確認用。
-mask、shape、forward、teacher-forced eval の検証に使う。
-
-bench/
-
-公平比較の中心。
-評価条件、run、集計、グラフ出力をまとめる。
-
-evals/
-
-静的問題、multi-turn セッション、stress eval を管理する。
-
-reports/
-
-benchmark report と failure cases を蓄積する。
-
-⸻
-
-最初にやること
- - spec.md を確定する
- - 対象 repo を 1 つに固定する
- - benchmark を freeze する
- - baseline RepoRAG を動かす
- - citation が出るところまで最短で到達する
-
-⸻
-
-今後の拡張候補
- - adaptive chunking
- - topic-aware memory refresh
- - CPU/GPU 分業スケジューリング
- - Agentic RAG
- - patch planning
- - internal beta / public demo
-
-⸻
-
-Definition of Done
-
-このリポジトリは、次を満たしたら 1 つの区切りとします。
-1.	baseline RepoRAG が安定して動く
-2.	PHOTON-RAG が同じ harness 上で比較できる
-3.	Safe RecGen の発火条件と効果が測定できる
-4.	multi-turn で baseline より価値があると示せる
-5.	report と failure cases が第三者に共有できる
-
-⸻
-
-参考ドキュメント
- - spec.md: 開発仕様と意思決定の基準
- - tasks.md: 実行タスク一覧
- - reports/: 評価レポートと失敗事例
+- [PHOTON technical overview](docs/photon_technical_overview.md): PHOTON の役割、技術要素、multi-turn RAG への転用方法
+- [Development notes](docs/development_notes.md): 開発モード、評価観点、Gate、Definition of Done
+- [Release checklist](docs/release_checklist.md): MIT MVP リリース前の確認項目
+- [Deployment guide](docs/deployment.md): checkpoint 配布とデプロイ運用
+- [Playground guide](docs/playground.md): ローカル検証の補足
+- [Troubleshooting](docs/troubleshooting.md): エラー時の確認ポイント
+- [Tutorial](docs/tutorial.md): 操作手順の補足

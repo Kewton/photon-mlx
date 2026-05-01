@@ -101,6 +101,149 @@ class TestSafeId:
             photon_app._safe_id(bad, label="repo_id")
 
 
+class TestComparisonEligibilityReason:
+    def _proj(
+        self, *, config_path: str, photon_config_path: str
+    ) -> "photon_app.Project":
+        return photon_app.Project(
+            name="demo",
+            repo_id="demo_repo",
+            index_dir="data/indexes/demo_repo",
+            config_path=config_path,
+            photon_config_path=photon_config_path,
+            checkpoint_dir="checkpoints/demo/final",
+            use_photon=bool(photon_config_path),
+            created_at="2026-05-01T00:00:00",
+        )
+
+    def test_same_baseline_and_photon_config_explains_disabled_state(self) -> None:
+        proj = self._proj(
+            config_path="configs/institutional_docs_photon.yaml",
+            photon_config_path="configs/institutional_docs_photon.yaml",
+        )
+
+        reason = photon_app._comparison_ineligible_reason(proj)
+
+        assert reason is not None
+        assert "同じ" in reason
+        assert photon_app._check_comparison_eligible(proj) is False
+
+    def test_distinct_baseline_and_photon_configs_are_eligible(
+        self, monkeypatch
+    ) -> None:
+        proj = self._proj(
+            config_path="configs/institutional_docs.yaml",
+            photon_config_path="configs/institutional_docs_photon.yaml",
+        )
+
+        def fake_load_config(path: str):
+            provider = "photon" if path.endswith("_photon.yaml") else "baseline"
+            return SimpleNamespace(model=SimpleNamespace(provider=provider))
+
+        monkeypatch.setattr(photon_app, "load_config", fake_load_config)
+
+        assert photon_app._comparison_ineligible_reason(proj) is None
+        assert photon_app._check_comparison_eligible(proj) is True
+
+
+class TestPipelineCacheClearing:
+    class _SessionOwner:
+        def __init__(self, session_ids: tuple[str, ...]) -> None:
+            self.sessions = SimpleNamespace(
+                _sessions={sid: object() for sid in session_ids}
+            )
+
+    class _Pipeline:
+        def __init__(self, session_ids: tuple[str, ...]) -> None:
+            self.sessions = SimpleNamespace(
+                _sessions={sid: object() for sid in session_ids}
+            )
+            self.baseline = TestPipelineCacheClearing._SessionOwner(session_ids)
+            self.photon_inference = SimpleNamespace(
+                _sessions={sid: object() for sid in session_ids},
+                _last_prune_scores_by_session={sid: {"c1": 0.5} for sid in session_ids},
+            )
+            self.cleared: list[str] = []
+
+        def _clear_photon_session_artifacts(self, session_id: str) -> None:
+            self.cleared.append(session_id)
+
+    def test_clears_only_comparison_pipeline_cache(self, monkeypatch) -> None:
+        cmp_pipeline = self._Pipeline(("comparison_chat_demo_photon",))
+        normal_pipeline = self._Pipeline(("chat_demo",))
+        session_state = {
+            "pipeline_demo_configs/base.yaml_model_comparison_photon": cmp_pipeline,
+            "pipeline_demo_configs/base.yaml_model": normal_pipeline,
+            "comparison_history_demo_photon": [],
+        }
+        monkeypatch.setattr(
+            photon_app,
+            "st",
+            SimpleNamespace(session_state=session_state),
+        )
+
+        removed = photon_app._clear_project_pipeline_cache(
+            "demo",
+            comparison=True,
+            session_ids=("comparison_chat_demo_photon",),
+        )
+
+        assert removed == 1
+        assert "pipeline_demo_configs/base.yaml_model_comparison_photon" not in (
+            session_state
+        )
+        assert "pipeline_demo_configs/base.yaml_model" in session_state
+        assert cmp_pipeline.cleared == ["comparison_chat_demo_photon"]
+        assert cmp_pipeline.sessions._sessions == {}
+        assert cmp_pipeline.baseline.sessions._sessions == {}
+        assert cmp_pipeline.photon_inference._sessions == {}
+        assert cmp_pipeline.photon_inference._last_prune_scores_by_session == {}
+
+    def test_clears_normal_and_comparison_pipeline_cache(self, monkeypatch) -> None:
+        session_state = {
+            "pipeline_demo_configs/base.yaml_model_comparison_baseline": object(),
+            "pipeline_demo_configs/photon.yaml_model_comparison_photon": object(),
+            "pipeline_demo_configs/photon.yaml_model": object(),
+            "pipeline_other_configs/photon.yaml_model_comparison_photon": object(),
+        }
+        monkeypatch.setattr(
+            photon_app,
+            "st",
+            SimpleNamespace(session_state=session_state),
+        )
+
+        removed = photon_app._clear_project_pipeline_cache("demo", comparison=None)
+
+        assert removed == 3
+        assert sorted(session_state) == [
+            "pipeline_other_configs/photon.yaml_model_comparison_photon"
+        ]
+
+
+class TestCheckpointPathForGeneratedYaml:
+    def test_checkpoint_under_project_root_uses_checkpoint_root_relative_path(
+        self,
+    ) -> None:
+        checkpoint = (
+            photon_app.PROJECT_ROOT
+            / "checkpoints"
+            / "photon_institutional_retrain_20260428"
+            / "step_003000"
+        )
+
+        assert (
+            photon_app._checkpoint_path_for_generated_yaml(str(checkpoint))
+            == "photon_institutional_retrain_20260428/step_003000"
+        )
+
+    def test_checkpoint_outside_project_root_is_preserved(self, tmp_path: Path) -> None:
+        checkpoint = tmp_path / "external_ckpt"
+
+        assert photon_app._checkpoint_path_for_generated_yaml(str(checkpoint)) == str(
+            checkpoint
+        )
+
+
 class TestPageIndexNoShellTrue:
     """Guardrail: no `shell=True` should remain in photon_app.py or eval_panel.py.
 
@@ -318,6 +461,151 @@ class TestPipelineCacheKey:
         b = photon_app._pipeline_cache_key("demo", "/tmp/photon.yaml")
         assert a != b
 
+    def test_distinct_temperatures_yield_distinct_keys(self) -> None:
+        a = photon_app._pipeline_cache_key("demo", "/tmp/cfg.yaml", "model", 0.0)
+        b = photon_app._pipeline_cache_key("demo", "/tmp/cfg.yaml", "model", 0.2)
+        assert a != b
+
+    def test_distinct_pruning_settings_yield_distinct_keys(self) -> None:
+        a = photon_app._pipeline_cache_key("demo", "/tmp/cfg.yaml", "model", 0.0, 4, 4)
+        b = photon_app._pipeline_cache_key("demo", "/tmp/cfg.yaml", "model", 0.0, 6, 2)
+        assert a != b
+
+    def test_distinct_related_retrieval_settings_yield_distinct_keys(self) -> None:
+        a = photon_app._pipeline_cache_key(
+            "demo",
+            "/tmp/cfg.yaml",
+            "model",
+            0.0,
+            4,
+            4,
+            3,
+            4,
+        )
+        b = photon_app._pipeline_cache_key(
+            "demo",
+            "/tmp/cfg.yaml",
+            "model",
+            0.0,
+            4,
+            4,
+            1,
+            8,
+        )
+        assert a != b
+
+
+class TestChatMetadataSerialization:
+    def test_serializes_objects_used_by_persisted_chat_history(self) -> None:
+        metric = SimpleNamespace(
+            as_dict=lambda: {
+                "latent_cosine_drift_top": 0.12,
+                "safe_recgen_fired": False,
+            }
+        )
+        retrieval_row = SimpleNamespace(
+            chunk_id="c1",
+            rel_path="README.md",
+            section=None,
+            source="embedding",
+            bm25_score=0.1,
+            embedding_score=0.9,
+            reranker_score=0.8,
+            used=True,
+            citation_index=1,
+        )
+
+        serialized = photon_app._serialize_chat_metadata(
+            {
+                "latency_ms": 123.4,
+                "drift_metrics": metric,
+                "retrieval_debug": [retrieval_row],
+            }
+        )
+
+        assert serialized["latency_ms"] == 123.4
+        assert serialized["drift_metrics"]["latent_cosine_drift_top"] == 0.12
+        assert serialized["retrieval_debug"][0]["chunk_id"] == "c1"
+
+    def test_namespace_records_preserves_dict_fields_for_turn_history_panel(
+        self,
+    ) -> None:
+        records = photon_app._namespace_records(
+            [{"turn_id": 1, "question_text": "q", "timestamp": "t"}]
+        )
+
+        assert records is not None
+        assert records[0].turn_id == 1
+        assert records[0].question_text == "q"
+
+
+class TestGenerationModelSelection:
+    def test_project_generation_model_overrides_config(self, tmp_path: Path) -> None:
+        proj = _make_proj(tmp_path)
+        proj.generation_model_id = "custom/model"
+        cfg = SimpleNamespace(model=SimpleNamespace(model_id="config/model"))
+
+        assert photon_app._selected_generation_model_id(proj, cfg) == "custom/model"
+
+        photon_app._apply_generation_model_override(cfg, proj.generation_model_id)
+
+        assert cfg.model.model_id == "custom/model"
+
+    def test_project_without_generation_model_falls_back_to_config(
+        self, tmp_path: Path
+    ) -> None:
+        proj = _make_proj(tmp_path)
+        cfg = SimpleNamespace(model=SimpleNamespace(model_id="config/model"))
+
+        assert photon_app._selected_generation_model_id(proj, cfg) == "config/model"
+
+    def test_project_generation_temperature_overrides_config(
+        self, tmp_path: Path
+    ) -> None:
+        proj = _make_proj(tmp_path)
+        proj.generation_temperature = 0.0
+        cfg = SimpleNamespace(generation=SimpleNamespace(temperature=0.7))
+
+        assert photon_app._selected_generation_temperature(proj) == 0.0
+
+        photon_app._apply_generation_temperature_override(
+            cfg, photon_app._selected_generation_temperature(proj)
+        )
+
+        assert cfg.generation.temperature == 0.0
+
+    def test_project_photon_pruning_settings_override_config(
+        self, tmp_path: Path
+    ) -> None:
+        proj = _make_proj(tmp_path)
+        proj.photon_protected_top_n = 4
+        proj.photon_selected_top_m = 4
+        proj.photon_related_questions_max = 2
+        proj.photon_related_evidence_top_k = 6
+        cfg = SimpleNamespace(
+            inference=SimpleNamespace(
+                pruned_max_chunks=8,
+                pruning_protected_top_n=0,
+                pruning_photon_top_m=8,
+                related_past_questions_max=0,
+                related_past_evidence_top_k=0,
+            )
+        )
+
+        photon_app._apply_photon_pruning_override(
+            cfg,
+            photon_app._selected_photon_protected_top_n(proj),
+            photon_app._selected_photon_selected_top_m(proj),
+            photon_app._selected_photon_related_questions_max(proj),
+            photon_app._selected_photon_related_evidence_top_k(proj),
+        )
+
+        assert cfg.inference.pruning_protected_top_n == 4
+        assert cfg.inference.pruning_photon_top_m == 4
+        assert cfg.inference.pruned_max_chunks == 8
+        assert cfg.inference.related_past_questions_max == 2
+        assert cfg.inference.related_past_evidence_top_k == 6
+
 
 class TestRunQueryUsesPhotonConfigPath:
     """CB-001 regression: when the wizard has emitted a PHOTON YAML, the
@@ -368,7 +656,16 @@ class TestRunQueryUsesPhotonConfigPath:
         mock_load.assert_called_once_with(str(wizard_yaml))
         # And the pipeline must be cached under a key that embeds the wizard
         # path — not the bare config_path — so a future swap re-builds it.
-        expected_key = photon_app._pipeline_cache_key(proj.name, str(wizard_yaml))
+        expected_key = photon_app._pipeline_cache_key(
+            proj.name,
+            str(wizard_yaml),
+            photon_app._DEFAULT_GENERATION_MODEL_ID,
+            photon_app._DEFAULT_GENERATION_TEMPERATURE,
+            photon_app._DEFAULT_PHOTON_PROTECTED_TOP_N,
+            photon_app._DEFAULT_PHOTON_SELECTED_TOP_M,
+            photon_app._DEFAULT_PHOTON_RELATED_QUESTIONS_MAX,
+            photon_app._DEFAULT_PHOTON_RELATED_EVIDENCE_TOP_K,
+        )
         assert expected_key in fake_session_state
 
     def test_run_query_falls_back_to_config_path_when_photon_blank(
@@ -455,7 +752,16 @@ class TestRunQueryUsesPhotonConfigPath:
             patch.object(photon_app.st, "session_state", fake_session_state),
         ):
             photon_app._run_query(proj, "q?", "sess")
-            first_key = photon_app._pipeline_cache_key(proj.name, str(first_yaml))
+            first_key = photon_app._pipeline_cache_key(
+                proj.name,
+                str(first_yaml),
+                photon_app._DEFAULT_GENERATION_MODEL_ID,
+                photon_app._DEFAULT_GENERATION_TEMPERATURE,
+                photon_app._DEFAULT_PHOTON_PROTECTED_TOP_N,
+                photon_app._DEFAULT_PHOTON_SELECTED_TOP_M,
+                photon_app._DEFAULT_PHOTON_RELATED_QUESTIONS_MAX,
+                photon_app._DEFAULT_PHOTON_RELATED_EVIDENCE_TOP_K,
+            )
             assert first_key in fake_session_state
             # Same path → cache hit, build_pipeline not called again.
             photon_app._run_query(proj, "q?", "sess")
@@ -472,7 +778,16 @@ class TestRunQueryUsesPhotonConfigPath:
             # CB-002: the stale cache entry under the previous path MUST
             # have been evicted so the previous pipeline (which would
             # otherwise pin MLX weights in memory) becomes collectable.
-            second_key = photon_app._pipeline_cache_key(proj.name, str(second_yaml))
+            second_key = photon_app._pipeline_cache_key(
+                proj.name,
+                str(second_yaml),
+                photon_app._DEFAULT_GENERATION_MODEL_ID,
+                photon_app._DEFAULT_GENERATION_TEMPERATURE,
+                photon_app._DEFAULT_PHOTON_PROTECTED_TOP_N,
+                photon_app._DEFAULT_PHOTON_SELECTED_TOP_M,
+                photon_app._DEFAULT_PHOTON_RELATED_QUESTIONS_MAX,
+                photon_app._DEFAULT_PHOTON_RELATED_EVIDENCE_TOP_K,
+            )
             assert second_key in fake_session_state
             assert first_key not in fake_session_state, (
                 "stale pipeline cache for the previous config path was not evicted"

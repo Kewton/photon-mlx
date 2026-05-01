@@ -48,6 +48,9 @@ if TYPE_CHECKING:
     from photon_mlx.session import TurnState
 
 _logger = logging.getLogger(__name__)
+_RELATED_PAST_QUESTIONS_MAX = 3
+_RELATED_PAST_EVIDENCE_TOP_K = 4
+_SPLIT_PART_RE = re.compile(r"^(?P<base>.+)#part(?P<idx>\d+)of(?P<total>\d+)$")
 
 
 @lru_cache(maxsize=1)
@@ -154,6 +157,125 @@ def _resolve_two_pass_search_cfg(
         )
         pass1_top_k = fused_top_k
     return enabled, pass1_top_k, pass2_top_k
+
+
+def _nonnegative_int(value: Any, default: int = 0) -> int:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _unique_candidate_indices_by_rank(
+    ranked_chunk_ids: list[str],
+    chunk_ids_for_scoring: list[str],
+    limit: int,
+) -> list[int]:
+    """Return scoring indices for top-ranked retrieval/reranker chunks."""
+    if limit <= 0:
+        return []
+    index_by_id = {cid: idx for idx, cid in enumerate(chunk_ids_for_scoring)}
+    selected: list[int] = []
+    seen: set[str] = set()
+    for cid in ranked_chunk_ids:
+        if cid in seen:
+            continue
+        seen.add(cid)
+        idx = index_by_id.get(cid)
+        if idx is None:
+            continue
+        selected.append(idx)
+        if len(selected) >= limit:
+            break
+    return selected
+
+
+def _merge_protected_and_photon_indices(
+    *,
+    ranked_chunk_ids: list[str],
+    chunk_ids_for_scoring: list[str],
+    photon_indices: list[int],
+    protected_top_n: int,
+) -> list[int]:
+    protected_indices = _unique_candidate_indices_by_rank(
+        ranked_chunk_ids,
+        chunk_ids_for_scoring,
+        protected_top_n,
+    )
+    valid_photon_indices = [
+        idx for idx in photon_indices if 0 <= idx < len(chunk_ids_for_scoring)
+    ]
+    return sorted(set(protected_indices) | set(valid_photon_indices))
+
+
+def _dedupe_preserve_order(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        ordered.append(value)
+    return ordered
+
+
+def _split_sibling_chunk_ids(chunk_id: str) -> list[str]:
+    """Return sibling chunk_ids for split chunks like ``...#part2of2``."""
+    match = _SPLIT_PART_RE.match(chunk_id)
+    if match is None:
+        return []
+    total = _nonnegative_int(match.group("total"))
+    if total <= 1:
+        return []
+    base = match.group("base")
+    return [f"{base}#part{i}of{total}" for i in range(1, total + 1)]
+
+
+def _expand_related_past_refs(
+    chunk_ids: list[str],
+    *,
+    store: Any,
+    neighborhood_before: int,
+    neighborhood_after: int,
+) -> list[ExpandedChunkRef]:
+    """Expand related-past evidence with split siblings and file neighbors."""
+    ordered_ids = _dedupe_preserve_order([cid for cid in chunk_ids if cid])
+    seen: set[str] = set()
+    refs: list[ExpandedChunkRef] = []
+    neighbor_seed_ids: list[str] = []
+
+    def add(cid: str, source: str) -> None:
+        if not cid or cid in seen:
+            return
+        seen.add(cid)
+        refs.append(ExpandedChunkRef(chunk_id=cid, source=source))
+
+    for cid in ordered_ids:
+        add(cid, "related_past")
+        neighbor_seed_ids.append(cid)
+        for sibling_id in _split_sibling_chunk_ids(cid):
+            if sibling_id != cid:
+                add(sibling_id, "related_past_neighbor")
+            neighbor_seed_ids.append(sibling_id)
+
+    if neighborhood_before <= 0 and neighborhood_after <= 0:
+        return refs
+
+    chunks = store.get_many(_dedupe_preserve_order(neighbor_seed_ids))
+    for chunk in chunks:
+        try:
+            neighbors = store.get_neighbors(
+                chunk,
+                before=neighborhood_before,
+                after=neighborhood_after,
+            )
+        except Exception:
+            neighbors = []
+        if not isinstance(neighbors, list):
+            neighbors = []
+        for neighbor in neighbors:
+            add(neighbor.chunk_id, "related_past_neighbor")
+    return refs
 
 
 # ---------------------------------------------------------------------------
@@ -993,6 +1115,38 @@ class PhotonRAGPipeline:
         cited = candidate.cited_chunk_ids
         return list(cited[:max_pinned]) if cited else None
 
+    @staticmethod
+    def _extract_related_questions(
+        session: SessionState | None,
+        matched_turns: list[TurnState],
+    ) -> list[str]:
+        """Map PHOTON-matched turn ids to prior user questions in turn order."""
+        if session is None or not session.turns or not matched_turns:
+            return []
+
+        questions: list[str] = []
+        seen_turn_ids: set[int] = set()
+        for matched in sorted(matched_turns, key=lambda turn: turn.turn_id):
+            if matched.turn_id in seen_turn_ids:
+                continue
+            seen_turn_ids.add(matched.turn_id)
+            question = ""
+            idx = matched.turn_id - 1
+            if 0 <= idx < len(session.turns):
+                candidate = session.turns[idx]
+                if candidate.turn_id == matched.turn_id:
+                    question = candidate.question
+            if not question:
+                for turn in session.turns:
+                    if turn.turn_id == matched.turn_id:
+                        question = turn.question
+                        break
+            if not question:
+                question = getattr(matched, "question_text", "")
+            if question.strip():
+                questions.append(question.strip())
+        return questions
+
     # ---------------------------------------------------------------
     # Issue #62 Phase 1: opt-in PHOTON single-path generation
     # ---------------------------------------------------------------
@@ -1034,6 +1188,25 @@ class PhotonRAGPipeline:
         if raw_value < 1:
             raise ValueError(f"PHOTON max_new_tokens must be >= 1, got {raw_value}")
         return raw_value
+
+    @staticmethod
+    def _run_qwen_generation(
+        generator: Any,
+        messages: list[dict],
+        *,
+        max_new_tokens: int | None,
+        seed: int | None,
+    ) -> str:
+        """Run Qwen with the baseline call shape when no cap is specified."""
+        if max_new_tokens is None:
+            if seed is not None:
+                return generator.generate(messages, seed=seed)
+            return generator.generate(messages)
+        if seed is not None:
+            return generator.generate(
+                messages, max_new_tokens=max_new_tokens, seed=seed
+            )
+        return generator.generate(messages, max_new_tokens=max_new_tokens)
 
     def _run_photon_generation(
         self,
@@ -1093,14 +1266,12 @@ class PhotonRAGPipeline:
             )
             # Issue #143 / DR3-002: ``if seed is not None`` (NOT
             # ``if seed:``) — seed=0 is a valid deterministic seed.
-            if seed is not None:
-                qwen_answer = bl.generator.generate(
-                    messages, max_new_tokens=followup_tokens, seed=seed
-                )
-            else:
-                qwen_answer = bl.generator.generate(
-                    messages, max_new_tokens=followup_tokens
-                )
+            qwen_answer = self._run_qwen_generation(
+                bl.generator,
+                messages,
+                max_new_tokens=followup_tokens,
+                seed=seed,
+            )
             return qwen_answer, "qwen", reason
 
         # DR1-001: empty / whitespace-only output is fail-closed.
@@ -1111,14 +1282,12 @@ class PhotonRAGPipeline:
             )
             if fallback_policy == "abort":
                 raise RuntimeError("PHOTON generation failed and fallback policy=abort")
-            if seed is not None:
-                qwen_answer = bl.generator.generate(
-                    messages, max_new_tokens=followup_tokens, seed=seed
-                )
-            else:
-                qwen_answer = bl.generator.generate(
-                    messages, max_new_tokens=followup_tokens
-                )
+            qwen_answer = self._run_qwen_generation(
+                bl.generator,
+                messages,
+                max_new_tokens=followup_tokens,
+                seed=seed,
+            )
             return qwen_answer, "qwen", "empty_output"
 
         return photon_answer, "photon", None
@@ -1255,30 +1424,108 @@ class PhotonRAGPipeline:
             if inference_cfg is not None
             else 8
         )
+        protected_top_n = (
+            _nonnegative_int(getattr(inference_cfg, "pruning_protected_top_n", 0))
+            if inference_cfg is not None
+            else 0
+        )
+        photon_top_m = (
+            _nonnegative_int(getattr(inference_cfg, "pruning_photon_top_m", 0))
+            if inference_cfg is not None
+            else 0
+        )
+        related_questions_max = (
+            _nonnegative_int(
+                getattr(
+                    inference_cfg,
+                    "related_past_questions_max",
+                    _RELATED_PAST_QUESTIONS_MAX,
+                ),
+                default=_RELATED_PAST_QUESTIONS_MAX,
+            )
+            if inference_cfg is not None
+            else _RELATED_PAST_QUESTIONS_MAX
+        )
+        related_evidence_top_k = (
+            _nonnegative_int(
+                getattr(
+                    inference_cfg,
+                    "related_past_evidence_top_k",
+                    _RELATED_PAST_EVIDENCE_TOP_K,
+                ),
+                default=_RELATED_PAST_EVIDENCE_TOP_K,
+            )
+            if inference_cfg is not None
+            else _RELATED_PAST_EVIDENCE_TOP_K
+        )
         effective_max_chunks = cfg.evidence_pack.max_chunks
         do_pass1 = two_pass_enabled and not is_follow_up
         do_pass2plus = pruning_enabled and is_follow_up
+        split_pruning_enabled = (
+            inference_cfg is not None
+            and (
+                hasattr(inference_cfg, "pruning_protected_top_n")
+                or hasattr(inference_cfg, "pruning_photon_top_m")
+            )
+            and do_pass2plus
+        )
         photon_pruned_ids: list[str] = []
+        photon_score_map: dict[str, float] = {}
         if do_pass1 or do_pass2plus:
             chunks_for_scoring = bl.store.get_many(expanded_ids)
             chunk_texts = [c.content for c in chunks_for_scoring]
             chunk_ids_for_scoring = [c.chunk_id for c in chunks_for_scoring]
 
-            scoring_max_chunks = pass2_top_k if do_pass1 else pruned_max_chunks
-            with prof.phase("pass1_scoring" if do_pass1 else "evidence_pruning"):
-                selected_indices = self.photon_inference.prune_evidence(
-                    chunk_texts=chunk_texts,
-                    chunk_ids=chunk_ids_for_scoring,
-                    session_id=photon_session_id,
-                    max_chunks=scoring_max_chunks,
-                    question=question if do_pass1 else None,
+            if split_pruning_enabled:
+                scoring_max_chunks = photon_top_m
+                selected_indices = []
+                if photon_top_m > 0:
+                    with prof.phase("evidence_pruning"):
+                        selected_indices = self.photon_inference.prune_evidence(
+                            chunk_texts=chunk_texts,
+                            chunk_ids=chunk_ids_for_scoring,
+                            session_id=photon_session_id,
+                            max_chunks=photon_top_m,
+                            question=None,
+                        )
+                ranked_chunk_ids = [
+                    str(getattr(result, "chunk_id", "")) for result in raw
+                ]
+                selected_indices = _merge_protected_and_photon_indices(
+                    ranked_chunk_ids=ranked_chunk_ids,
+                    chunk_ids_for_scoring=chunk_ids_for_scoring,
+                    photon_indices=selected_indices,
+                    protected_top_n=protected_top_n,
                 )
+            else:
+                scoring_max_chunks = pass2_top_k if do_pass1 else pruned_max_chunks
+                with prof.phase("pass1_scoring" if do_pass1 else "evidence_pruning"):
+                    selected_indices = self.photon_inference.prune_evidence(
+                        chunk_texts=chunk_texts,
+                        chunk_ids=chunk_ids_for_scoring,
+                        session_id=photon_session_id,
+                        max_chunks=scoring_max_chunks,
+                        question=question if do_pass1 else None,
+                    )
             selected_set = {chunk_ids_for_scoring[i] for i in selected_indices}
             photon_pruned_ids = [
                 cid for cid in chunk_ids_for_scoring if cid not in selected_set
             ]
+            last_scores = getattr(
+                self.photon_inference, "_last_prune_scores_by_session", {}
+            )
+            if isinstance(last_scores, dict):
+                maybe_scores = last_scores.get(photon_session_id, {})
+                if isinstance(maybe_scores, dict):
+                    photon_score_map = {
+                        str(cid): float(score)
+                        for cid, score in maybe_scores.items()
+                        if isinstance(score, (int, float))
+                    }
             expanded_ids = [chunk_ids_for_scoring[i] for i in selected_indices]
-            effective_max_chunks = scoring_max_chunks
+            effective_max_chunks = (
+                len(expanded_ids) if split_pruning_enabled else scoring_max_chunks
+            )
 
         # --- Issue #103: read cached past-turn pin (before evidence pack) ---
         # DR2-001: use the module-level helper (PhotonRAGPipeline has no
@@ -1313,16 +1560,6 @@ class PhotonRAGPipeline:
                     ExpandedChunkRef(chunk_id=cid, source="working_memory")
                 )
 
-        debug_rows = build_retrieval_debug_rows(
-            raw_snapshot=raw_snapshot,
-            reranked_top=reranked_top
-            if bl.reranker is not None and not is_follow_up
-            else list(raw),
-            rejected=rejected_debug,
-            expanded_refs=all_refs_for_debug,
-            store=bl.store,
-        )
-
         # --- Evidence pack ---
         with prof.phase("evidence_pack"):
             pack = build_evidence_pack(
@@ -1348,6 +1585,7 @@ class PhotonRAGPipeline:
         drift_dict = None
         confidence = 1.0
         tokenization_failed = False
+        related_past_questions: list[str] = []
         try:
             evidence_tokens = tokenize_evidence_pack(
                 photon_input_text,
@@ -1389,6 +1627,84 @@ class PhotonRAGPipeline:
             )
             confidence = compute_confidence(logits)
             drift_dict = drift.as_dict() if drift else None
+            if is_follow_up and working_memory_cfg is not None:
+                photon_session = self.photon_inference._sessions.get(photon_session_id)
+                finder = (
+                    getattr(photon_session, "find_relevant_past_turns", None)
+                    if photon_session is not None
+                    else None
+                )
+                if callable(finder):
+                    try:
+                        matched_turns = finder(
+                            photon_session.current_state,
+                            max_turns=related_questions_max,
+                        )
+                    except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
+                        _logger.warning(
+                            "find_relevant_past_turns failed; skipping related "
+                            "questions (fail-closed, reason=%s)",
+                            type(exc).__name__,
+                        )
+                        matched_turns = []
+                    if isinstance(matched_turns, list):
+                        related_past_questions = self._extract_related_questions(
+                            session,
+                            matched_turns,
+                        )
+
+        related_past_evidence_ids: list[str] = []
+        if is_follow_up and related_past_questions and related_evidence_top_k > 0:
+            with prof.phase("retrieval"):
+                for related_question in related_past_questions:
+                    related_raw = hybrid_search(
+                        query=related_question,
+                        lexical_index=bl.lexical,
+                        embedding_index=bl.embedding,
+                        lexical_top_k=cfg.retrieval.lexical_top_k,
+                        embedding_top_k=cfg.retrieval.embedding_top_k,
+                        fused_top_k=related_evidence_top_k,
+                        lexical_weight=cfg.retrieval.weights.lexical,
+                        embedding_weight=cfg.retrieval.weights.embedding,
+                        expanded_queries=[question],
+                        repo_id=repo_id,
+                    )
+                    related_past_evidence_ids.extend(
+                        str(getattr(result, "chunk_id", "")) for result in related_raw
+                    )
+            related_past_evidence_ids = [
+                cid for cid in _dedupe_preserve_order(related_past_evidence_ids) if cid
+            ]
+
+        related_past_refs = _expand_related_past_refs(
+            related_past_evidence_ids,
+            store=bl.store,
+            neighborhood_before=cfg.retrieval.neighborhood_expansion.before,
+            neighborhood_after=cfg.retrieval.neighborhood_expansion.after,
+        )
+        related_past_pack_ids = [ref.chunk_id for ref in related_past_refs]
+
+        if related_past_pack_ids:
+            related_existing = {ref.chunk_id for ref in all_refs_for_debug}
+            for ref in related_past_refs:
+                if ref.chunk_id not in related_existing:
+                    all_refs_for_debug.append(ref)
+                    related_existing.add(ref.chunk_id)
+            combined_pinned_ids = _dedupe_preserve_order(
+                (additional_pinned_ids or []) + related_past_pack_ids
+            )
+            with prof.phase("evidence_pack"):
+                pack = build_evidence_pack(
+                    chunk_ids=expanded_ids,
+                    store=bl.store,
+                    session=session,
+                    max_chunks=min(
+                        cfg.evidence_pack.max_chunks,
+                        effective_max_chunks + len(related_past_pack_ids),
+                    ),
+                    max_tokens=cfg.evidence_pack.max_tokens,
+                    additional_pinned_ids=combined_pinned_ids,
+                )
 
         # --- Safe RecGen evaluation (uses new coarse state) ---
         fallback_dict = None
@@ -1495,9 +1811,14 @@ class PhotonRAGPipeline:
                 question=question,
                 evidence_text=evidence_text,
                 history_text=session.history_text(max_turns=4),
+                related_questions=related_past_questions,
                 include_few_shot=is_first_turn,
             )
-            followup_tokens = 512 if not is_first_turn else None
+            # Keep PHOTON follow-up generation aligned with the baseline path:
+            # do not impose a shorter per-turn cap here. The generator will use
+            # cfg.generation.max_new_tokens unless an explicit PHOTON generation
+            # limit is configured.
+            followup_tokens = None
 
             if photon_gen_enabled:
                 (
@@ -1519,14 +1840,12 @@ class PhotonRAGPipeline:
                 # Default ``seed=None`` keeps the legacy single-positional
                 # call shape for interactive callers + 17+ MagicMock
                 # tests.
-                if seed is not None:
-                    answer = bl.generator.generate(
-                        messages, max_new_tokens=followup_tokens, seed=seed
-                    )
-                else:
-                    answer = bl.generator.generate(
-                        messages, max_new_tokens=followup_tokens
-                    )
+                answer = self._run_qwen_generation(
+                    bl.generator,
+                    messages,
+                    max_new_tokens=followup_tokens,
+                    seed=seed,
+                )
 
         # --- Citation ---
         with prof.phase("citation"):
@@ -1549,6 +1868,16 @@ class PhotonRAGPipeline:
 
         # Finalise debug rows: used/citation_index now determinable (Issue #176)
         pack_chunk_ids = [c.chunk_id for c in pack.chunks]
+        debug_rows = build_retrieval_debug_rows(
+            raw_snapshot=raw_snapshot,
+            reranked_top=reranked_top
+            if bl.reranker is not None and not is_follow_up
+            else list(raw),
+            rejected=rejected_debug,
+            expanded_refs=all_refs_for_debug,
+            store=bl.store,
+            photon_scores=photon_score_map,
+        )
         debug_rows = finalise_retrieval_debug(
             rows=debug_rows,
             pack_chunk_ids=pack_chunk_ids,

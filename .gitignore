@@ -5,6 +5,11 @@ __pycache__/
 *.pyc
 *.pyo
 
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
 # Data (large / generated)
 data/raw/
 data/processed/
@@ -15,6 +20,16 @@ data/training/
 # Checkpoints
 checkpoints/
 checkpoints*/
+
+# Streamlit project state / generated project configs
+projects/
+configs/photon_*.yaml
+!configs/photon_600m_paper.yaml
+!configs/photon_long_context.yaml
+!configs/photon_small.yaml
+!configs/photon_test_minimal.yaml
+!configs/photon_tiny.yaml
+!configs/photon_tiny_recgen.yaml
 
 # Cache
 .cache/
@@ -29,6 +44,8 @@ reports/*.log
 reports/*.summary.json
 reports/institutional_generation_summary_*.json
 bench/reports/*.json
+reports/*_analysis.md
+reports/gate*_premerge.md
 
 # Issue #82: eval job outputs (streamlit app)
 reports/eval_runs/

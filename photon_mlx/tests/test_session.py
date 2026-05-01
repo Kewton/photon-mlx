@@ -1082,6 +1082,27 @@ class TestWorkingMemory:
         assert result.turn_id == 1
         assert result.question_text == "past1"
 
+    def test_find_relevant_past_turns_returns_matches_in_turn_order(self) -> None:
+        """Multiple PHOTON matches are selected by relevance, then returned by turn."""
+        session = PhotonSessionState(
+            "s1",
+            "repo",
+            "abc",
+            working_memory_cfg=WorkingMemoryConfig(
+                enabled=True, relevant_turn_threshold=0.7
+            ),
+        )
+        session.update(self._mk_state_vec([1.0, 0.0, 0.0, 0.0]), question_text="past1")
+        session.update(self._mk_state_vec([4.0, 3.0, 0.0, 0.0]), question_text="past2")
+        session.update(self._mk_state_vec([0.0, 1.0, 0.0, 0.0]), question_text="past3")
+        current = self._mk_state_vec([1.0, 0.0, 0.0, 0.0])
+        session.update(current, question_text="current")
+
+        results = session.find_relevant_past_turns(current, max_turns=2)
+
+        assert [turn.turn_id for turn in results] == [1, 2]
+        assert [turn.question_text for turn in results] == ["past1", "past2"]
+
     def test_find_relevant_past_turn_below_threshold(self) -> None:
         """T4: no past turn clears the threshold → None."""
         session = PhotonSessionState(

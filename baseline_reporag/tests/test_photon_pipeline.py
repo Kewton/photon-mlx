@@ -1085,6 +1085,8 @@ class TestPhotonQueryFlow:
         assert isinstance(result, QueryResult)
         assert result.drift_metrics is not None
         assert result.confidence is not None
+        gen_call = baseline_deps["generator"].generate.call_args
+        assert "max_new_tokens" not in gen_call.kwargs
 
     def test_query_fallback_to_baseline_on_safe_recgen(self):
         from baseline_reporag.ingestion.chunker import Chunk
@@ -1460,11 +1462,88 @@ class TestEvidencePruningTurn2:
             len(call_kwargs.args) >= 4 and call_kwargs.args[3] == 8
         )
 
-        # The build_evidence_pack call should use only the 8 pruned chunk IDs
-        # (the second get_many call is from build_evidence_pack with pruned IDs)
+        # The build_evidence_pack call should use only the 8 pruned chunk IDs.
+        # Later retrieval-debug construction also calls get_many with a wider
+        # set, so inspect all calls rather than assuming the final call is pack.
         assert len(call_log["get_many_calls"]) >= 2
-        pruned_ids_to_build = call_log["get_many_calls"][-1]
-        assert len(pruned_ids_to_build) <= 8
+        assert any(len(ids) <= 8 for ids in call_log["get_many_calls"])
+
+    def test_turn2_protects_ranked_chunks_then_adds_photon_selected_chunks(self):
+        """Split pruning keeps retrieval/reranker top N plus PHOTON top M."""
+        from baseline_reporag.ingestion.chunker import Chunk
+
+        cfg = _make_pruning_cfg()
+        cfg.inference.pruning_protected_top_n = 4
+        cfg.inference.pruning_photon_top_m = 4
+        pipeline, baseline_deps, photon_deps, mock_session, mock_results = (
+            _setup_pipeline_for_pruning(cfg, session_turns=1)
+        )
+
+        chunks = [
+            Chunk(
+                chunk_id=f"chunk_{i}",
+                repo_id="test-repo",
+                repo_commit="abc123",
+                rel_path=f"file{i}.py",
+                language="python",
+                start_line=1,
+                end_line=10,
+                content=f"def func_{i}(): pass",
+                symbols=[f"func_{i}"],
+                section_header="",
+                file_header="",
+            )
+            for i in range(16)
+        ]
+
+        def mock_get_many(ids):
+            by_id = {c.chunk_id: c for c in chunks}
+            return [by_id[cid] for cid in ids if cid in by_id]
+
+        baseline_deps["store"].get_many.side_effect = mock_get_many
+        expanded_ids = [f"chunk_{i}" for i in range(16)]
+        photon_deps["photon_inference"].prune_evidence.return_value = [
+            10,
+            11,
+            12,
+            13,
+        ]
+        captured_pack_ids: list[str] = []
+
+        def spy_build_evidence_pack(*args, **kwargs):
+            captured_pack_ids.extend(kwargs["chunk_ids"])
+            return build_evidence_pack(*args, **kwargs)
+
+        with (
+            patch(
+                "baseline_reporag.photon_pipeline.hybrid_search",
+                return_value=mock_results,
+            ),
+            patch(
+                "baseline_reporag.photon_pipeline.expand_with_graph",
+                return_value=_refs(expanded_ids),
+            ),
+            patch(
+                "baseline_reporag.photon_pipeline.build_evidence_pack",
+                side_effect=spy_build_evidence_pack,
+            ),
+        ):
+            baseline_deps["generator"].generate.return_value = "Pruned answer [C:1]"
+            pipeline.query("Follow-up question?", session_id="s1", repo_id="test-repo")
+
+        photon_deps["photon_inference"].prune_evidence.assert_called_once()
+        call = photon_deps["photon_inference"].prune_evidence.call_args
+        assert call.kwargs["max_chunks"] == 4
+        assert captured_pack_ids == [
+            "chunk_0",
+            "chunk_1",
+            "chunk_2",
+            "chunk_3",
+            "chunk_10",
+            "chunk_11",
+            "chunk_12",
+            "chunk_13",
+        ]
 
     def test_turn2_result_has_correct_answer(self):
         """Turn 2 with pruning still returns a valid QueryResult."""
@@ -1520,6 +1599,8 @@ class TestEvidencePruningTurn2:
         assert isinstance(result, QueryResult)
         assert result.drift_metrics is not None
         assert result.confidence is not None
+        gen_call = baseline_deps["generator"].generate.call_args
+        assert "max_new_tokens" not in gen_call.kwargs
 
 
 # ---------------------------------------------------------------------------
@@ -4163,6 +4244,192 @@ class TestPastTurnPinning:
         cached = pipeline._relevant_past_turn_cache["s1"]
         assert isinstance(cached, TurnState)
         assert cached.turn_id == 1
+
+    def test_related_past_questions_are_passed_to_generation(self) -> None:
+        from photon_mlx.session import TurnState
+
+        cfg = _make_pinning_cfg(enabled=False)
+        pipeline, baseline_deps, photon_deps, _ms, mock_results = (
+            _setup_pipeline_for_pinning(cfg, session_turns=2)
+        )
+        fake_session = MagicMock()
+        fake_session.current_state = MagicMock(name="current_state")
+        fake_session.find_relevant_past_turns.return_value = [
+            TurnState(turn_id=2, hierarchical_state=MagicMock()),
+            TurnState(turn_id=1, hierarchical_state=MagicMock()),
+        ]
+        photon_deps["photon_inference"]._sessions["s1"] = fake_session
+
+        from baseline_reporag.generation.prompt import build_messages as real_build
+
+        with patch(
+            "baseline_reporag.photon_pipeline.build_messages",
+            wraps=real_build,
+        ) as spy_build:
+            _run_query_with_mocks(pipeline, baseline_deps, photon_deps, mock_results)
+
+        fake_session.find_relevant_past_turns.assert_called_once_with(
+            fake_session.current_state,
+            max_turns=3,
+        )
+        assert spy_build.call_args.kwargs["related_questions"] == ["q1", "q2"]
+
+    def test_related_past_questions_fetch_and_pin_supplemental_evidence(self) -> None:
+        from baseline_reporag.ingestion.chunker import Chunk
+        from photon_mlx.session import TurnState
+
+        cfg = _make_pinning_cfg(enabled=False)
+        cfg.inference.related_past_questions_max = 1
+        cfg.inference.related_past_evidence_top_k = 2
+        pipeline, baseline_deps, photon_deps, _mock_session, mock_results = (
+            _setup_pipeline_for_pinning(cfg, session_turns=2)
+        )
+        fake_session = MagicMock()
+        fake_session.current_state = MagicMock(name="current_state")
+        fake_session.find_relevant_past_turns.return_value = [
+            TurnState(turn_id=1, hierarchical_state=MagicMock())
+        ]
+        photon_deps["photon_inference"]._sessions["s1"] = fake_session
+
+        current_ids = [f"chunk_{i}" for i in range(16)]
+        related_ids = ["related_1", "related_2"]
+        chunks = [
+            Chunk(
+                chunk_id=cid,
+                repo_id="test-repo",
+                repo_commit="abc123",
+                rel_path=f"{cid}.md",
+                language="markdown",
+                start_line=1,
+                end_line=10,
+                content=f"content for {cid}",
+                symbols=[],
+                section_header="",
+                file_header="",
+            )
+            for cid in current_ids + related_ids
+        ]
+        by_id = {c.chunk_id: c for c in chunks}
+        baseline_deps["store"].get_many.side_effect = lambda ids: [
+            by_id[cid] for cid in ids if cid in by_id
+        ]
+        baseline_deps["store"].get_neighbors.return_value = []
+        baseline_deps["generator"].generate.return_value = "answer [C:1]"
+
+        related_results = []
+        for i, cid in enumerate(related_ids):
+            r = MagicMock()
+            r.chunk_id = cid
+            r.score = 0.9 - i * 0.1
+            related_results.append(r)
+
+        captured_pinned_ids: list[list[str] | None] = []
+
+        def spy_build_evidence_pack(*args, **kwargs):
+            captured_pinned_ids.append(kwargs.get("additional_pinned_ids"))
+            return build_evidence_pack(*args, **kwargs)
+
+        with (
+            patch(
+                "baseline_reporag.photon_pipeline.hybrid_search",
+                side_effect=[mock_results, related_results],
+            ) as spy_search,
+            patch(
+                "baseline_reporag.photon_pipeline.expand_with_graph",
+                return_value=_refs(current_ids),
+            ),
+            patch(
+                "baseline_reporag.photon_pipeline.build_evidence_pack",
+                side_effect=spy_build_evidence_pack,
+            ),
+        ):
+            result = pipeline.query("2号との違いは?", session_id="s1", repo_id="test-repo")
+
+        assert spy_search.call_count == 2
+        assert spy_search.call_args_list[1].kwargs["query"] == "q1"
+        assert spy_search.call_args_list[1].kwargs["fused_top_k"] == 2
+        assert captured_pinned_ids[-1] == related_ids
+        related_rows = [
+            row for row in result.retrieval_debug or [] if row.source == "related_past"
+        ]
+        assert [row.chunk_id for row in related_rows] == related_ids
+        assert all(row.used for row in related_rows)
+
+    def test_related_past_evidence_protects_split_sibling_chunks(self) -> None:
+        from baseline_reporag.ingestion.chunker import Chunk
+        from photon_mlx.session import TurnState
+
+        cfg = _make_pinning_cfg(enabled=False)
+        cfg.inference.related_past_questions_max = 1
+        cfg.inference.related_past_evidence_top_k = 1
+        pipeline, baseline_deps, photon_deps, _mock_session, mock_results = (
+            _setup_pipeline_for_pinning(cfg, session_turns=2)
+        )
+        fake_session = MagicMock()
+        fake_session.current_state = MagicMock(name="current_state")
+        fake_session.find_relevant_past_turns.return_value = [
+            TurnState(turn_id=1, hierarchical_state=MagicMock())
+        ]
+        photon_deps["photon_inference"]._sessions["s1"] = fake_session
+
+        current_ids = [f"chunk_{i}" for i in range(16)]
+        sibling_part1 = "inst_test::doc.md::48-103#part1of2"
+        retrieved_part2 = "inst_test::doc.md::48-103#part2of2"
+        all_ids = current_ids + [sibling_part1, retrieved_part2]
+        chunks = [
+            Chunk(
+                chunk_id=cid,
+                repo_id="test-repo",
+                repo_commit="abc123",
+                rel_path="doc.md" if cid.startswith("inst_test::") else f"{cid}.md",
+                language="markdown",
+                start_line=48 if cid.startswith("inst_test::") else 1,
+                end_line=103 if cid.startswith("inst_test::") else 10,
+                content=f"content for {cid}",
+                symbols=[],
+                section_header="",
+                file_header="",
+            )
+            for cid in all_ids
+        ]
+        by_id = {c.chunk_id: c for c in chunks}
+        baseline_deps["store"].get_many.side_effect = lambda ids: [
+            by_id[cid] for cid in ids if cid in by_id
+        ]
+        baseline_deps["store"].get_neighbors.return_value = []
+        baseline_deps["generator"].generate.return_value = "answer [C:1]"
+
+        related_result = MagicMock()
+        related_result.chunk_id = retrieved_part2
+        related_result.score = 0.9
+        captured_pinned_ids: list[list[str] | None] = []
+
+        def spy_build_evidence_pack(*args, **kwargs):
+            captured_pinned_ids.append(kwargs.get("additional_pinned_ids"))
+            return build_evidence_pack(*args, **kwargs)
+
+        with (
+            patch(
+                "baseline_reporag.photon_pipeline.hybrid_search",
+                side_effect=[mock_results, [related_result]],
+            ),
+            patch(
+                "baseline_reporag.photon_pipeline.expand_with_graph",
+                return_value=_refs(current_ids),
+            ),
+            patch(
+                "baseline_reporag.photon_pipeline.build_evidence_pack",
+                side_effect=spy_build_evidence_pack,
+            ),
+        ):
+            result = pipeline.query("2号との違いは?", session_id="s1", repo_id="test-repo")
+
+        assert captured_pinned_ids[-1] == [retrieved_part2, sibling_part1]
+        by_source = {row.chunk_id: row.source for row in result.retrieval_debug or []}
+        assert by_source[retrieved_part2] == "related_past"
+        assert by_source[sibling_part1] == "related_past_neighbor"
+        used_ids = {row.chunk_id for row in result.retrieval_debug or [] if row.used}
+        assert {retrieved_part2, sibling_part1}.issubset(used_ids)
 
     def test_pinning_enabled_turn1_no_pin(self) -> None:
         """Turn 1 has no follow-up history; the pin read branch must be

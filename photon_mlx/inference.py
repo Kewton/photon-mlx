@@ -193,6 +193,7 @@ class PhotonInference:
         # paths live in the same semantic space (Issue #58).
         self.tokenizer = tokenizer
         self._sessions: dict[str, PhotonSessionState] = {}
+        self._last_prune_scores_by_session: dict[str, dict[str, float]] = {}
         # Pre-compute the chunk-aligned padding multiple once per inference
         # engine. cfg.hierarchy.chunk_sizes is treated as immutable across the
         # instance lifetime (DR3-001 / Risk R7).
@@ -715,6 +716,7 @@ class PhotonInference:
         self._validate_micro_batch_size(micro_batch_size)
 
         all_indices = list(range(len(chunk_texts)))
+        self._last_prune_scores_by_session[session_id] = {}
 
         # Structural early returns (§4.4 / DR1-008).
         if len(chunk_texts) == 0:
@@ -767,6 +769,12 @@ class PhotonInference:
                 exc,
             )
             return all_indices
+
+        self._last_prune_scores_by_session[session_id] = {
+            chunk_ids[idx]: float(score)
+            for idx, score in raw_scores
+            if 0 <= idx < len(chunk_ids)
+        }
 
         # Selection: sort by score desc, take top max_chunks, return indices
         # in ascending order.

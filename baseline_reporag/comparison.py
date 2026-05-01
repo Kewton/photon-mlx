@@ -2,7 +2,7 @@
 
 Public API:
     run_variant_with_pipeline — low-level: execute one pipeline variant, return VariantResult
-    compare                   — high-level: parallel baseline+PHOTON execution + delta
+    compare                   — high-level: sequential baseline+PHOTON execution + delta
 
 Private:
     _build_and_run — CLI/scripts wrapper: build pipeline from config_path, then delegate
@@ -10,7 +10,6 @@ Private:
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -31,6 +30,10 @@ class VariantResult:
     latency_retrieval_ms: float
     latency_generation_ms: float
     memory_peak_mb: float
+    generator_used: str | None = None
+    generator_fallback_reason: str | None = None
+    retrieval_debug: list[Any] | None = None
+    model_id: str | None = None
 
 
 @dataclass
@@ -71,6 +74,8 @@ def run_variant_with_pipeline(
     cached pipeline) and the CLI wrapper (_build_and_run) delegate here.
     """
     result = pipeline.query(question=question, session_id=session_id, repo_id=repo_id)
+    cfg = getattr(pipeline, "config", None) or getattr(pipeline, "cfg", None)
+    model_id = getattr(getattr(cfg, "model", None), "model_id", None)
     return VariantResult(
         variant_id=variant_id,
         config_path=config_path,
@@ -81,6 +86,10 @@ def run_variant_with_pipeline(
         latency_retrieval_ms=float(result.latency.retrieval_ms),
         latency_generation_ms=float(result.latency.generation_ms),
         memory_peak_mb=float(result.memory.peak_mb),
+        generator_used=getattr(result, "generator_used", None),
+        generator_fallback_reason=getattr(result, "generator_fallback_reason", None),
+        retrieval_debug=getattr(result, "retrieval_debug", None),
+        model_id=model_id,
     )
 
 
@@ -92,30 +101,26 @@ def compare(
     baseline_session_id: str,
     photon_session_id: str,
 ) -> ComparisonResult:
-    """Run baseline and PHOTON in parallel and return a ComparisonResult with delta.
+    """Run baseline and PHOTON and return a ComparisonResult with delta.
 
-    Uses ThreadPoolExecutor(max_workers=2).  Each thread only returns a
-    VariantResult dataclass — no session_state writes happen inside threads.
+    The two variants intentionally run sequentially. Running multiple MLX /
+    Metal-backed pipelines concurrently in the Streamlit process can abort
+    the whole process at the native command-buffer layer.
     """
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        f_baseline = executor.submit(
-            run_variant_with_pipeline,
-            baseline_pipeline,
-            question,
-            baseline_session_id,
-            repo_id,
-            "baseline",
-        )
-        f_photon = executor.submit(
-            run_variant_with_pipeline,
-            photon_pipeline,
-            question,
-            photon_session_id,
-            repo_id,
-            "photon",
-        )
-    b = f_baseline.result()
-    p = f_photon.result()
+    b = run_variant_with_pipeline(
+        baseline_pipeline,
+        question,
+        baseline_session_id,
+        repo_id,
+        "baseline",
+    )
+    p = run_variant_with_pipeline(
+        photon_pipeline,
+        question,
+        photon_session_id,
+        repo_id,
+        "photon",
+    )
     return ComparisonResult(
         question=question, baseline=b, photon=p, delta=compute_delta(b, p)
     )

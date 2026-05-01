@@ -22,6 +22,7 @@ def build_retrieval_debug_rows(
     rejected: list[RetrievalResult],
     expanded_refs: list[ExpandedChunkRef],
     store: ChunkStore,
+    photon_scores: dict[str, float] | None = None,
 ) -> list[RetrievalDebugRow]:
     """Build skeleton RetrievalDebugRow list from retrieval pipeline outputs.
 
@@ -37,6 +38,7 @@ def build_retrieval_debug_rows(
             if cross-encoder was not run on them).
         expanded_refs: ExpandedChunkRef list from expand_with_graph.
         store: ChunkStore for fetching rel_path / section metadata.
+        photon_scores: Optional PHOTON pruning score by chunk_id.
     """
     # Build score lookup from pre-rerank snapshot
     snapshot_map: dict[str, RetrievalResult] = {r.chunk_id: r for r in raw_snapshot}
@@ -89,6 +91,7 @@ def build_retrieval_debug_rows(
                 used=False,
                 citation_index=None,
                 source=source,
+                photon_score=(photon_scores or {}).get(cid),
             )
         )
 
@@ -120,6 +123,7 @@ def build_retrieval_debug_rows(
                 used=False,
                 citation_index=None,
                 source="retrieval",
+                photon_score=(photon_scores or {}).get(r.chunk_id),
             )
         )
 
@@ -160,6 +164,7 @@ def finalise_retrieval_debug(
                 used=used,
                 citation_index=citation_index,
                 source=row.source,
+                photon_score=row.photon_score,
             )
         )
     return finalised
