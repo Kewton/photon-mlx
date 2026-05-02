@@ -215,3 +215,20 @@ class TestBuildEvidencePackAdditionalPinnedIds:
         assert "c4" in requested_ids, (
             f"store.get_many must be invoked with c4 in the ID list: {requested_ids!r}"
         )
+
+    def test_evidence_pack_preserves_additional_pinned_order(self) -> None:
+        chunks = [_make_chunk(f"c{i}", content=f"chunk_{i}_body") for i in range(6)]
+        store = self._make_store(chunks)
+        session = SessionState(session_id="s1", repo_id="r", repo_commit="abc")
+
+        pack = build_evidence_pack(
+            chunk_ids=["c0", "c1", "c2"],
+            store=store,
+            session=session,
+            max_chunks=3,
+            max_tokens=16000,
+            recent_citation_turns=2,
+            additional_pinned_ids=["c4", "c2", "c5"],
+        )
+
+        assert [chunk.chunk_id for chunk in pack.chunks] == ["c4", "c2", "c5"]

@@ -34,6 +34,15 @@ class VariantResult:
     generator_fallback_reason: str | None = None
     retrieval_debug: list[Any] | None = None
     model_id: str | None = None
+    photon_pruning_applied: bool | None = None
+    photon_scoring_applied: bool | None = None
+    photon_scored_count: int | None = None
+    photon_scoring_mode: str | None = None
+    context_carryover_mode: str | None = None
+    context_carryover_reason: str | None = None
+    context_carryover_similarity: float | None = None
+    rewritten_query: str | None = None
+    topic_segment_id: int | None = None
 
 
 @dataclass
@@ -90,6 +99,19 @@ def run_variant_with_pipeline(
         generator_fallback_reason=getattr(result, "generator_fallback_reason", None),
         retrieval_debug=getattr(result, "retrieval_debug", None),
         model_id=model_id,
+        photon_pruning_applied=getattr(result, "photon_pruning_applied", None),
+        photon_scoring_applied=getattr(result, "photon_scoring_applied", None),
+        photon_scored_count=getattr(result, "photon_scored_count", None),
+        photon_scoring_mode=getattr(result, "photon_scoring_mode", None),
+        context_carryover_mode=getattr(result, "context_carryover_mode", None),
+        context_carryover_reason=getattr(result, "context_carryover_reason", None),
+        context_carryover_similarity=getattr(
+            result,
+            "context_carryover_similarity",
+            None,
+        ),
+        rewritten_query=getattr(result, "rewritten_query", None),
+        topic_segment_id=getattr(result, "topic_segment_id", None),
     )
 
 

@@ -45,6 +45,10 @@ def _make_mock_pipeline(
         ),
         memory=MemorySnapshot(peak_mb=peak_mb, current_mb=25.0),
         citation_postprocessed=False,
+        photon_pruning_applied=True,
+        photon_scoring_applied=True,
+        photon_scored_count=2,
+        photon_scoring_mode="session_state",
     )
     pipeline = MagicMock()
     pipeline.query.return_value = result
@@ -143,6 +147,10 @@ class TestRunVariantWithPipeline:
         assert result.generator_fallback_reason is None
         assert result.retrieval_debug == ["row"]
         assert result.model_id == "mlx-community/Qwen3.5-9B-MLX-4bit"
+        assert result.photon_pruning_applied is True
+        assert result.photon_scoring_applied is True
+        assert result.photon_scored_count == 2
+        assert result.photon_scoring_mode == "session_state"
 
 
 class TestComputeDelta:

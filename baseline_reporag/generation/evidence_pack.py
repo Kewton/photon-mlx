@@ -92,7 +92,19 @@ def build_evidence_pack(
     candidate_ids: set[str] = set(chunk_ids)
     if additional_pinned_ids:
         candidate_ids = candidate_ids | set(additional_pinned_ids)
-    ordered_ids = sorted(candidate_ids, key=priority)[:max_chunks]
+        ordered_pins = []
+        seen_pins: set[str] = set()
+        for cid in additional_pinned_ids:
+            if cid in seen_pins or cid not in candidate_ids:
+                continue
+            seen_pins.add(cid)
+            ordered_pins.append(cid)
+        ordered_ids = (
+            ordered_pins
+            + [cid for cid in sorted(candidate_ids, key=priority) if cid not in seen_pins]
+        )[:max_chunks]
+    else:
+        ordered_ids = sorted(candidate_ids, key=priority)[:max_chunks]
     chunks = store.get_many(ordered_ids)
 
     # Approximate token budget: 1 token ≈ 4 chars

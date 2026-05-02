@@ -23,6 +23,8 @@ def build_retrieval_debug_rows(
     expanded_refs: list[ExpandedChunkRef],
     store: ChunkStore,
     photon_scores: dict[str, float] | None = None,
+    photon_current_scores: dict[str, float] | None = None,
+    photon_session_scores: dict[str, float] | None = None,
 ) -> list[RetrievalDebugRow]:
     """Build skeleton RetrievalDebugRow list from retrieval pipeline outputs.
 
@@ -39,6 +41,8 @@ def build_retrieval_debug_rows(
         expanded_refs: ExpandedChunkRef list from expand_with_graph.
         store: ChunkStore for fetching rel_path / section metadata.
         photon_scores: Optional PHOTON pruning score by chunk_id.
+        photon_current_scores: Optional score against the current question only.
+        photon_session_scores: Optional score against the existing session state.
     """
     # Build score lookup from pre-rerank snapshot
     snapshot_map: dict[str, RetrievalResult] = {r.chunk_id: r for r in raw_snapshot}
@@ -92,6 +96,8 @@ def build_retrieval_debug_rows(
                 citation_index=None,
                 source=source,
                 photon_score=(photon_scores or {}).get(cid),
+                photon_current_score=(photon_current_scores or {}).get(cid),
+                photon_session_score=(photon_session_scores or {}).get(cid),
             )
         )
 
@@ -124,6 +130,8 @@ def build_retrieval_debug_rows(
                 citation_index=None,
                 source="retrieval",
                 photon_score=(photon_scores or {}).get(r.chunk_id),
+                photon_current_score=(photon_current_scores or {}).get(r.chunk_id),
+                photon_session_score=(photon_session_scores or {}).get(r.chunk_id),
             )
         )
 
@@ -165,6 +173,8 @@ def finalise_retrieval_debug(
                 citation_index=citation_index,
                 source=row.source,
                 photon_score=row.photon_score,
+                photon_current_score=row.photon_current_score,
+                photon_session_score=row.photon_session_score,
             )
         )
     return finalised
