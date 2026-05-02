@@ -7,10 +7,14 @@ from baseline_reporag.photon_pipeline import (
     _admit_photon_indices,
     _boost_carryover_with_photon_matches,
     _compose_evidence_frame_pins,
+    _dual_score_candidate_indices,
     _generation_history_text,
     _has_explicit_topic_switch_signal,
     _recent_questions_in_segment,
     _resolve_context_carryover,
+    _resolve_segment_memory,
+    _support_check_note,
+    _support_score_for_pack,
     _turn_decay,
 )
 
@@ -42,8 +46,9 @@ def test_context_carryover_weak_for_independent_topic_switch() -> None:
 
 def test_photon_related_turn_boosts_weak_carryover() -> None:
     session = _session_with_questions("セーフティネット保証4号の認定条件を教えて")
+    question = "創業直後の様式は？"
     decision = _resolve_context_carryover(
-        "創業して間もない場合はどの様式になりますか？",
+        question,
         session,
         enabled=True,
         rewrite_enabled=True,
@@ -52,7 +57,7 @@ def test_photon_related_turn_boosts_weak_carryover() -> None:
 
     boosted = _boost_carryover_with_photon_matches(
         decision,
-        "創業して間もない場合はどの様式になりますか？",
+        question,
         session,
         matches=[_PhotonCarryoverMatch(turn_id=1, score=0.91)],
         rewrite_enabled=True,
@@ -63,7 +68,7 @@ def test_photon_related_turn_boosts_weak_carryover() -> None:
     assert boosted.mode == "mixed"
     assert "photon_related_turn" in boosted.reason
     assert "セーフティネット保証4号" in boosted.query
-    assert "創業して間もない" in boosted.query
+    assert question in boosted.query
 
 
 def test_explicit_topic_switch_blocks_photon_carryover_boost() -> None:
@@ -103,6 +108,36 @@ def test_explicit_comparison_target_does_not_signal_topic_switch() -> None:
         "生産性向上・事業拡大融資と比べると？",
         ["起業家・創業支援融資の必要書類を教えて"],
     )
+
+
+def test_comparison_question_is_treated_as_followup() -> None:
+    session = _session_with_questions("起業家・創業支援融資の概要を教えて")
+
+    decision = _resolve_context_carryover(
+        "個人用と違う点だけ整理して",
+        session,
+        enabled=True,
+        rewrite_enabled=True,
+        rewrite_history_max=1,
+    )
+
+    assert decision.mode == "mixed"
+    assert "起業家・創業支援融資" in decision.query
+
+
+def test_conditional_question_is_treated_as_followup() -> None:
+    session = _session_with_questions("中小企業融資申込書には法人用と個人用がありますか？")
+
+    decision = _resolve_context_carryover(
+        "法人の場合に必要な記入項目を教えて",
+        session,
+        enabled=True,
+        rewrite_enabled=True,
+        rewrite_history_max=1,
+    )
+
+    assert decision.mode in {"mixed", "strong"}
+    assert "中小企業融資申込書" in decision.query
 
 
 def test_photon_related_turn_boost_keeps_stronger_lexical_decision() -> None:
@@ -236,6 +271,19 @@ def test_mixed_generation_history_keeps_recent_segment_turns_only() -> None:
     assert "recent same segment 2" in history
 
 
+def test_segment_memory_recovers_terse_followup_without_topic_terms() -> None:
+    decision = _resolve_segment_memory(
+        "必要書類は何ですか？",
+        ["葛飾区デジタル化支援事業費補助金の対象を教えて"],
+        rewrite_enabled=True,
+        rewrite_history_max=1,
+    )
+
+    assert decision.applied
+    assert "葛飾区デジタル化支援事業費補助金" in decision.query
+    assert "必要書類" in decision.query
+
+
 def test_turn_decay_reduces_older_context() -> None:
     assert _turn_decay(5, 4, 0.7) == 1.0
     assert _turn_decay(5, 3, 0.7) == 0.7
@@ -258,6 +306,51 @@ def test_admission_keeps_protected_and_filters_stale_photon_candidate() -> None:
     )
 
     assert admitted == [0, 2]
+
+
+def test_dual_score_pruning_prefers_current_support_over_stale_session_only() -> None:
+    selected = _dual_score_candidate_indices(
+        candidate_indices=[0, 1, 2, 3],
+        protected_indices=[0],
+        chunk_ids_for_scoring=["protected", "current", "stale", "balanced"],
+        retrieval_scores={
+            "protected": 1.0,
+            "current": 0.8,
+            "stale": 0.1,
+            "balanced": 0.5,
+        },
+        current_scores={"current": 0.9, "stale": 0.1, "balanced": 0.5},
+        session_scores={"current": 0.1, "stale": 0.95, "balanced": 0.5},
+        carryover_mode="weak",
+        max_extra=2,
+    )
+
+    assert selected == [0, 1, 3]
+
+
+class _Chunk:
+    def __init__(self, chunk_id: str, content: str) -> None:
+        self.chunk_id = chunk_id
+        self.content = content
+
+
+def test_support_score_uses_photon_current_score_when_available() -> None:
+    score = _support_score_for_pack(
+        question="資金計画は必要ですか？",
+        pack_chunks=[_Chunk("c1", "unrelated"), _Chunk("c2", "資金計画を記載します")],
+        retrieval_scores={"c1": 0.1, "c2": 0.2},
+        current_scores={"c2": 0.88},
+        session_scores={"c1": 0.9},
+    )
+
+    assert score == 0.88
+
+
+def test_support_check_note_requires_explicit_support_for_inclusion_claims() -> None:
+    note = _support_check_note(0.82, guard_active=False)
+
+    assert "named case, condition, item, or activity" in note
+    assert "etc." in note
 
 
 def test_evidence_frame_pins_prioritise_current_query_support() -> None:

@@ -94,6 +94,11 @@ class QueryResult:
     context_carryover_similarity: float | None = None
     rewritten_query: str | None = None
     topic_segment_id: int | None = None
+    segment_memory_applied: bool | None = None
+    segment_memory_score: float | None = None
+    dual_score_pruning_applied: bool | None = None
+    support_score: float | None = None
+    support_guard_active: bool | None = None
     # Issue #177: refusal score (0.0 = answer, 1.0 = refusal) and matched phrases.
     # None on pre-#177 historical rows or when not yet computed.
     refusal_score: float | None = None

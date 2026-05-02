@@ -58,6 +58,9 @@ _ADMISSION_MIN_CURRENT_SCORE = 0.05
 _REWRITE_HISTORY_MAX = 2
 _PHOTON_CARRYOVER_MAX_TURNS = 2
 _PHOTON_CARRYOVER_MIN_SIMILARITY = 0.75
+_SEGMENT_MEMORY_FEATURE_MAX = 24
+_SEGMENT_MEMORY_MIN_SIMILARITY = 0.06
+_SUPPORT_GUARD_THRESHOLD = 0.48
 _SPLIT_PART_RE = re.compile(r"^(?P<base>.+)#part(?P<idx>\d+)of(?P<total>\d+)$")
 _ASCII_TOKEN_RE = re.compile(r"[a-z0-9_]{2,}", re.IGNORECASE)
 _CJK_RE = re.compile(r"[\u3040-\u30ff\u3400-\u9fff]+")
@@ -79,6 +82,7 @@ _TOPIC_ANCHOR_NOISE = (
 _COMPARISON_MARKERS = (
     "比較",
     "違い",
+    "違う",
     "比べ",
     "差分",
     "同じ",
@@ -97,6 +101,7 @@ _FOLLOW_UP_MARKERS = (
     "さっき",
     "先ほど",
     "先程",
+    "場合",
     "同じ",
     "違い",
     "比較",
@@ -144,6 +149,14 @@ class _TopicSegmentState:
 class _PhotonCarryoverMatch:
     turn_id: int
     score: float
+
+
+@dataclass(frozen=True)
+class _SegmentMemoryDecision:
+    applied: bool
+    score: float
+    reason: str
+    query: str
 
 
 @lru_cache(maxsize=1)
@@ -340,7 +353,9 @@ def _feature_overlap(a: str, b: str) -> float:
 
 def _has_follow_up_marker(question: str) -> bool:
     q = _normalise_text(question)
-    return any(marker.casefold() in q for marker in _FOLLOW_UP_MARKERS)
+    return any(marker.casefold() in q for marker in _FOLLOW_UP_MARKERS) or any(
+        marker.casefold() in q for marker in _COMPARISON_MARKERS
+    )
 
 
 def _has_comparison_marker(question: str) -> bool:
@@ -582,6 +597,37 @@ def _boost_carryover_with_photon_matches(
     )
 
 
+def _resolve_segment_memory(
+    question: str,
+    segment_questions: list[str],
+    *,
+    rewrite_enabled: bool,
+    rewrite_history_max: int,
+) -> _SegmentMemoryDecision:
+    """Recover the active segment for terse follow-ups without entity rules.
+
+    This intentionally uses only generic signals: current-query feature count,
+    overlap with recent segment questions, and recency.  It avoids hard-coded
+    business terms, document names, or field labels.
+    """
+    if not segment_questions:
+        return _SegmentMemoryDecision(False, 0.0, "no_segment_questions", question)
+    if _has_explicit_topic_switch_signal(question, segment_questions):
+        return _SegmentMemoryDecision(False, 0.0, "explicit_topic_switch", question)
+
+    feature_count = len(_text_features(question))
+    similarity = max((_feature_overlap(question, prev) for prev in segment_questions), default=0.0)
+    marker = _has_follow_up_marker(question)
+    short_followup = feature_count <= _SEGMENT_MEMORY_FEATURE_MAX
+    if not marker and not short_followup and similarity < _SEGMENT_MEMORY_MIN_SIMILARITY:
+        return _SegmentMemoryDecision(False, similarity, "insufficient_signal", question)
+
+    context = " ".join(segment_questions[-max(1, rewrite_history_max) :])
+    rewritten = f"{context} {question}" if rewrite_enabled and context else question
+    reason = "segment_memory_marker" if marker else "segment_memory_recent"
+    return _SegmentMemoryDecision(True, similarity, reason, rewritten)
+
+
 def _turn_decay(current_turn_id: int, past_turn_id: int, decay: float) -> float:
     distance = max(1, current_turn_id - past_turn_id)
     decay = min(1.0, max(0.0, float(decay)))
@@ -669,6 +715,90 @@ def _admit_photon_indices(
         if max(retrieval_score, overlap) >= min_current_score:
             admitted.append(idx)
     return admitted
+
+
+def _dual_score_candidate_indices(
+    *,
+    candidate_indices: list[int],
+    protected_indices: list[int],
+    chunk_ids_for_scoring: list[str],
+    retrieval_scores: dict[str, float],
+    current_scores: dict[str, float],
+    session_scores: dict[str, float],
+    carryover_mode: str,
+    max_extra: int,
+) -> list[int]:
+    """Select non-protected candidates by retrieval + PHOTON current/session scores."""
+    protected_set = {
+        idx for idx in protected_indices if 0 <= idx < len(chunk_ids_for_scoring)
+    }
+    max_extra = max(0, int(max_extra))
+
+    scored: list[tuple[float, int]] = []
+    for idx in candidate_indices:
+        if idx in protected_set or not (0 <= idx < len(chunk_ids_for_scoring)):
+            continue
+        cid = chunk_ids_for_scoring[idx]
+        retrieval = retrieval_scores.get(cid, 0.0)
+        current = current_scores.get(cid, 0.0)
+        session = session_scores.get(cid, 0.0)
+        stale_gap = max(0.0, session - current)
+        if carryover_mode in {"strong", "mixed"}:
+            score = (0.45 * retrieval) + (0.35 * current) + (0.20 * session)
+            score -= 0.12 * stale_gap
+        else:
+            score = (0.60 * retrieval) + (0.40 * current)
+            score -= 0.30 * stale_gap
+        scored.append((score, idx))
+
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    return list(protected_indices) + [idx for _score, idx in scored[:max_extra]]
+
+
+def _support_score_for_pack(
+    *,
+    question: str,
+    pack_chunks: list[Any],
+    retrieval_scores: dict[str, float],
+    current_scores: dict[str, float],
+    session_scores: dict[str, float],
+) -> float:
+    """Estimate how directly the selected evidence supports this turn."""
+    scores: list[float] = []
+    photon_scored = bool(current_scores or session_scores)
+    for chunk in pack_chunks:
+        cid = str(getattr(chunk, "chunk_id", ""))
+        content = str(getattr(chunk, "content", ""))
+        if not cid:
+            continue
+        scores.append(
+            max(
+                (0.35 if photon_scored else 1.0) * retrieval_scores.get(cid, 0.0),
+                current_scores.get(cid, 0.0),
+                0.5 * session_scores.get(cid, 0.0),
+                _feature_overlap(question, content),
+            )
+        )
+    return max(scores, default=0.0)
+
+
+def _support_check_note(support_score: float, *, guard_active: bool) -> str:
+    base = (
+        "## Support Check\n"
+        f"- Evidence support score: {support_score:.3f}\n"
+        "- Before answering, verify that each claim is directly supported by the cited chunks.\n"
+        "- If the evidence only partially supports a claim, state the limitation instead of filling gaps.\n"
+        "- For questions about whether a named case, condition, item, or activity is included, "
+        "do not treat broad examples, open-ended wording, or \"etc.\" as sufficient support unless "
+        "the named item or an equivalent category is explicitly grounded in the evidence."
+    )
+    if guard_active:
+        return (
+            base
+            + "\n- The support score is low. Prefer a cautious answer and say "
+            "「根拠が不足しています」 for unsupported requested details."
+        )
+    return base
 
 
 def _dedupe_preserve_order(values: list[str]) -> list[str]:
@@ -2015,6 +2145,33 @@ class PhotonRAGPipeline:
                 rewrite_history_max=rewrite_history_max,
             )
         current_segment_id = segment_state.current_segment_id
+        segment_memory = _SegmentMemoryDecision(False, 0.0, "not_considered", question)
+        if is_follow_up and initial_carryover.mode == "weak" and not explicit_topic_switch:
+            previous_segment_questions = _recent_questions_in_segment(
+                session,
+                segment_state,
+                current_segment_id,
+                max(1, rewrite_history_max),
+            )
+            if not previous_segment_questions:
+                previous_segment_questions = _recent_questions(
+                    session,
+                    max(1, rewrite_history_max),
+                )
+            segment_memory = _resolve_segment_memory(
+                question,
+                previous_segment_questions,
+                rewrite_enabled=context_rewrite_enabled,
+                rewrite_history_max=rewrite_history_max,
+            )
+            if segment_memory.applied:
+                initial_carryover = _CarryoverDecision(
+                    mode="mixed",
+                    query=segment_memory.query,
+                    similarity=max(initial_carryover.similarity, segment_memory.score),
+                    marker=initial_carryover.marker or _has_follow_up_marker(question),
+                    reason=f"{initial_carryover.reason}+{segment_memory.reason}",
+                )
         if is_follow_up and initial_carryover.mode == "weak":
             current_segment_id += 1
             segment_state.current_segment_id = current_segment_id
@@ -2040,6 +2197,30 @@ class PhotonRAGPipeline:
             rewrite_enabled=context_rewrite_enabled,
             rewrite_history_max=rewrite_history_max,
         )
+        if (
+            is_follow_up
+            and carryover.mode == "weak"
+            and not explicit_topic_switch
+            and not segment_memory.applied
+        ):
+            memory_questions = segment_questions or _recent_questions(
+                session,
+                max(1, rewrite_history_max),
+            )
+            segment_memory = _resolve_segment_memory(
+                question,
+                memory_questions,
+                rewrite_enabled=context_rewrite_enabled,
+                rewrite_history_max=rewrite_history_max,
+            )
+        if segment_memory.applied and carryover.mode == "weak":
+            carryover = _CarryoverDecision(
+                mode="mixed",
+                query=segment_memory.query,
+                similarity=max(carryover.similarity, segment_memory.score),
+                marker=carryover.marker or _has_follow_up_marker(question),
+                reason=f"{carryover.reason}+{segment_memory.reason}",
+            )
         if is_follow_up and initial_carryover.mode == "weak":
             carryover = _CarryoverDecision(
                 mode="weak",
@@ -2226,6 +2407,7 @@ class PhotonRAGPipeline:
         photon_session_score_map: dict[str, float] = {}
         photon_pruning_applied = bool(do_pass1 or do_pass2plus)
         photon_scoring_mode: str | None = None
+        dual_score_pruning_applied = False
         current_query_frame_ids: list[str] = []
         if do_pass1 or do_pass2plus:
             chunks_for_scoring = bl.store.get_many(expanded_ids)
@@ -2285,27 +2467,26 @@ class PhotonRAGPipeline:
                     for idx in protected_indices
                     if 0 <= idx < len(chunk_ids_for_scoring)
                 ]
-                valid_photon_indices = [
-                    idx
-                    for idx in selected_indices
-                    if 0 <= idx < len(chunk_ids_for_scoring)
-                ]
                 retrieval_scores = _normalised_score_map(list(raw_snapshot) + list(raw))
-                admitted_photon_indices = _admit_photon_indices(
-                    candidate_indices=valid_photon_indices,
-                    protected_indices=protected_indices,
-                    chunk_ids_for_scoring=chunk_ids_for_scoring,
-                    chunk_texts=chunk_texts,
-                    retrieval_scores=retrieval_scores,
-                    query=retrieval_query,
-                    min_current_score=admission_min_current_score,
-                )
-                selected_indices = _merge_protected_and_photon_indices(
-                    ranked_chunk_ids=ranked_chunk_ids,
-                    chunk_ids_for_scoring=chunk_ids_for_scoring,
-                    photon_indices=admitted_photon_indices,
-                    protected_top_n=protected_top_n,
-                )
+                if photon_top_m > 0:
+                    selected_indices = _dual_score_candidate_indices(
+                        candidate_indices=list(range(len(chunk_ids_for_scoring))),
+                        protected_indices=protected_indices,
+                        chunk_ids_for_scoring=chunk_ids_for_scoring,
+                        retrieval_scores=retrieval_scores,
+                        current_scores=photon_current_score_map,
+                        session_scores=photon_session_score_map,
+                        carryover_mode=carryover.mode,
+                        max_extra=photon_top_m,
+                    )
+                    dual_score_pruning_applied = True
+                else:
+                    selected_indices = _merge_protected_and_photon_indices(
+                        ranked_chunk_ids=ranked_chunk_ids,
+                        chunk_ids_for_scoring=chunk_ids_for_scoring,
+                        photon_indices=[],
+                        protected_top_n=protected_top_n,
+                    )
             else:
                 scoring_max_chunks = pass2_top_k if do_pass1 else pruned_max_chunks
                 with prof.phase("pass1_scoring" if do_pass1 else "evidence_pruning"):
@@ -2646,6 +2827,16 @@ class PhotonRAGPipeline:
                     else:
                         self._relevant_past_turn_cache.pop(photon_session_id, None)
 
+        retrieval_support_scores = _normalised_score_map(list(raw_snapshot) + list(raw))
+        support_score = _support_score_for_pack(
+            question=question,
+            pack_chunks=list(pack.chunks),
+            retrieval_scores=retrieval_support_scores,
+            current_scores=photon_current_score_map,
+            session_scores=photon_session_score_map,
+        )
+        support_guard_active = support_score < _SUPPORT_GUARD_THRESHOLD
+
         # --- Generation (Issue #62 Phase 1: opt-in PHOTON single-path) ---
         # DR-62-001 / DR4-003: strict bool validation for the opt-in flag.
         raw_photon_gen_enabled = (
@@ -2677,6 +2868,14 @@ class PhotonRAGPipeline:
 
         with prof.phase("generation"):
             evidence_text = pack.format_for_prompt()
+            evidence_text = (
+                _support_check_note(
+                    support_score,
+                    guard_active=support_guard_active,
+                )
+                + "\n\n"
+                + evidence_text
+            )
             is_first_turn = len(session.turns) == 0
             if is_first_turn:
                 evidence_text = f"{_EVIDENCE_HEADER}\n\n{evidence_text}"
@@ -2812,6 +3011,11 @@ class PhotonRAGPipeline:
                 "context_carryover_similarity": carryover.similarity,
                 "rewritten_query": retrieval_query if retrieval_query != question else None,
                 "topic_segment_id": current_segment_id,
+                "segment_memory_applied": segment_memory.applied,
+                "segment_memory_score": segment_memory.score,
+                "dual_score_pruning_applied": dual_score_pruning_applied,
+                "support_score": support_score,
+                "support_guard_active": support_guard_active,
                 "photon_carryover_applied": bool(photon_carryover_matches),
                 "photon_carryover_turn_ids": [
                     match.turn_id for match in photon_carryover_matches
@@ -2857,6 +3061,11 @@ class PhotonRAGPipeline:
             context_carryover_similarity=carryover.similarity,
             rewritten_query=retrieval_query if retrieval_query != question else None,
             topic_segment_id=current_segment_id,
+            segment_memory_applied=segment_memory.applied,
+            segment_memory_score=segment_memory.score,
+            dual_score_pruning_applied=dual_score_pruning_applied,
+            support_score=support_score,
+            support_guard_active=support_guard_active,
             refusal_score=r_score,
             refusal_matches=r_matches,
         )
