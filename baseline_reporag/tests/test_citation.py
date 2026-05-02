@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from baseline_reporag.citation import (
+    apply_claim_support_guard,
+    normalise_citation_markers,
     compute_refusal_score,
     is_refusal_answer,
     resolve_citations,
@@ -62,6 +64,20 @@ class TestResolveCitations:
         assert 5 in result.wrong_citation_indices  # [C:5] is invalid
         assert result.no_citation is False
 
+    def test_resolve_citations_accepts_spacing_and_bracket_variants(self) -> None:
+        pack = _make_pack(3)
+        answer = "See [ C:1 ] and 【C：3】."
+        result = resolve_citations(answer, pack)
+        assert result.cited_chunk_ids == ["chunk_0", "chunk_2"]
+        assert result.no_citation is False
+
+
+class TestNormaliseCitationMarkers:
+    def test_normalises_supported_marker_variants(self) -> None:
+        answer = "See [ C:1 ], 【C：2】, and ［ C:3 ］."
+
+        assert normalise_citation_markers(answer) == "See [C:1], [C:2], and [C:3]."
+
 
 class TestEchoBackResistance:
     """_EVIDENCE_HEADER の echo-back 耐性を検証する。"""
@@ -122,6 +138,9 @@ class TestIsRefusalAnswer:
 
     def test_empty_string_is_not_refusal(self) -> None:
         assert is_refusal_answer("") is False
+
+    def test_detects_kakunin_dekimasen(self) -> None:
+        assert is_refusal_answer("文書からは確認できません。") is True
 
 
 class TestResolveCitationsRefusalFlag:
@@ -195,3 +214,65 @@ class TestComputeRefusalScore:
     def test_returns_list_type(self) -> None:
         _, matches = compute_refusal_score("任意の文字列")
         assert isinstance(matches, list)
+
+
+class TestApplyClaimSupportGuard:
+    def test_replaces_unsupported_affirmative_inclusion_answer(self) -> None:
+        chunks = [
+            _make_chunk(
+                "chunk_0",
+                rel_path="commerce.md",
+            )
+        ]
+        chunks[0].content = "今期の主な事業概要: 共同売出・イベント等"
+        pack = EvidencePack(chunks=chunks, chunk_indices={"chunk_0": 1})
+        answer = "はい、オンライン販売も対象に含まれます [C:1]。"
+        citation = resolve_citations(answer, pack)
+
+        guarded_answer, guarded_citation, guard = apply_claim_support_guard(
+            question="オンライン販売だけでも対象になりますか？",
+            answer=answer,
+            pack=pack,
+            citation=citation,
+        )
+
+        assert guard.applied is True
+        assert guard.reason == "unsupported_affirmative_inclusion_claim"
+        assert guard.unsupported_terms == ["オンライン販売"]
+        assert "確認できません" in guarded_answer
+        assert guarded_citation.cited_chunk_ids == ["chunk_0"]
+
+    def test_keeps_affirmative_answer_when_named_condition_is_in_evidence(self) -> None:
+        chunks = [_make_chunk("chunk_0", rel_path="commerce.md")]
+        chunks[0].content = "オンライン販売を対象に含みます。"
+        pack = EvidencePack(chunks=chunks, chunk_indices={"chunk_0": 1})
+        answer = "はい、オンライン販売も対象に含まれます [C:1]。"
+        citation = resolve_citations(answer, pack)
+
+        guarded_answer, guarded_citation, guard = apply_claim_support_guard(
+            question="オンライン販売だけでも対象になりますか？",
+            answer=answer,
+            pack=pack,
+            citation=citation,
+        )
+
+        assert guard.applied is False
+        assert guarded_answer == answer
+        assert guarded_citation.cited_chunk_ids == ["chunk_0"]
+
+    def test_does_not_guard_non_inclusion_questions(self) -> None:
+        chunks = [_make_chunk("chunk_0", rel_path="forms.md")]
+        chunks[0].content = "法人名、代表者名、本店所在地を記入します。"
+        pack = EvidencePack(chunks=chunks, chunk_indices={"chunk_0": 1})
+        answer = "法人の場合は法人名などを記入します [C:1]。"
+        citation = resolve_citations(answer, pack)
+
+        guarded_answer, _guarded_citation, guard = apply_claim_support_guard(
+            question="法人の場合に必要な記入項目を教えて",
+            answer=answer,
+            pack=pack,
+            citation=citation,
+        )
+
+        assert guard.applied is False
+        assert guarded_answer == answer

@@ -96,12 +96,38 @@ streamlit run app/photon_app.py --server.port 8501
 
 3. **RAG プロジェクト登録**
    - 作成済みの `repo_id` を選択
-   - multi-turn variant を使う場合は作成済み checkpoint を選択
-   - 必要なら advanced settings で YAML を生成する
+   - `Config ファイル` には baseline 側の YAML を選択
+     - 通常のコード repo: `configs/baseline.yaml`
+     - Markdown / 制度文書 corpus: `configs/institutional_docs.yaml`
+   - PHOTON を使う場合は `PHOTON モデル (checkpoint)` を選択し、PHOTON settings から PHOTON 側 YAML を生成
+   - 回答生成モデル、temperature、retrieval/reranker 上位保護 N 件、PHOTON score 選別 M 件、関連過去質問/evidence 件数を必要に応じて設定
    - `登録`
 
 4. **チャット**
-   - 登録したプロジェクトを選び、質問して Streamlit 上で回答・citation・drift 表示を確認する
+   - 登録したプロジェクトを選び、質問して Streamlit 上で回答、citation、Retrieval debug、PHOTON score、drift 表示を確認する
+   - 比較モードを使う場合は、baseline 側 config と PHOTON 側 config が別々に登録されている必要がある
+
+#### Streamlit での比較モード
+
+比較モードでは、同じ質問を baseline pipeline と PHOTON pipeline に投げ、回答、引用、メトリクス、Retrieval debug をターンごとに比較します。
+
+登録時の考え方:
+
+| 項目 | 選ぶもの |
+|---|---|
+| Config ファイル | baseline 側 YAML。例: `configs/baseline.yaml` または `configs/institutional_docs.yaml` |
+| PHOTON config | `model.provider: photon` の YAML。例: PHOTON settings で生成した `projects/<project_name>/photon.yaml` |
+| 回答生成モデル | 既定は `mlx-community/Qwen3.5-9B-MLX-4bit` |
+| Temperature | 既定は `0.0` |
+| retrieval/reranker 上位保護 N 件 | 既定は `4` |
+| PHOTON score 選別 M 件 | 既定は `4` |
+
+比較結果では、以下を確認します。
+
+- **回答差分**: baseline と PHOTON の回答内容の違い
+- **回答中に引用マーカーとして使われたチャンク差分**: 実際に回答本文で `[C:N]` として使われた chunk の差分
+- **Retrieval debug 比較**: `source`, `PHOTON score`, `PHOTON current`, `PHOTON session`, `Used`, `Citation` の違い
+- **PHOTON の効き方**: PHOTON score が付いた件数、除外された候補、working memory 由来の根拠
 
 #### 3. Streamlit で作成したモデルを CLI から使う
 
@@ -277,6 +303,8 @@ project-root/
 - **運用品質**: P50 / P90 latency、memory peak、fallback rate
 - **説明可能性**: retrieval debug、引用差分、比較メトリクス
 
+`workspace/テストシナリオ2.md` を使った baseline vs PHOTON の再現可能なスコア評価は [Evaluation guide](docs/evaluation.md) を参照してください。
+
 ## ライセンス
 
 このリポジトリのコードとドキュメントは MIT License で公開します。詳細は [LICENSE](LICENSE) を参照してください。
@@ -289,6 +317,7 @@ project-root/
 - [Development notes](docs/development_notes.md): 開発モード、評価観点、Gate、Definition of Done
 - [Release checklist](docs/release_checklist.md): MIT MVP リリース前の確認項目
 - [Deployment guide](docs/deployment.md): checkpoint 配布とデプロイ運用
+- [Evaluation guide](docs/evaluation.md): multi-turn シナリオ評価とスコア化
 - [Playground guide](docs/playground.md): ローカル検証の補足
 - [Troubleshooting](docs/troubleshooting.md): エラー時の確認ポイント
 - [Tutorial](docs/tutorial.md): 操作手順の補足

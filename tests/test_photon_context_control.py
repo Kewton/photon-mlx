@@ -10,7 +10,9 @@ from baseline_reporag.photon_pipeline import (
     _dual_score_candidate_indices,
     _generation_history_text,
     _has_explicit_topic_switch_signal,
+    _chunk_id_audit_rows,
     _recent_questions_in_segment,
+    _retrieval_result_audit_rows,
     _resolve_context_carryover,
     _resolve_segment_memory,
     _support_check_note,
@@ -329,9 +331,17 @@ def test_dual_score_pruning_prefers_current_support_over_stale_session_only() ->
 
 
 class _Chunk:
-    def __init__(self, chunk_id: str, content: str) -> None:
+    def __init__(
+        self,
+        chunk_id: str,
+        content: str = "",
+        rel_path: str = "",
+        section_header: str = "",
+    ) -> None:
         self.chunk_id = chunk_id
         self.content = content
+        self.rel_path = rel_path
+        self.section_header = section_header
 
 
 def test_support_score_uses_photon_current_score_when_available() -> None:
@@ -351,6 +361,60 @@ def test_support_check_note_requires_explicit_support_for_inclusion_claims() -> 
 
     assert "named case, condition, item, or activity" in note
     assert "etc." in note
+
+
+class _Store:
+    def __init__(self, chunks: list[_Chunk]) -> None:
+        self._chunks = {chunk.chunk_id: chunk for chunk in chunks}
+
+    def get_many(self, chunk_ids: list[str]) -> list[_Chunk]:
+        return [self._chunks[cid] for cid in chunk_ids if cid in self._chunks]
+
+
+class _Result:
+    def __init__(self, chunk_id: str, score: float) -> None:
+        self.chunk_id = chunk_id
+        self.score = score
+        self.lexical_score = score / 2
+        self.embedding_score = score / 3
+        self.reranker_score = None
+
+
+def test_retrieval_audit_rows_include_stage_rank_scores_and_metadata() -> None:
+    rows = _retrieval_result_audit_rows(
+        [_Result("c1", 0.9)],
+        store=_Store([_Chunk("c1", rel_path="docs/a.md", section_header="A")]),
+    )
+
+    assert rows == [
+        {
+            "rank": 1,
+            "chunk_id": "c1",
+            "rel_path": "docs/a.md",
+            "section": "A",
+            "score": 0.9,
+            "lexical_score": 0.45,
+            "embedding_score": 0.3,
+            "reranker_score": None,
+        }
+    ]
+
+
+def test_chunk_id_audit_rows_mark_source_and_citation() -> None:
+    rows = _chunk_id_audit_rows(
+        ["c1", "c2"],
+        store=_Store([
+            _Chunk("c1", rel_path="docs/a.md", section_header="A"),
+            _Chunk("c2", rel_path="docs/b.md", section_header="B"),
+        ]),
+        source_map={"c2": "neighbor"},
+        cited_chunk_ids=["c2"],
+    )
+
+    assert rows[0]["source"] is None
+    assert rows[0]["cited"] is False
+    assert rows[1]["source"] == "neighbor"
+    assert rows[1]["cited"] is True
 
 
 def test_evidence_frame_pins_prioritise_current_query_support() -> None:

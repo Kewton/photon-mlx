@@ -28,6 +28,28 @@ _NOISE_PATTERNS: tuple[str, ...] = (
 )
 
 
+def _format_passage_for_rerank(chunk: object, max_chars: int = 600) -> str:
+    """Include stable document metadata in the reranker passage.
+
+    BM25/embedding indexes already include path and section metadata, but the
+    cross-encoder reranker used only raw content.  That lets generic chunks
+    such as "required documents" outrank the correct numbered form when the
+    discriminating signal lives in the filename or heading.  The format stays
+    domain-agnostic: path, section, then body.
+    """
+    rel_path = str(getattr(chunk, "rel_path", "") or "")
+    section = str(getattr(chunk, "section_header", "") or "")
+    content = str(getattr(chunk, "content", "") or "")
+    parts: list[str] = []
+    if rel_path:
+        parts.append(f"Document path: {rel_path}")
+    if section:
+        parts.append(f"Section: {section}")
+    parts.append("Content:")
+    parts.append(content[:max_chars])
+    return "\n".join(parts)
+
+
 class CrossEncoderReranker:
     """Wraps sentence-transformers CrossEncoder for passage reranking.
 
@@ -94,7 +116,10 @@ class CrossEncoderReranker:
         scoring_query = rerank_query if rerank_query else query
 
         chunks = store.get_many([r.chunk_id for r in clean])
-        content_map = {c.chunk_id: c.content[:600] for c in chunks}
+        content_map = {
+            c.chunk_id: _format_passage_for_rerank(c)
+            for c in chunks
+        }
 
         pairs = [(scoring_query, content_map.get(r.chunk_id, "")) for r in clean]
         scores: list[float] = self._model.predict(pairs).tolist()
@@ -145,7 +170,10 @@ class CrossEncoderReranker:
         scoring_query = rerank_query if rerank_query else query
 
         chunks = store.get_many([r.chunk_id for r in clean])
-        content_map = {c.chunk_id: c.content[:600] for c in chunks}
+        content_map = {
+            c.chunk_id: _format_passage_for_rerank(c)
+            for c in chunks
+        }
 
         pairs = [(scoring_query, content_map.get(r.chunk_id, "")) for r in clean]
         scores: list[float] = self._model.predict(pairs).tolist()

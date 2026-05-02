@@ -22,7 +22,13 @@ from math import prod
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from .citation import compute_refusal_score, resolve_citations
+from .citation import (
+    apply_claim_support_guard,
+    compute_refusal_score,
+    normalise_citation_markers,
+    resolve_citations,
+)
+from .citation_eligibility import apply_citation_budget_rerank
 from .checkpoints import maybe_download_checkpoint
 from .config import Config
 from .generation.evidence_pack import build_evidence_pack
@@ -799,6 +805,62 @@ def _support_check_note(support_score: float, *, guard_active: bool) -> str:
             "「根拠が不足しています」 for unsupported requested details."
         )
     return base
+
+
+def _retrieval_result_audit_rows(
+    results: list[Any],
+    *,
+    store: Any,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    ids = [str(getattr(result, "chunk_id", "")) for result in results[:limit]]
+    chunks = store.get_many([cid for cid in ids if cid])
+    chunk_map = {chunk.chunk_id: chunk for chunk in chunks}
+    rows: list[dict[str, Any]] = []
+    for rank, result in enumerate(results[:limit], start=1):
+        cid = str(getattr(result, "chunk_id", ""))
+        chunk = chunk_map.get(cid)
+        rows.append(
+            {
+                "rank": rank,
+                "chunk_id": cid,
+                "rel_path": getattr(chunk, "rel_path", None),
+                "section": getattr(chunk, "section_header", None),
+                "score": getattr(result, "score", None),
+                "lexical_score": getattr(result, "lexical_score", None),
+                "embedding_score": getattr(result, "embedding_score", None),
+                "reranker_score": getattr(result, "reranker_score", None),
+            }
+        )
+    return rows
+
+
+def _chunk_id_audit_rows(
+    chunk_ids: list[str],
+    *,
+    store: Any,
+    source_map: dict[str, str] | None = None,
+    cited_chunk_ids: list[str] | None = None,
+    limit: int = 30,
+) -> list[dict[str, Any]]:
+    ids = _dedupe_preserve_order([cid for cid in chunk_ids if cid])[:limit]
+    chunks = store.get_many(ids)
+    chunk_map = {chunk.chunk_id: chunk for chunk in chunks}
+    cited = set(cited_chunk_ids or [])
+    rows: list[dict[str, Any]] = []
+    for rank, cid in enumerate(ids, start=1):
+        chunk = chunk_map.get(cid)
+        rows.append(
+            {
+                "rank": rank,
+                "chunk_id": cid,
+                "rel_path": getattr(chunk, "rel_path", None),
+                "section": getattr(chunk, "section_header", None),
+                "source": (source_map or {}).get(cid),
+                "cited": cid in cited,
+            }
+        )
+    return rows
 
 
 def _dedupe_preserve_order(values: list[str]) -> list[str]:
@@ -2928,7 +2990,14 @@ class PhotonRAGPipeline:
 
         # --- Citation ---
         with prof.phase("citation"):
+            answer = normalise_citation_markers(answer)
             citation = resolve_citations(answer, pack)
+            answer, citation, claim_guard = apply_claim_support_guard(
+                question=question,
+                answer=answer,
+                pack=pack,
+                citation=citation,
+            )
             answering_cfg = getattr(cfg, "answering", None)
             if answering_cfg is not None:
                 postprocess_enabled = answering_cfg.get(
@@ -2944,6 +3013,26 @@ class PhotonRAGPipeline:
             answer, citation, citation_postprocessed = apply_citation_postprocess(
                 answer, pack, citation, enabled=postprocess_enabled
             )
+            citation_budget = apply_citation_budget_rerank(
+                question=question,
+                answer=answer,
+                pack=pack,
+                citation=citation,
+                context_text="\n".join(
+                    part
+                    for part in (
+                        retrieval_query,
+                        generation_history,
+                        "\n".join(related_past_questions),
+                    )
+                    if part.strip()
+                ),
+                retrieval_scores=retrieval_support_scores,
+                current_scores=photon_current_score_map,
+                session_scores=photon_session_score_map,
+            )
+            answer = citation_budget.answer
+            citation = citation_budget.citation
 
         # Finalise debug rows: used/citation_index now determinable (Issue #176)
         pack_chunk_ids = [c.chunk_id for c in pack.chunks]
@@ -2964,6 +3053,38 @@ class PhotonRAGPipeline:
             pack_chunk_ids=pack_chunk_ids,
             cited_chunk_ids=citation.cited_chunk_ids,
         )
+        audit_source_map = {ref.chunk_id: ref.source for ref in all_refs_for_debug}
+        retrieval_stage_audit = {
+            "question": question,
+            "retrieval_query": retrieval_query,
+            "context_carryover_mode": carryover.mode,
+            "context_carryover_reason": carryover.reason,
+            "raw_retrieval": _retrieval_result_audit_rows(
+                raw_snapshot,
+                store=bl.store,
+            ),
+            "post_rerank_or_search": _retrieval_result_audit_rows(
+                list(raw),
+                store=bl.store,
+            ),
+            "reranker_rejected": _retrieval_result_audit_rows(
+                rejected_debug,
+                store=bl.store,
+                limit=10,
+            ),
+            "expanded": _chunk_id_audit_rows(
+                [ref.chunk_id for ref in expanded_refs],
+                store=bl.store,
+                source_map=audit_source_map,
+            ),
+            "final_pack": _chunk_id_audit_rows(
+                pack_chunk_ids,
+                store=bl.store,
+                source_map=audit_source_map,
+                cited_chunk_ids=citation.cited_chunk_ids,
+            ),
+            "cited_chunk_ids": list(citation.cited_chunk_ids),
+        }
 
         latency, memory = prof.finish()
 
@@ -3016,6 +3137,16 @@ class PhotonRAGPipeline:
                 "dual_score_pruning_applied": dual_score_pruning_applied,
                 "support_score": support_score,
                 "support_guard_active": support_guard_active,
+                "claim_support_guard_applied": claim_guard.applied,
+                "claim_support_guard_reason": claim_guard.reason,
+                "claim_support_guard_terms": claim_guard.unsupported_terms or [],
+                "citation_budget_reranked": citation_budget.changed,
+                "citation_budget_removed_indices": citation_budget.removed_indices,
+                "citation_budget_replaced_indices": citation_budget.replaced_indices,
+                "citation_eligibility_scores": [
+                    vars(score) for score in citation_budget.scores
+                ],
+                "retrieval_stage_audit": retrieval_stage_audit,
                 "photon_carryover_applied": bool(photon_carryover_matches),
                 "photon_carryover_turn_ids": [
                     match.turn_id for match in photon_carryover_matches
@@ -3066,6 +3197,14 @@ class PhotonRAGPipeline:
             dual_score_pruning_applied=dual_score_pruning_applied,
             support_score=support_score,
             support_guard_active=support_guard_active,
+            retrieval_stage_audit=retrieval_stage_audit,
+            claim_support_guard_applied=claim_guard.applied,
+            claim_support_guard_reason=claim_guard.reason,
+            claim_support_guard_terms=claim_guard.unsupported_terms or [],
+            citation_budget_reranked=citation_budget.changed,
+            citation_budget_removed_indices=citation_budget.removed_indices,
+            citation_budget_replaced_indices=citation_budget.replaced_indices,
+            citation_eligibility_scores=[vars(score) for score in citation_budget.scores],
             refusal_score=r_score,
             refusal_matches=r_matches,
         )

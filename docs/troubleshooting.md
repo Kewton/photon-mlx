@@ -16,7 +16,7 @@
 To verify models are cached:
 
 ```bash
-ls ~/.cache/huggingface/hub/models--mlx-community--Qwen2.5-Coder-14B-Instruct-4bit/
+ls ~/.cache/huggingface/hub/models--mlx-community--Qwen3.5-9B-MLX-4bit/
 ls ~/.cache/huggingface/hub/models--cross-encoder--ms-marco-MiniLM-L-6-v2/
 ls ~/.cache/huggingface/hub/models--sentence-transformers--all-MiniLM-L6-v2/
 ```
@@ -102,13 +102,20 @@ print('OK:', ckpt.is_relative_to(root))
 
 ---
 
-## PHOTON Multi-Turn Not Supported
+## PHOTON Multi-Turn Quality Looks Worse Than Baseline
 
-**Symptom**: Errors when attempting to use PHOTON hierarchical decoder for multi-turn conversations.
+**Symptom**: PHOTON プロジェクトは起動するが、follow-up 質問で baseline より回答が薄い、必要な evidence が落ちる、または古い話題の citation が混ざる。
 
-**Status**: Known limitation. PHOTON was evaluated at Gate 2 and received a No-Go judgment. Use `baseline_reporag` only for production workloads.
+**Status**: PHOTON multi-turn は比較・評価対象としてサポートされています。現在の実装では、PHOTON を回答生成モデルそのものとしてだけでなく、関連過去質問、evidence selection、citation eligibility の判断レイヤーとして使います。
 
-The PHOTON module (`photon_mlx/`) is retained for research purposes but is not production-ready.
+**Checklist**:
+
+1. **baseline config と PHOTON config が分かれているか**: 比較モードでは、baseline 側に `configs/baseline.yaml` または `configs/institutional_docs.yaml`、PHOTON 側に `model.provider: photon` の YAML を設定します。
+2. **checkpoint が有効か**: `PHOTON_CHECKPOINT_ROOT` と `model.checkpoint_path` が正しいことを確認します。random-init は unit/CI negative-path test 専用です。
+3. **pruning 枠が小さすぎないか**: Streamlit のプロジェクト登録/編集で `retrieval/reranker 上位保護N件` と `PHOTON score 選別M件` を確認します。既定値はそれぞれ 4 です。
+4. **関連過去質問の取得件数が不足していないか**: `関連過去質問 最大件数` と `関連過去 evidence 件数` を確認します。省略質問が多い業務 Q&A では、過去質問からの evidence 補完が効きます。
+5. **Retrieval debug を確認する**: `PHOTON score`, `PHOTON current`, `PHOTON session`, `source`, `Used`, `Citation` を見て、現在質問に効いている evidence と過去文脈由来の evidence を分けて確認します。
+6. **citation budget の影響を見る**: 回答中の citation が入れ替わる場合があります。ログの `citation_budget_reranked`, `citation_budget_removed_indices`, `citation_eligibility_scores` を確認します。
 
 ---
 
@@ -122,7 +129,7 @@ The PHOTON module (`photon_mlx/`) is retained for research purposes but is not p
 |-----------|----------|---------|--------|
 | `evidence_pack.max_chunks` | `configs/baseline.yaml` | 16 | Reduce to 8-12 |
 | `evidence_pack.max_tokens` | `configs/baseline.yaml` | 16000 | Reduce to 8000-12000 |
-| `generation.max_new_tokens` | `configs/baseline.yaml` | 768 | Reduce to 512 |
+| `generation.max_new_tokens` | `configs/baseline.yaml` | 2048 | Reduce to 1024 or 512 |
 | `retrieval.rerank_top_k` | `configs/baseline.yaml` | 12 | Reduce to 8 |
 | `indexing.embedding.batch_size` | `configs/baseline.yaml` | 64 | Reduce to 32 |
 

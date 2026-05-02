@@ -99,6 +99,14 @@ class QueryResult:
     dual_score_pruning_applied: bool | None = None
     support_score: float | None = None
     support_guard_active: bool | None = None
+    retrieval_stage_audit: dict[str, Any] | None = None
+    claim_support_guard_applied: bool | None = None
+    claim_support_guard_reason: str | None = None
+    claim_support_guard_terms: list[str] | None = None
+    citation_budget_reranked: bool | None = None
+    citation_budget_removed_indices: list[int] | None = None
+    citation_budget_replaced_indices: dict[int, int] | None = None
+    citation_eligibility_scores: list[dict[str, Any]] | None = None
     # Issue #177: refusal score (0.0 = answer, 1.0 = refusal) and matched phrases.
     # None on pre-#177 historical rows or when not yet computed.
     refusal_score: float | None = None
