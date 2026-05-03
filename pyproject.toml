@@ -32,6 +32,22 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+photon = [
+    "mlx",
+    "numpy",
+    "pyyaml",
+    "torch",
+    "transformers",
+    "tqdm",
+]
+rag = [
+    "mlx-lm",
+    "rank-bm25",
+    "sentence-transformers",
+]
+app = [
+    "streamlit",
+]
 dev = [
     "build",
     "pytest",
@@ -50,6 +66,8 @@ server = [
 photon-rag = "baseline_reporag.cli:main"
 baseline-reporag = "baseline_reporag.cli:main"
 baseline-reporag-server = "baseline_reporag.server:main"
+photon-train = "photon_mlx.cli:train_main"
+photon-generate = "photon_mlx.cli:generate_main"
 
 [tool.setuptools.packages.find]
 include = [
