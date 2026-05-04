@@ -160,3 +160,29 @@ P1 での判断:
 - 主要 unit tests は権限付き実行で `1672 passed`。通常 sandbox では `ps` を使う zombie 検知テストが権限不足で失敗するため、release gate では権限付き実行結果を採用する。
 - `workspace/テストシナリオ2.md` ベースの baseline vs PHOTON 評価結果と既知制約は `docs/evaluation.md` に整理済み。P1 では scorer / eval job の regression tests で再現性を確認した。
 - Streamlit の実データ ingest / index / chat / comparison の完全な手動 E2E は、対象 corpus と checkpoint が必要なため P1 では unit / helper tests と起動導線の確認に留める。実データ E2E は release candidate 確認で実施する。
+
+## P2: MVP リリース手順・公開準備
+
+確認日: 2026-05-05
+
+- [x] `pyproject.toml` の `version = "0.1.0"` を MVP 初回公開版として採用する
+- [x] MVP の公開範囲を GitHub repository + GitHub Release 中心に決定する
+- [x] PyPI metadata / classifiers / optional dependencies を確認する
+- [x] GitHub Release に含める artifact と含めない artifact を明確化する
+- [x] Hugging Face Hub での checkpoint 公開は MVP v0.1.0 の範囲外にする
+- [x] README の install 手順を GitHub clone + Streamlit 起動の公開導線に合わせる
+- [x] tag 作成方針を決める
+- [x] release notes を作成する
+- [ ] main ブランチ向け PR を作成する
+- [ ] PR の CI 通過を確認する
+
+P2 での判断:
+
+- `0.1.0` は、Multi-turn RAG の MVP として「初期公開だが API / UX は今後変わり得る」状態を示すため妥当。`Development Status :: 3 - Alpha` を package metadata に追加する。
+- MVP v0.1.0 の主導線は GitHub clone からの Streamlit アプリ起動とする。Streamlit 管理アプリは repository checkout 前提なので、README では PyPI install 単独ではなく source checkout を推奨する。
+- GitHub Release には GitHub が自動生成する source archive に加え、必要に応じて `python -m build` で生成した `dist/photon_rag-0.1.0.tar.gz` と `dist/photon_rag-0.1.0-py3-none-any.whl` を添付できる。
+- GitHub Release / package artifact には、checkpoint、外部モデル重み、tokenizer、embedding / reranker 重み、`workspace/`、`projects/`、`checkpoints/`、`.cache/`、ローカル生成レポートを含めない。
+- PyPI 公開は metadata と wheel smoke の準備済み。ただし MVP の最初の公開では GitHub Release を優先し、PyPI publish は Streamlit アプリの package entrypoint / app asset packaging 方針を別途確認してから実施する。
+- Hugging Face Hub への checkpoint 公開は v0.1.0 では行わない。公開する場合は、別 Issue で checkpoint repo、revision、model card、base model、training data、license、再配布可否を確認する。
+- tag は main merge 後に `v0.1.0` の annotated tag として作成する。develop や PR head には release tag を打たない。
+- release notes は `docs/release_notes_v0.1.0.md` を草案として管理する。
