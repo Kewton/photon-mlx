@@ -46,6 +46,7 @@ reports/institutional_generation_summary_*.json
 bench/reports/*.json
 reports/*_analysis.md
 reports/gate*_premerge.md
+reports/scenario2_baseline_vs_photon_score_*
 
 # Issue #82: eval job outputs (streamlit app)
 reports/eval_runs/
@@ -58,6 +59,9 @@ logs/eval/
 test-uat*
 sandbox/
 workspace/
+
+# Local-only exporters / private workstation data adapters
+scripts/export_agent_training_data.py
 
 # Issue #126: chunker A/B variant configs (not committed)
 configs/_experiments/

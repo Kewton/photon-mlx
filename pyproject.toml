@@ -75,7 +75,6 @@ include = [
     "configs*",
     "photon_mlx*",
     "torch_ref*",
-    "scripts*",
 ]
 exclude = [
     "baseline_reporag.tests*",

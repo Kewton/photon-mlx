@@ -327,6 +327,8 @@ project-root/
 
 依存ライブラリ、外部モデル、学習済み checkpoint、配布先から取得する重みは、それぞれの提供元ライセンスに従います。MVP リリース前の確認項目は [Release checklist](docs/release_checklist.md) を参照してください。
 
+MVP の配布物には、外部モデル重み、tokenizer、embedding / reranker の重み、PHOTON checkpoint、ローカル `workspace/`、`projects/`、`checkpoints/`、`.cache/`、生成レポートを同梱しません。利用者は、自身が利用権限を持つモデルと checkpoint をローカル環境または Hugging Face Hub 等から取得して使用します。
+
 ## 関連ドキュメント
 
 - [PHOTON technical overview](docs/photon_technical_overview.md): PHOTON の役割、技術要素、multi-turn RAG への転用方法
