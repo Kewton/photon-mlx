@@ -1,5 +1,6 @@
-prune scripts
 prune tests
+
+exclude scripts/export_agent_training_data.py
 
 prune workspace
 prune checkpoints

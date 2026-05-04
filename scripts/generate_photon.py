@@ -27,10 +27,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import mlx.core as mx
-
-from photon_mlx.trainer import load_model
-
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="PHOTON greedy decode")
@@ -77,6 +73,10 @@ def main() -> None:
         raise ValueError("--max-new-tokens must be in [1, 256]")
 
     # --- Load model ---
+    import mlx.core as mx
+
+    from photon_mlx.trainer import load_model
+
     print("Loading model...")
     model = load_model(config_path, checkpoint_path)
     print("Model loaded.")

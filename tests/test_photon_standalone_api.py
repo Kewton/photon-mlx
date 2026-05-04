@@ -12,6 +12,8 @@ def test_photon_mlx_public_api_import_does_not_import_rag() -> None:
             sys.modules.pop(name, None)
         if name == "photon_mlx" or name.startswith("photon_mlx."):
             sys.modules.pop(name, None)
+        if name == "mlx.core":
+            sys.modules.pop(name, None)
 
     photon_mlx = importlib.import_module("photon_mlx")
 

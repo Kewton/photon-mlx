@@ -1529,6 +1529,14 @@ class TestEvidencePruningTurn2:
             12,
             13,
         ]
+        photon_deps["photon_inference"]._last_prune_scores_by_session = {
+            "s1": {
+                "chunk_10": 1.0,
+                "chunk_11": 0.95,
+                "chunk_12": 0.9,
+                "chunk_13": 0.85,
+            }
+        }
         captured_pack_ids: list[str] = []
 
         def spy_build_evidence_pack(*args, **kwargs):
@@ -1625,7 +1633,7 @@ class TestEvidencePruningTurn2:
             )
 
         call = photon_deps["photon_inference"].prune_evidence.call_args
-        assert call.kwargs["question"] == "Follow-up after reset?"
+        assert call.kwargs["question"] == "q1 q2 Follow-up after reset?"
         assert result.photon_pruning_applied is True
         assert result.photon_scoring_applied is True
         assert result.photon_scored_count == 2
@@ -4260,29 +4268,18 @@ class TestPastTurnPinning:
 
         fake_session.find_relevant_past_turn.assert_not_called()
 
-    def test_pinning_disabled_does_not_access_photon_sessions(self) -> None:
+    def test_pinning_disabled_does_not_write_past_turn_pin_cache(self) -> None:
         cfg = _make_pinning_cfg(enabled=False)
         pipeline, baseline_deps, photon_deps, _ms, mock_results = (
             _setup_pipeline_for_pinning(cfg, session_turns=1)
         )
-        # Replace ``_sessions`` with an instrumented dict subclass so any
-        # ``.get`` access from the pinning path raises.
-        recorded: list[tuple[str, str]] = []
-
-        class _SpyDict(dict):
-            def get(self, key, default=None):
-                recorded.append(("get", key))
-                return super().get(key, default)
-
-        photon_deps["photon_inference"]._sessions = _SpyDict()
+        fake_session = _make_fake_photon_session(matched_turn_id=1)
+        photon_deps["photon_inference"]._sessions["s1"] = fake_session
 
         _run_query_with_mocks(pipeline, baseline_deps, photon_deps, mock_results)
 
-        # No `.get(s1, None)` call from the pinning path. The pruning
-        # path is disabled in this cfg so any `_sessions.get` call would
-        # have to come from pinning — and pinning is OFF, so the list
-        # must be empty.
-        assert recorded == []
+        fake_session.find_relevant_past_turn.assert_not_called()
+        assert "s1" not in pipeline._relevant_past_turn_cache
 
     def test_pinning_disabled_no_new_profiler_phase(self) -> None:
         cfg = _make_pinning_cfg(enabled=False)
@@ -4371,6 +4368,7 @@ class TestPastTurnPinning:
         cfg = _make_pinning_cfg(enabled=False)
         cfg.inference.related_past_questions_max = 1
         cfg.inference.related_past_evidence_top_k = 2
+        cfg.inference.past_context_decay = 1.0
         pipeline, baseline_deps, photon_deps, _mock_session, mock_results = (
             _setup_pipeline_for_pinning(cfg, session_turns=2)
         )
