@@ -173,8 +173,8 @@ P1 での判断:
 - [x] README の install 手順を GitHub clone + Streamlit 起動の公開導線に合わせる
 - [x] tag 作成方針を決める
 - [x] release notes を作成する
-- [ ] main ブランチ向け PR を作成する
-- [ ] PR の CI 通過を確認する
+- [x] main ブランチ向け PR を作成する
+- [x] PR の CI 通過を確認する
 
 P2 での判断:
 
@@ -186,3 +186,4 @@ P2 での判断:
 - Hugging Face Hub への checkpoint 公開は v0.1.0 では行わない。公開する場合は、別 Issue で checkpoint repo、revision、model card、base model、training data、license、再配布可否を確認する。
 - tag は main merge 後に `v0.1.0` の annotated tag として作成する。develop や PR head には release tag を打たない。
 - release notes は `docs/release_notes_v0.1.0.md` を草案として管理する。
+- main 向け PR は [#206](https://github.com/Kewton/photon-mlx/pull/206)。PR CI は `package-smoke` pass を確認済み。
