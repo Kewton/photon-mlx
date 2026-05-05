@@ -340,6 +340,7 @@ MVP の配布物には、外部モデル重み、tokenizer、embedding / reranke
 - [v0.1.0 release plan](docs/release_plan_v0.1.0.md): MVP 公開範囲、artifact、PR、tag 方針
 - [v0.1.0 release notes](docs/release_notes_v0.1.0.md): MVP リリースノート草案
 - [Deployment guide](docs/deployment.md): checkpoint 配布とデプロイ運用
+- [Document collection](docs/document_collection.md): Web / PDF / text から ingest 用 Markdown corpus を作る汎用ツール
 - [Evaluation guide](docs/evaluation.md): multi-turn シナリオ評価とスコア化
 - [Playground guide](docs/playground.md): ローカル検証の補足
 - [Troubleshooting](docs/troubleshooting.md): エラー時の確認ポイント
