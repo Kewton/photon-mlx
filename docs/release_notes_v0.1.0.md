@@ -11,6 +11,7 @@ PHOTON-RepoRAG v0.1.0 is the first MVP release of a Multi-turn RAG system for lo
 - Related past question retrieval and supplemental evidence selection for multi-turn context carryover
 - Support check prompt guardrails for claims that are weakly supported by retrieved evidence
 - CLI entrypoints for RAG usage and PHOTON training / generation
+- Minimal baseline demo corpus under `examples/minimal_corpus/`
 - Deterministic scenario scorer for `workspace/テストシナリオ2.md`
 - MIT License for repository code and documentation
 
@@ -37,6 +38,14 @@ photon-rag ask \
   --config configs/baseline.yaml \
   --repo-id <repo_id> \
   --question "..."
+```
+
+For a baseline-only smoke check before connecting private data:
+
+```bash
+photon-rag ingest --repo examples/minimal_corpus --repo-id minimal_demo --commit HEAD --config configs/baseline.yaml
+photon-rag index --repo-id minimal_demo --config configs/baseline.yaml
+photon-rag ask --repo-id minimal_demo --config configs/baseline.yaml --question "PHOTON-RepoRAG はどのような業務課題を解決しますか？"
 ```
 
 ## Release Artifacts
