@@ -28,10 +28,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from torch_ref.config import load_photon_config  # noqa: E402
-from photon_mlx.trainer import train  # noqa: E402
-
 import yaml  # noqa: E402
+from torch_ref.config import load_photon_config  # noqa: E402
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -119,6 +117,8 @@ def main() -> None:
     approved_roots = (
         [Path(r) for r in args.approved_roots] if args.approved_roots else None
     )
+
+    from photon_mlx.trainer import train
 
     train(
         cfg=cfg,

@@ -1,0 +1,20 @@
+prune tests
+
+exclude scripts/export_agent_training_data.py
+
+prune workspace
+prune checkpoints
+prune projects
+prune .cache
+prune logs
+prune data/raw
+prune data/processed
+prune data/indexes
+prune data/training
+
+prune reports/benchmark_runs
+prune reports/eval_runs
+prune bench/reports
+
+global-exclude __pycache__ *.py[cod] .DS_Store
+global-exclude *.jsonl *.log *.summary.json

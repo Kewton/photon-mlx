@@ -334,6 +334,11 @@ def _apply_photon_pruning_override(
     inference.pruning_protected_top_n = protected
     inference.pruning_photon_top_m = selected
     inference.pruned_max_chunks = protected + selected
+    inference.context_carryover_enabled = True
+    inference.context_rewrite_enabled = True
+    inference.past_context_decay = 0.7
+    inference.past_context_min_decay = 0.25
+    inference.admission_min_current_score = 0.05
     if related_questions_max is not None:
         inference.related_past_questions_max = max(0, int(related_questions_max))
     if related_evidence_top_k is not None:
@@ -2082,6 +2087,42 @@ def _render_chat_metadata(proj: Project, metadata: dict[str, Any] | None) -> Non
     temperature = metadata.get("temperature")
     if temperature is not None:
         st.caption(f"Temperature: `{float(temperature):g}`")
+    pruning_applied = metadata.get("photon_pruning_applied")
+    scoring_applied = metadata.get("photon_scoring_applied")
+    if pruning_applied is not None or scoring_applied is not None:
+        scored_count = metadata.get("photon_scored_count")
+        if scored_count is None:
+            scored_count = _retrieval_photon_score_count(metadata.get("retrieval_debug"))
+        scoring_mode = metadata.get("photon_scoring_mode") or "none"
+        st.caption(
+            "PHOTON pruning: "
+            f"{'実行' if pruning_applied else '未実行'} / "
+            f"score: {'算出あり' if scoring_applied else '算出なし'} / "
+            f"score件数: {scored_count} / "
+            f"mode: `{scoring_mode}`"
+        )
+    carryover_mode = metadata.get("context_carryover_mode")
+    if carryover_mode:
+        segment_text = ""
+        if metadata.get("topic_segment_id") is not None:
+            segment_text = f" / segment: {metadata.get('topic_segment_id')}"
+        similarity = metadata.get("context_carryover_similarity")
+        similarity_text = ""
+        if similarity is not None:
+            try:
+                similarity_text = f" / similarity: {float(similarity):.2f}"
+            except (TypeError, ValueError):
+                similarity_text = ""
+        st.caption(
+            "Context carryover: "
+            f"`{carryover_mode}` / reason: "
+            f"`{metadata.get('context_carryover_reason') or 'none'}`"
+            f"{segment_text}"
+            f"{similarity_text}"
+        )
+        rewritten_query = metadata.get("rewritten_query")
+        if rewritten_query:
+            st.caption(f"Retrieval query: `{rewritten_query}`")
 
     rs = metadata.get("refusal_score")
     if rs is not None:
@@ -2173,6 +2214,29 @@ def _render_chat_metadata(proj: Project, metadata: dict[str, Any] | None) -> Non
         st.warning(f"refusal score detail render failed: {exc}")
 
     try:
+        scoring_applied = metadata.get("photon_scoring_applied")
+        pruning_applied = metadata.get("photon_pruning_applied")
+        if pruning_applied is not None or scoring_applied is not None:
+            scored_count = metadata.get("photon_scored_count")
+            mode = metadata.get("photon_scoring_mode") or "none"
+            status = "score算出あり" if scoring_applied else "score算出なし"
+            with st.expander("PHOTON pruning 状態", expanded=False):
+                st.write(f"**pruning経路**: {'実行' if pruning_applied else '未実行'}")
+                st.write(f"**PHOTON score**: {status}")
+                st.write(
+                    f"**score件数**: "
+                    f"{scored_count if scored_count is not None else '-'}"
+                )
+                st.write(f"**mode**: `{mode}`")
+                if pruning_applied and not scoring_applied:
+                    st.caption(
+                        "pruning経路に入っていても、候補数が少ない場合や "
+                        "scoring が fail-closed した場合は score が出ないことがあります。"
+                    )
+    except Exception as exc:
+        st.warning(f"PHOTON pruning status render failed: {exc}")
+
+    try:
         debug_data = metadata.get("retrieval_debug")
         if debug_data:
             with st.expander("🔍 Retrieval debug", expanded=False):
@@ -2181,26 +2245,36 @@ def _render_chat_metadata(proj: Project, metadata: dict[str, Any] | None) -> Non
                 df = pd.DataFrame(
                     [
                         {
-                            "chunk_id": _record_value(r, "chunk_id", ""),
-                            "rel_path": _record_value(r, "rel_path", ""),
-                            "section": _record_value(r, "section", "") or "",
                             "source": _record_value(r, "source", ""),
-                            "BM25 (norm)": _record_value(r, "bm25_score", None),
-                            "Embedding (norm)": _record_value(
-                                r, "embedding_score", None
-                            ),
-                            "Rerank score": _record_value(r, "reranker_score", None),
                             "PHOTON score": _record_value(r, "photon_score", None),
-                            "Used": "✓" if _record_value(r, "used", False) else "",
+                            "PHOTON current": _record_value(
+                                r, "photon_current_score", None
+                            ),
+                            "PHOTON session": _record_value(
+                                r, "photon_session_score", None
+                            ),
+                            "Used": (
+                                "✓" if _record_value(r, "used", False) else ""
+                            ),
                             "Citation": (
                                 f"[C:{_record_value(r, 'citation_index')}]"
                                 if _record_value(r, "citation_index") is not None
                                 else ""
                             ),
+                            "chunk_id": _record_value(r, "chunk_id", ""),
+                            "rel_path": _record_value(r, "rel_path", ""),
+                            "section": _record_value(r, "section", "") or "",
+                            "BM25 (norm)": _record_value(r, "bm25_score", None),
+                            "Embedding (norm)": _record_value(
+                                r, "embedding_score", None
+                            ),
+                            "Rerank score": _record_value(r, "reranker_score", None),
                         }
                         for r in debug_data
                     ]
                 )
+                score_count = _retrieval_photon_score_count(debug_data)
+                st.caption(f"PHOTON score が入っている行: {score_count} 件")
                 st.dataframe(df, use_container_width=True)
     except Exception as exc:
         st.warning(f"retrieval debug render failed: {exc}")
@@ -2520,6 +2594,15 @@ def _run_query(proj: Project, question: str, session_key: str) -> tuple[str, dic
         "photon_selected_top_m": _selected_photon_selected_top_m(proj),
         "photon_related_questions_max": _selected_photon_related_questions_max(proj),
         "photon_related_evidence_top_k": _selected_photon_related_evidence_top_k(proj),
+        "photon_pruning_applied": None,
+        "photon_scoring_applied": None,
+        "photon_scored_count": None,
+        "photon_scoring_mode": None,
+        "context_carryover_mode": None,
+        "context_carryover_reason": None,
+        "context_carryover_similarity": None,
+        "rewritten_query": None,
+        "topic_segment_id": None,
     }
 
     # The wizard-generated PHOTON YAML (proj.photon_config_path) takes
@@ -2639,6 +2722,19 @@ def _run_query(proj: Project, question: str, session_key: str) -> tuple[str, dic
         "photon_selected_top_m": selected_top_m,
         "photon_related_questions_max": related_questions_max,
         "photon_related_evidence_top_k": related_evidence_top_k,
+        "photon_pruning_applied": getattr(result, "photon_pruning_applied", None),
+        "photon_scoring_applied": getattr(result, "photon_scoring_applied", None),
+        "photon_scored_count": getattr(result, "photon_scored_count", None),
+        "photon_scoring_mode": getattr(result, "photon_scoring_mode", None),
+        "context_carryover_mode": getattr(result, "context_carryover_mode", None),
+        "context_carryover_reason": getattr(result, "context_carryover_reason", None),
+        "context_carryover_similarity": getattr(
+            result,
+            "context_carryover_similarity",
+            None,
+        ),
+        "rewritten_query": getattr(result, "rewritten_query", None),
+        "topic_segment_id": getattr(result, "topic_segment_id", None),
     }
 
     # Issue #82 Wave 3 (W3-T3): surface turn-history for the chat panel.
@@ -2776,26 +2872,36 @@ def _retrieval_source_counts(rows: Any) -> dict[str, int]:
     return counts
 
 
+def _retrieval_photon_score_count(rows: Any) -> int:
+    return sum(
+        1
+        for row in rows or []
+        if _record_value(row, "photon_score", None) is not None
+    )
+
+
 def _retrieval_debug_dataframe(rows: Any):
     import pandas as pd
 
     return pd.DataFrame(
         [
             {
-                "chunk_id": _record_value(r, "chunk_id", ""),
-                "rel_path": _record_value(r, "rel_path", ""),
-                "section": _record_value(r, "section", "") or "",
                 "source": _record_value(r, "source", ""),
-                "BM25 (norm)": _record_value(r, "bm25_score", None),
-                "Embedding (norm)": _record_value(r, "embedding_score", None),
-                "Rerank score": _record_value(r, "reranker_score", None),
                 "PHOTON score": _record_value(r, "photon_score", None),
+                "PHOTON current": _record_value(r, "photon_current_score", None),
+                "PHOTON session": _record_value(r, "photon_session_score", None),
                 "Used": "✓" if _record_value(r, "used", False) else "",
                 "Citation": (
                     f"[C:{_record_value(r, 'citation_index')}]"
                     if _record_value(r, "citation_index") is not None
                     else ""
                 ),
+                "chunk_id": _record_value(r, "chunk_id", ""),
+                "rel_path": _record_value(r, "rel_path", ""),
+                "section": _record_value(r, "section", "") or "",
+                "BM25 (norm)": _record_value(r, "bm25_score", None),
+                "Embedding (norm)": _record_value(r, "embedding_score", None),
+                "Rerank score": _record_value(r, "reranker_score", None),
             }
             for r in rows or []
         ]
@@ -2830,12 +2936,47 @@ def _render_comparison_insights(b: Any, p: Any, d: Any) -> None:
 
     with st.expander("PHOTON の効き方", expanded=True):
         source_counts = _retrieval_source_counts(p.retrieval_debug)
-        pc1, pc2, pc3 = st.columns(3)
+        pc1, pc2, pc3, pc4 = st.columns(4)
         pc1.metric("PHOTONで除外", str(source_counts.get("photon_pruned", 0)))
         pc2.metric("Working memory由来", str(source_counts.get("working_memory", 0)))
         pc3.metric("回答生成", p.generator_used or "unknown")
+        scored_count = getattr(p, "photon_scored_count", None)
+        if scored_count is None:
+            scored_count = _retrieval_photon_score_count(p.retrieval_debug)
+        pc4.metric("PHOTON score件数", str(scored_count))
         if p.generator_fallback_reason:
             st.caption(f"fallback reason: {p.generator_fallback_reason}")
+        scoring_applied = getattr(p, "photon_scoring_applied", None)
+        pruning_applied = getattr(p, "photon_pruning_applied", None)
+        scoring_mode = getattr(p, "photon_scoring_mode", None) or "none"
+        if pruning_applied is not None or scoring_applied is not None:
+            st.caption(
+                f"PHOTON pruning: {'実行' if pruning_applied else '未実行'} / "
+                f"score: {'算出あり' if scoring_applied else '算出なし'} / "
+                f"mode: `{scoring_mode}`"
+            )
+        carryover_mode = getattr(p, "context_carryover_mode", None)
+        if carryover_mode:
+            segment_text = ""
+            if getattr(p, "topic_segment_id", None) is not None:
+                segment_text = f" / segment: {getattr(p, 'topic_segment_id')}"
+            similarity = getattr(p, "context_carryover_similarity", None)
+            similarity_text = ""
+            if similarity is not None:
+                try:
+                    similarity_text = f" / similarity: {float(similarity):.2f}"
+                except (TypeError, ValueError):
+                    similarity_text = ""
+            st.caption(
+                "Context carryover: "
+                f"`{carryover_mode}` / reason: "
+                f"`{getattr(p, 'context_carryover_reason', None) or 'none'}`"
+                f"{segment_text}"
+                f"{similarity_text}"
+            )
+            rewritten_query = getattr(p, "rewritten_query", None)
+            if rewritten_query:
+                st.caption(f"Retrieval query: `{rewritten_query}`")
         st.caption(
             "`PHOTONで除外` は evidence から落とされた候補、"
             "`Working memory由来` は過去ターンから持ち越された根拠です。"
@@ -2854,6 +2995,10 @@ def _render_comparison_insights(b: Any, p: Any, d: Any) -> None:
             if p_df.empty:
                 st.info("Retrieval debug はありません")
             else:
+                st.caption(
+                    "PHOTON score が入っている行: "
+                    f"{_retrieval_photon_score_count(p.retrieval_debug)} 件"
+                )
                 st.dataframe(p_df, use_container_width=True)
 
 

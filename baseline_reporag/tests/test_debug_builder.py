@@ -122,6 +122,26 @@ class TestBuildRetrievalDebugRows:
         assert finalised[0].photon_score == pytest.approx(0.42)
         assert finalised[1].photon_score == pytest.approx(-0.13)
 
+    def test_photon_current_and_session_scores_are_attached(self) -> None:
+        raw = [_make_result("c0", bm25=0.8, emb=0.7, fused=0.75)]
+        refs = [_make_ref("c0", "retrieval")]
+        store = _make_store("c0")
+
+        rows = build_retrieval_debug_rows(
+            raw,
+            [],
+            [],
+            refs,
+            store,
+            photon_scores={"c0": 0.7},
+            photon_current_scores={"c0": 0.9},
+            photon_session_scores={"c0": 0.4},
+        )
+
+        assert rows[0].photon_score == pytest.approx(0.7)
+        assert rows[0].photon_current_score == pytest.approx(0.9)
+        assert rows[0].photon_session_score == pytest.approx(0.4)
+
     def test_neighbor_source_scores_are_none(self) -> None:
         """neighbor-source chunk has None bm25/embedding/fused scores."""
         raw: list[RetrievalResult] = []

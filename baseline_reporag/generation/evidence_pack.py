@@ -70,8 +70,8 @@ def build_evidence_pack(
     # promote past-turn cited chunks into the next pack at priority=0
     # without mutating ``session.pinned_chunk_ids`` (DR2-003 keeps the
     # existing signature ordering — ``recent_citation_turns`` default 2 is
-    # preserved). ``None`` keeps existing baseline pipeline calls byte
-    # identical (priority ordering, dedup via ``set(chunk_ids)``).
+    # preserved). Candidate de-dup keeps first-seen order so retrieval/rerank
+    # rank is not lost among chunks with the same priority.
     pinned_set = _merge_pinned_sets(session, additional_pinned_ids)
 
     def priority(cid: str) -> int:
@@ -89,10 +89,51 @@ def build_evidence_pack(
     # is intentionally NOT unioned here — its semantics (existing
     # ``priority()`` re-order only) stay untouched, only the new
     # transient ``additional_pinned_ids`` may inject new IDs.
-    candidate_ids: set[str] = set(chunk_ids)
+    candidate_ids: list[str] = []
+    seen_candidates: set[str] = set()
     if additional_pinned_ids:
-        candidate_ids = candidate_ids | set(additional_pinned_ids)
-    ordered_ids = sorted(candidate_ids, key=priority)[:max_chunks]
+        for cid in additional_pinned_ids:
+            if cid in seen_candidates:
+                continue
+            seen_candidates.add(cid)
+            candidate_ids.append(cid)
+    for cid in chunk_ids:
+        if cid in seen_candidates:
+            continue
+        seen_candidates.add(cid)
+        candidate_ids.append(cid)
+
+    original_order = {cid: index for index, cid in enumerate(candidate_ids)}
+    if additional_pinned_ids:
+        ordered_pins = []
+        seen_pins: set[str] = set()
+        for cid in additional_pinned_ids:
+            if cid in seen_pins or cid not in seen_candidates:
+                continue
+            seen_pins.add(cid)
+            ordered_pins.append(cid)
+        ordered_ids = (
+            ordered_pins
+            + [
+                cid
+                for cid in sorted(
+                    candidate_ids,
+                    key=lambda candidate_id: (
+                        priority(candidate_id),
+                        original_order[candidate_id],
+                    ),
+                )
+                if cid not in seen_pins
+            ]
+        )[:max_chunks]
+    else:
+        ordered_ids = sorted(
+            candidate_ids,
+            key=lambda candidate_id: (
+                priority(candidate_id),
+                original_order[candidate_id],
+            ),
+        )[:max_chunks]
     chunks = store.get_many(ordered_ids)
 
     # Approximate token budget: 1 token ≈ 4 chars

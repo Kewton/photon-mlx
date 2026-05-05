@@ -350,6 +350,27 @@ class TestQueryResultExtension:
         assert result.confidence == 0.85
         assert result.fallback_decision == {"should_fallback": False}
 
+    def test_query_result_has_photon_scoring_observability_fields(self):
+        """PHOTON scoring status defaults to None for older/baseline callers."""
+        from baseline_reporag.pipeline import QueryResult
+        from baseline_reporag.profiler import LatencyBreakdown, MemorySnapshot
+
+        result = QueryResult(
+            answer="test",
+            session_id="s1",
+            turn_id=1,
+            cited_chunk_ids=[],
+            wrong_citation_indices=[],
+            no_citation=False,
+            latency=LatencyBreakdown(0, 0, 0, 0, 0),
+            memory=MemorySnapshot(0, 0),
+        )
+
+        assert result.photon_pruning_applied is None
+        assert result.photon_scoring_applied is None
+        assert result.photon_scored_count is None
+        assert result.photon_scoring_mode is None
+
     def test_query_result_has_citation_postprocessed_field(self):
         """citation_postprocessed defaults to False (backward compatible)."""
         from baseline_reporag.pipeline import QueryResult
@@ -1508,6 +1529,14 @@ class TestEvidencePruningTurn2:
             12,
             13,
         ]
+        photon_deps["photon_inference"]._last_prune_scores_by_session = {
+            "s1": {
+                "chunk_10": 1.0,
+                "chunk_11": 0.95,
+                "chunk_12": 0.9,
+                "chunk_13": 0.85,
+            }
+        }
         captured_pack_ids: list[str] = []
 
         def spy_build_evidence_pack(*args, **kwargs):
@@ -1544,6 +1573,75 @@ class TestEvidencePruningTurn2:
             "chunk_12",
             "chunk_13",
         ]
+
+    def test_follow_up_without_photon_state_scores_from_current_question(self):
+        """Safe RecGen reset still allows current-question pruning."""
+        from baseline_reporag.ingestion.chunker import Chunk
+
+        cfg = _make_pruning_cfg()
+        cfg.inference.pruning_protected_top_n = 4
+        cfg.inference.pruning_photon_top_m = 4
+        pipeline, baseline_deps, photon_deps, mock_session, mock_results = (
+            _setup_pipeline_for_pruning(cfg, session_turns=2)
+        )
+        photon_deps["photon_inference"]._sessions = {}
+        photon_deps["photon_inference"]._last_prune_scores_by_session = {
+            "s1": {"chunk_10": 0.91, "chunk_11": 0.87}
+        }
+
+        chunks = [
+            Chunk(
+                chunk_id=f"chunk_{i}",
+                repo_id="test-repo",
+                repo_commit="abc123",
+                rel_path=f"file{i}.py",
+                language="python",
+                start_line=1,
+                end_line=10,
+                content=f"def func_{i}(): pass",
+                symbols=[f"func_{i}"],
+                section_header="",
+                file_header="",
+            )
+            for i in range(16)
+        ]
+        by_id = {c.chunk_id: c for c in chunks}
+        baseline_deps["store"].get_many.side_effect = lambda ids: [
+            by_id[cid] for cid in ids if cid in by_id
+        ]
+        expanded_ids = [f"chunk_{i}" for i in range(16)]
+        photon_deps["photon_inference"].prune_evidence.return_value = [
+            10,
+            11,
+            12,
+            13,
+        ]
+
+        with (
+            patch(
+                "baseline_reporag.photon_pipeline.hybrid_search",
+                return_value=mock_results,
+            ),
+            patch(
+                "baseline_reporag.photon_pipeline.expand_with_graph",
+                return_value=_refs(expanded_ids),
+            ),
+        ):
+            baseline_deps["generator"].generate.return_value = "Pruned answer [C:1]"
+            result = pipeline.query(
+                "Follow-up after reset?", session_id="s1", repo_id="test-repo"
+            )
+
+        call = photon_deps["photon_inference"].prune_evidence.call_args
+        assert call.kwargs["question"] == "q1 q2 Follow-up after reset?"
+        assert result.photon_pruning_applied is True
+        assert result.photon_scoring_applied is True
+        assert result.photon_scored_count == 2
+        assert result.photon_scoring_mode == "question_fallback_no_state"
+        score_by_id = {
+            row.chunk_id: row.photon_score for row in result.retrieval_debug or []
+        }
+        assert score_by_id["chunk_10"] == pytest.approx(0.91)
 
     def test_turn2_result_has_correct_answer(self):
         """Turn 2 with pruning still returns a valid QueryResult."""
@@ -4170,29 +4268,18 @@ class TestPastTurnPinning:
 
         fake_session.find_relevant_past_turn.assert_not_called()
 
-    def test_pinning_disabled_does_not_access_photon_sessions(self) -> None:
+    def test_pinning_disabled_does_not_write_past_turn_pin_cache(self) -> None:
         cfg = _make_pinning_cfg(enabled=False)
         pipeline, baseline_deps, photon_deps, _ms, mock_results = (
             _setup_pipeline_for_pinning(cfg, session_turns=1)
         )
-        # Replace ``_sessions`` with an instrumented dict subclass so any
-        # ``.get`` access from the pinning path raises.
-        recorded: list[tuple[str, str]] = []
-
-        class _SpyDict(dict):
-            def get(self, key, default=None):
-                recorded.append(("get", key))
-                return super().get(key, default)
-
-        photon_deps["photon_inference"]._sessions = _SpyDict()
+        fake_session = _make_fake_photon_session(matched_turn_id=1)
+        photon_deps["photon_inference"]._sessions["s1"] = fake_session
 
         _run_query_with_mocks(pipeline, baseline_deps, photon_deps, mock_results)
 
-        # No `.get(s1, None)` call from the pinning path. The pruning
-        # path is disabled in this cfg so any `_sessions.get` call would
-        # have to come from pinning — and pinning is OFF, so the list
-        # must be empty.
-        assert recorded == []
+        fake_session.find_relevant_past_turn.assert_not_called()
+        assert "s1" not in pipeline._relevant_past_turn_cache
 
     def test_pinning_disabled_no_new_profiler_phase(self) -> None:
         cfg = _make_pinning_cfg(enabled=False)
@@ -4281,6 +4368,7 @@ class TestPastTurnPinning:
         cfg = _make_pinning_cfg(enabled=False)
         cfg.inference.related_past_questions_max = 1
         cfg.inference.related_past_evidence_top_k = 2
+        cfg.inference.past_context_decay = 1.0
         pipeline, baseline_deps, photon_deps, _mock_session, mock_results = (
             _setup_pipeline_for_pinning(cfg, session_turns=2)
         )

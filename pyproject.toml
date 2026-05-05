@@ -10,9 +10,16 @@ readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
 authors = [{ name = "Kewton" }]
+keywords = ["rag", "multi-turn", "retrieval", "mlx", "streamlit", "photon"]
 classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
+    "Operating System :: MacOS",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 dependencies = [
     "fastapi",
@@ -32,6 +39,22 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+photon = [
+    "mlx",
+    "numpy",
+    "pyyaml",
+    "torch",
+    "transformers",
+    "tqdm",
+]
+rag = [
+    "mlx-lm",
+    "rank-bm25",
+    "sentence-transformers",
+]
+app = [
+    "streamlit",
+]
 dev = [
     "build",
     "pytest",
@@ -46,18 +69,26 @@ server = [
     "uvicorn[standard]",
 ]
 
+[project.urls]
+Homepage = "https://github.com/Kewton/photon-mlx"
+Repository = "https://github.com/Kewton/photon-mlx"
+Issues = "https://github.com/Kewton/photon-mlx/issues"
+Documentation = "https://github.com/Kewton/photon-mlx/tree/main/docs"
+
 [project.scripts]
 photon-rag = "baseline_reporag.cli:main"
 baseline-reporag = "baseline_reporag.cli:main"
 baseline-reporag-server = "baseline_reporag.server:main"
+photon-train = "photon_mlx.cli:train_main"
+photon-generate = "photon_mlx.cli:generate_main"
 
 [tool.setuptools.packages.find]
 include = [
     "baseline_reporag*",
     "configs*",
     "photon_mlx*",
-    "torch_ref*",
     "scripts*",
+    "torch_ref*",
 ]
 exclude = [
     "baseline_reporag.tests*",

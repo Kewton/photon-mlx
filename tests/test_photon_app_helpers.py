@@ -36,6 +36,50 @@ def _load_photon_app_module():
 photon_app = _load_photon_app_module()
 
 
+class TestRetrievalDebugFormatting:
+    def test_photon_score_column_is_prominent_and_counted(self) -> None:
+        rows = [
+            SimpleNamespace(
+                chunk_id="c1",
+                rel_path="long/path/document.md",
+                section="",
+                source="retrieval",
+                bm25_score=0.1,
+                embedding_score=0.2,
+                reranker_score=None,
+                photon_score=0.91,
+                used=True,
+                citation_index=1,
+            ),
+            SimpleNamespace(
+                chunk_id="c2",
+                rel_path="long/path/other.md",
+                section="",
+                source="neighbor",
+                bm25_score=None,
+                embedding_score=None,
+                reranker_score=None,
+                photon_score=None,
+                used=False,
+                citation_index=None,
+            ),
+        ]
+
+        df = photon_app._retrieval_debug_dataframe(rows)
+
+        assert list(df.columns[:4]) == [
+            "source",
+            "PHOTON score",
+            "PHOTON current",
+            "PHOTON session",
+        ]
+        assert list(df.columns[4:6]) == [
+            "Used",
+            "Citation",
+        ]
+        assert photon_app._retrieval_photon_score_count(rows) == 1
+
+
 # ---------------------------------------------------------------
 # CB-002: checkpoint discovery excludes `.tmp` directories
 # ---------------------------------------------------------------
@@ -938,6 +982,10 @@ class TestRetrievalDebugMetadataTransfer:
             memory=SimpleNamespace(),
             drift_metrics=None,
             retrieval_debug=retrieval_debug,
+            photon_pruning_applied=True,
+            photon_scoring_applied=True,
+            photon_scored_count=3,
+            photon_scoring_mode="question_fallback_no_state",
         )
 
     def test_retrieval_debug_transferred_to_metadata(self, tmp_path: Path) -> None:
@@ -968,6 +1016,10 @@ class TestRetrievalDebugMetadataTransfer:
             _, metadata = photon_app._run_query(proj, "q?", "sess")
 
         assert metadata["retrieval_debug"] is result.retrieval_debug
+        assert metadata["photon_pruning_applied"] is True
+        assert metadata["photon_scoring_applied"] is True
+        assert metadata["photon_scored_count"] == 3
+        assert metadata["photon_scoring_mode"] == "question_fallback_no_state"
 
     def test_retrieval_debug_none_when_result_has_none(self, tmp_path: Path) -> None:
         """metadata['retrieval_debug'] is None when result.retrieval_debug is None (AC-12)."""

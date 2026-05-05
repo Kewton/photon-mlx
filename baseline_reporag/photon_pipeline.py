@@ -10,17 +10,25 @@ Provides:
 from __future__ import annotations
 
 import logging
+import math
 import os
 import re
 import subprocess
 import sys
 import uuid
+from dataclasses import dataclass
 from functools import lru_cache
 from math import prod
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from .citation import compute_refusal_score, resolve_citations
+from .citation import (
+    apply_claim_support_guard,
+    compute_refusal_score,
+    normalise_citation_markers,
+    resolve_citations,
+)
+from .citation_eligibility import apply_citation_budget_rerank
 from .checkpoints import maybe_download_checkpoint
 from .config import Config
 from .generation.evidence_pack import build_evidence_pack
@@ -50,7 +58,111 @@ if TYPE_CHECKING:
 _logger = logging.getLogger(__name__)
 _RELATED_PAST_QUESTIONS_MAX = 3
 _RELATED_PAST_EVIDENCE_TOP_K = 4
+_PAST_CONTEXT_DECAY = 0.7
+_PAST_CONTEXT_MIN_DECAY = 0.25
+_ADMISSION_MIN_CURRENT_SCORE = 0.05
+_REWRITE_HISTORY_MAX = 2
+_PHOTON_CARRYOVER_MAX_TURNS = 2
+_PHOTON_CARRYOVER_MIN_SIMILARITY = 0.75
+_SEGMENT_MEMORY_FEATURE_MAX = 24
+_SEGMENT_MEMORY_MIN_SIMILARITY = 0.06
+_SUPPORT_GUARD_THRESHOLD = 0.48
 _SPLIT_PART_RE = re.compile(r"^(?P<base>.+)#part(?P<idx>\d+)of(?P<total>\d+)$")
+_ASCII_TOKEN_RE = re.compile(r"[a-z0-9_]{2,}", re.IGNORECASE)
+_CJK_RE = re.compile(r"[\u3040-\u30ff\u3400-\u9fff]+")
+_STANDALONE_TOPIC_RE = re.compile(
+    r"(?P<anchor>[A-Za-z0-9_\-\u3040-\u30ff\u3400-\u9fff・ー（）()]+?)"
+    r"(?:の(?:概要|対象|必要書類|認定条件)|について|とは)"
+)
+_TOPIC_ANCHOR_NOISE = (
+    "場合",
+    "それ",
+    "その",
+    "どの",
+    "どんな",
+    "今回",
+    "前回",
+    "申請では",
+    "文書",
+)
+_COMPARISON_MARKERS = (
+    "比較",
+    "違い",
+    "違う",
+    "比べ",
+    "差分",
+    "同じ",
+    "異な",
+    "versus",
+    " vs ",
+)
+_FOLLOW_UP_MARKERS = (
+    "その",
+    "それ",
+    "これ",
+    "この",
+    "あの",
+    "上記",
+    "前述",
+    "さっき",
+    "先ほど",
+    "先程",
+    "場合",
+    "同じ",
+    "違い",
+    "比較",
+    "続き",
+    "申請では",
+    "必要ですか",
+    "書きますか",
+    "含まれ",
+    "ありますか",
+    "どう",
+    "では？",
+    "it",
+    "that",
+    "those",
+    "these",
+    "they",
+    "same",
+    "difference",
+    "compare",
+    "above",
+    "previous",
+)
+
+
+@dataclass(frozen=True)
+class _CarryoverDecision:
+    mode: str
+    query: str
+    similarity: float
+    marker: bool
+    reason: str
+
+
+@dataclass
+class _TopicSegmentState:
+    current_segment_id: int = 1
+    turn_segments: dict[int, int] | None = None
+
+    def __post_init__(self) -> None:
+        if self.turn_segments is None:
+            self.turn_segments = {}
+
+
+@dataclass(frozen=True)
+class _PhotonCarryoverMatch:
+    turn_id: int
+    score: float
+
+
+@dataclass(frozen=True)
+class _SegmentMemoryDecision:
+    applied: bool
+    score: float
+    reason: str
+    query: str
 
 
 @lru_cache(maxsize=1)
@@ -205,7 +317,550 @@ def _merge_protected_and_photon_indices(
     valid_photon_indices = [
         idx for idx in photon_indices if 0 <= idx < len(chunk_ids_for_scoring)
     ]
-    return sorted(set(protected_indices) | set(valid_photon_indices))
+    merged: list[int] = []
+    seen: set[int] = set()
+    for idx in protected_indices + valid_photon_indices:
+        if idx in seen:
+            continue
+        seen.add(idx)
+        merged.append(idx)
+    return merged
+
+
+def _normalise_text(text: str) -> str:
+    return re.sub(r"\s+", " ", text.casefold()).strip()
+
+
+def _text_features(text: str) -> set[str]:
+    """Return language-agnostic-ish features for short query/document overlap."""
+    normalised = _normalise_text(text)
+    features = set(_ASCII_TOKEN_RE.findall(normalised))
+    for segment in _CJK_RE.findall(normalised):
+        if len(segment) <= 2:
+            features.add(segment)
+        else:
+            features.update(segment[i : i + 2] for i in range(len(segment) - 1))
+            features.update(segment[i : i + 3] for i in range(len(segment) - 2))
+    if not features and normalised:
+        compact = normalised.replace(" ", "")
+        features.update(compact[i : i + 3] for i in range(max(1, len(compact) - 2)))
+    return {f for f in features if f}
+
+
+def _feature_overlap(a: str, b: str) -> float:
+    left = _text_features(a)
+    if not left:
+        return 0.0
+    right = _text_features(b)
+    if not right:
+        return 0.0
+    return len(left & right) / len(left)
+
+
+def _has_follow_up_marker(question: str) -> bool:
+    q = _normalise_text(question)
+    return any(marker.casefold() in q for marker in _FOLLOW_UP_MARKERS) or any(
+        marker.casefold() in q for marker in _COMPARISON_MARKERS
+    )
+
+
+def _has_comparison_marker(question: str) -> bool:
+    q = _normalise_text(question)
+    return any(marker.casefold() in q for marker in _COMPARISON_MARKERS)
+
+
+def _standalone_topic_anchors(question: str) -> list[str]:
+    """Extract explicit subject anchors from standalone-looking questions."""
+    anchors: list[str] = []
+    seen: set[str] = set()
+    for match in _STANDALONE_TOPIC_RE.finditer(_normalise_text(question)):
+        anchor = match.group("anchor").strip()
+        compact = re.sub(r"\s+", "", anchor)
+        if len(compact) < 6:
+            continue
+        if any(noise in compact for noise in _TOPIC_ANCHOR_NOISE):
+            continue
+        if compact in seen:
+            continue
+        seen.add(compact)
+        anchors.append(compact)
+    return anchors
+
+
+def _has_explicit_topic_switch_signal(
+    question: str,
+    prior_questions: list[str],
+) -> bool:
+    """Return True when the current question names a new standalone target.
+
+    PHOTON can detect that two turns are semantically nearby, but that is not
+    enough to prove the user wants carryover.  A question that explicitly names
+    a new subject ("Xの概要", "Xについて" etc.) and has very low overlap with
+    recent questions should start a new segment unless it is framed as a
+    comparison.
+    """
+    if not prior_questions:
+        return False
+    if _has_follow_up_marker(question) or _has_comparison_marker(question):
+        return False
+    anchors = _standalone_topic_anchors(question)
+    if not anchors:
+        return False
+    similarity = max((_feature_overlap(question, prev) for prev in prior_questions), default=0.0)
+    if similarity >= 0.25:
+        return False
+    return all(
+        max((_feature_overlap(anchor, prev) for prev in prior_questions), default=0.0)
+        < 0.08
+        for anchor in anchors
+    )
+
+
+def _recent_questions(session: SessionState | None, limit: int) -> list[str]:
+    if session is None or limit <= 0:
+        return []
+    questions = [turn.question.strip() for turn in session.turns if turn.question]
+    return questions[-limit:]
+
+
+def _recent_questions_in_segment(
+    session: SessionState | None,
+    segment_state: _TopicSegmentState | None,
+    segment_id: int,
+    limit: int,
+) -> list[str]:
+    if session is None or segment_state is None or limit <= 0:
+        return []
+    turn_segments = segment_state.turn_segments or {}
+    questions = [
+        turn.question.strip()
+        for turn in session.turns
+        if turn.question and turn_segments.get(turn.turn_id) == segment_id
+    ]
+    return questions[-limit:]
+
+
+def _recent_turns_in_segment(
+    session: SessionState | None,
+    segment_state: _TopicSegmentState | None,
+    segment_id: int,
+    limit: int,
+) -> list[Any]:
+    if session is None or segment_state is None or limit <= 0:
+        return []
+    turn_segments = segment_state.turn_segments or {}
+    turns = [
+        turn
+        for turn in session.turns
+        if turn_segments.get(turn.turn_id) == segment_id
+    ]
+    return turns[-limit:]
+
+
+def _history_text_from_turns(turns: list[Any]) -> str:
+    lines: list[str] = []
+    for turn in turns:
+        lines.append(f"Q{turn.turn_id}: {turn.question}")
+        answer_stripped = re.sub(r"\[C:\d+\]", "", turn.answer).strip()
+        answer_preview = (
+            answer_stripped[:400] + "..."
+            if len(answer_stripped) > 400
+            else answer_stripped
+        )
+        lines.append(f"A{turn.turn_id}: {answer_preview}")
+    return "\n".join(lines)
+
+
+def _generation_history_text(
+    session: SessionState | None,
+    segment_state: _TopicSegmentState | None,
+    *,
+    segment_id: int,
+    carryover_mode: str,
+    max_turns: int = 4,
+) -> str:
+    """Return only the history that should be visible to generation."""
+    if session is None or not session.turns or max_turns <= 0:
+        return ""
+    if carryover_mode in {"weak", "independent"}:
+        return ""
+
+    history_limit = max_turns
+    if carryover_mode == "mixed":
+        history_limit = min(max_turns, 2)
+
+    turns = _recent_turns_in_segment(
+        session,
+        segment_state,
+        segment_id,
+        history_limit,
+    )
+    return _history_text_from_turns(turns)
+
+
+def _resolve_context_carryover(
+    question: str,
+    session: SessionState | None,
+    *,
+    enabled: bool,
+    rewrite_enabled: bool,
+    rewrite_history_max: int,
+    rewrite_questions: list[str] | None = None,
+) -> _CarryoverDecision:
+    """Classify whether this turn should carry prior context into retrieval.
+
+    The heuristic intentionally avoids domain-specific entity rules. It uses
+    anaphora/follow-up markers plus lexical/character-ngram similarity to
+    decide whether history should be strong, mixed, or weak.
+    """
+    if not enabled or session is None or not session.turns:
+        return _CarryoverDecision(
+            mode="independent",
+            query=question,
+            similarity=0.0,
+            marker=False,
+            reason="no_history_or_disabled",
+        )
+
+    prior_questions = (
+        list(rewrite_questions)
+        if rewrite_questions is not None
+        else _recent_questions(session, max(1, rewrite_history_max))
+    )
+    similarity = max((_feature_overlap(question, prev) for prev in prior_questions), default=0.0)
+    marker = _has_follow_up_marker(question)
+
+    if marker and similarity >= 0.08:
+        mode = "strong"
+        reason = "marker_and_similarity"
+    elif marker:
+        mode = "mixed"
+        reason = "marker"
+    elif similarity >= 0.18:
+        mode = "mixed"
+        reason = "similarity"
+    else:
+        mode = "weak"
+        reason = "low_similarity_no_marker"
+
+    rewritten = question
+    if rewrite_enabled and mode in {"strong", "mixed"}:
+        context = " ".join(q for q in prior_questions if q)
+        if context:
+            rewritten = f"{context} {question}"
+
+    return _CarryoverDecision(
+        mode=mode,
+        query=rewritten,
+        similarity=similarity,
+        marker=marker,
+        reason=reason,
+    )
+
+
+def _boost_carryover_with_photon_matches(
+    decision: _CarryoverDecision,
+    question: str,
+    session: SessionState | None,
+    *,
+    matches: list[_PhotonCarryoverMatch],
+    rewrite_enabled: bool,
+    rewrite_history_max: int,
+) -> _CarryoverDecision:
+    """Promote weak lexical carryover when PHOTON finds related past turns."""
+    if decision.mode not in {"weak", "independent"}:
+        return decision
+    if session is None or not session.turns or not matches:
+        return decision
+
+    turns_by_id = {turn.turn_id: turn for turn in session.turns}
+    matched_questions: list[str] = []
+    best_score = 0.0
+    for match in sorted(matches, key=lambda item: item.turn_id):
+        turn = turns_by_id.get(match.turn_id)
+        if turn is None or not turn.question:
+            continue
+        matched_questions.append(turn.question.strip())
+        best_score = max(best_score, float(match.score))
+
+    if not matched_questions:
+        return decision
+
+    mode = "strong" if decision.marker else "mixed"
+    rewritten = question
+    if rewrite_enabled:
+        history_limit = max(1, rewrite_history_max)
+        context = " ".join(q for q in matched_questions[-history_limit:] if q)
+        if context:
+            rewritten = f"{context} {question}"
+
+    return _CarryoverDecision(
+        mode=mode,
+        query=rewritten,
+        similarity=max(decision.similarity, best_score),
+        marker=decision.marker,
+        reason=f"{decision.reason}+photon_related_turn",
+    )
+
+
+def _resolve_segment_memory(
+    question: str,
+    segment_questions: list[str],
+    *,
+    rewrite_enabled: bool,
+    rewrite_history_max: int,
+) -> _SegmentMemoryDecision:
+    """Recover the active segment for terse follow-ups without entity rules.
+
+    This intentionally uses only generic signals: current-query feature count,
+    overlap with recent segment questions, and recency.  It avoids hard-coded
+    business terms, document names, or field labels.
+    """
+    if not segment_questions:
+        return _SegmentMemoryDecision(False, 0.0, "no_segment_questions", question)
+    if _has_explicit_topic_switch_signal(question, segment_questions):
+        return _SegmentMemoryDecision(False, 0.0, "explicit_topic_switch", question)
+
+    feature_count = len(_text_features(question))
+    similarity = max((_feature_overlap(question, prev) for prev in segment_questions), default=0.0)
+    marker = _has_follow_up_marker(question)
+    short_followup = feature_count <= _SEGMENT_MEMORY_FEATURE_MAX
+    if not marker and not short_followup and similarity < _SEGMENT_MEMORY_MIN_SIMILARITY:
+        return _SegmentMemoryDecision(False, similarity, "insufficient_signal", question)
+
+    context = " ".join(segment_questions[-max(1, rewrite_history_max) :])
+    rewritten = f"{context} {question}" if rewrite_enabled and context else question
+    reason = "segment_memory_marker" if marker else "segment_memory_recent"
+    return _SegmentMemoryDecision(True, similarity, reason, rewritten)
+
+
+def _turn_decay(current_turn_id: int, past_turn_id: int, decay: float) -> float:
+    distance = max(1, current_turn_id - past_turn_id)
+    decay = min(1.0, max(0.0, float(decay)))
+    return decay ** max(0, distance - 1)
+
+
+def _normalised_score_map(results: list[Any]) -> dict[str, float]:
+    scores: dict[str, float] = {}
+    for result in results:
+        cid = str(getattr(result, "chunk_id", ""))
+        if not cid:
+            continue
+        raw_score = getattr(result, "score", 0.0)
+        if isinstance(raw_score, (int, float)):
+            scores[cid] = max(scores.get(cid, 0.0), float(raw_score))
+    max_score = max(scores.values(), default=0.0)
+    if max_score <= 0.0:
+        return scores
+    return {cid: score / max_score for cid, score in scores.items()}
+
+
+def _last_prune_score_map(photon_inference: Any, session_id: str) -> dict[str, float]:
+    last_scores = getattr(photon_inference, "_last_prune_scores_by_session", {})
+    if not isinstance(last_scores, dict):
+        return {}
+    maybe_scores = last_scores.get(session_id, {})
+    if not isinstance(maybe_scores, dict):
+        return {}
+    return {
+        str(cid): float(score)
+        for cid, score in maybe_scores.items()
+        if isinstance(score, (int, float))
+    }
+
+
+def _score_current_question_candidates(
+    photon_inference: Any,
+    *,
+    chunk_texts: list[str],
+    chunk_ids: list[str],
+    question: str,
+) -> dict[str, float]:
+    """Score candidates against the current question without mutating session state."""
+    if not chunk_texts or len(chunk_texts) <= 1 or not question.strip():
+        return {}
+    scratch_session_id = f"current-question-score-{uuid.uuid4().hex}"
+    try:
+        photon_inference.prune_evidence(
+            chunk_texts=chunk_texts,
+            chunk_ids=chunk_ids,
+            session_id=scratch_session_id,
+            max_chunks=max(1, len(chunk_texts) - 1),
+            question=question,
+        )
+        return _last_prune_score_map(photon_inference, scratch_session_id)
+    finally:
+        last_scores = getattr(photon_inference, "_last_prune_scores_by_session", None)
+        if isinstance(last_scores, dict):
+            last_scores.pop(scratch_session_id, None)
+
+
+def _admit_photon_indices(
+    *,
+    candidate_indices: list[int],
+    protected_indices: list[int],
+    chunk_ids_for_scoring: list[str],
+    chunk_texts: list[str],
+    retrieval_scores: dict[str, float],
+    query: str,
+    min_current_score: float,
+) -> list[int]:
+    """Filter PHOTON-selected candidates that are stale for the current query."""
+    protected_set = set(protected_indices)
+    admitted: list[int] = []
+    min_current_score = max(0.0, float(min_current_score))
+    for idx in candidate_indices:
+        if idx in protected_set:
+            admitted.append(idx)
+            continue
+        if not (0 <= idx < len(chunk_ids_for_scoring)):
+            continue
+        cid = chunk_ids_for_scoring[idx]
+        retrieval_score = retrieval_scores.get(cid, 0.0)
+        overlap = _feature_overlap(query, chunk_texts[idx])
+        if max(retrieval_score, overlap) >= min_current_score:
+            admitted.append(idx)
+    return admitted
+
+
+def _dual_score_candidate_indices(
+    *,
+    candidate_indices: list[int],
+    protected_indices: list[int],
+    chunk_ids_for_scoring: list[str],
+    retrieval_scores: dict[str, float],
+    current_scores: dict[str, float],
+    session_scores: dict[str, float],
+    carryover_mode: str,
+    max_extra: int,
+) -> list[int]:
+    """Select non-protected candidates by retrieval + PHOTON current/session scores."""
+    protected_set = {
+        idx for idx in protected_indices if 0 <= idx < len(chunk_ids_for_scoring)
+    }
+    max_extra = max(0, int(max_extra))
+
+    scored: list[tuple[float, int]] = []
+    for idx in candidate_indices:
+        if idx in protected_set or not (0 <= idx < len(chunk_ids_for_scoring)):
+            continue
+        cid = chunk_ids_for_scoring[idx]
+        retrieval = retrieval_scores.get(cid, 0.0)
+        current = current_scores.get(cid, 0.0)
+        session = session_scores.get(cid, 0.0)
+        stale_gap = max(0.0, session - current)
+        if carryover_mode in {"strong", "mixed"}:
+            score = (0.45 * retrieval) + (0.35 * current) + (0.20 * session)
+            score -= 0.12 * stale_gap
+        else:
+            score = (0.60 * retrieval) + (0.40 * current)
+            score -= 0.30 * stale_gap
+        scored.append((score, idx))
+
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    return list(protected_indices) + [idx for _score, idx in scored[:max_extra]]
+
+
+def _support_score_for_pack(
+    *,
+    question: str,
+    pack_chunks: list[Any],
+    retrieval_scores: dict[str, float],
+    current_scores: dict[str, float],
+    session_scores: dict[str, float],
+) -> float:
+    """Estimate how directly the selected evidence supports this turn."""
+    scores: list[float] = []
+    photon_scored = bool(current_scores or session_scores)
+    for chunk in pack_chunks:
+        cid = str(getattr(chunk, "chunk_id", ""))
+        content = str(getattr(chunk, "content", ""))
+        if not cid:
+            continue
+        scores.append(
+            max(
+                (0.35 if photon_scored else 1.0) * retrieval_scores.get(cid, 0.0),
+                current_scores.get(cid, 0.0),
+                0.5 * session_scores.get(cid, 0.0),
+                _feature_overlap(question, content),
+            )
+        )
+    return max(scores, default=0.0)
+
+
+def _support_check_note(support_score: float, *, guard_active: bool) -> str:
+    base = (
+        "## Support Check\n"
+        f"- Evidence support score: {support_score:.3f}\n"
+        "- Before answering, verify that each claim is directly supported by the cited chunks.\n"
+        "- If the evidence only partially supports a claim, state the limitation instead of filling gaps.\n"
+        "- For questions about whether a named case, condition, item, or activity is included, "
+        "do not treat broad examples, open-ended wording, or \"etc.\" as sufficient support unless "
+        "the named item or an equivalent category is explicitly grounded in the evidence."
+    )
+    if guard_active:
+        return (
+            base
+            + "\n- The support score is low. Prefer a cautious answer and say "
+            "「根拠が不足しています」 for unsupported requested details."
+        )
+    return base
+
+
+def _retrieval_result_audit_rows(
+    results: list[Any],
+    *,
+    store: Any,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    ids = [str(getattr(result, "chunk_id", "")) for result in results[:limit]]
+    chunks = store.get_many([cid for cid in ids if cid])
+    chunk_map = {chunk.chunk_id: chunk for chunk in chunks}
+    rows: list[dict[str, Any]] = []
+    for rank, result in enumerate(results[:limit], start=1):
+        cid = str(getattr(result, "chunk_id", ""))
+        chunk = chunk_map.get(cid)
+        rows.append(
+            {
+                "rank": rank,
+                "chunk_id": cid,
+                "rel_path": getattr(chunk, "rel_path", None),
+                "section": getattr(chunk, "section_header", None),
+                "score": getattr(result, "score", None),
+                "lexical_score": getattr(result, "lexical_score", None),
+                "embedding_score": getattr(result, "embedding_score", None),
+                "reranker_score": getattr(result, "reranker_score", None),
+            }
+        )
+    return rows
+
+
+def _chunk_id_audit_rows(
+    chunk_ids: list[str],
+    *,
+    store: Any,
+    source_map: dict[str, str] | None = None,
+    cited_chunk_ids: list[str] | None = None,
+    limit: int = 30,
+) -> list[dict[str, Any]]:
+    ids = _dedupe_preserve_order([cid for cid in chunk_ids if cid])[:limit]
+    chunks = store.get_many(ids)
+    chunk_map = {chunk.chunk_id: chunk for chunk in chunks}
+    cited = set(cited_chunk_ids or [])
+    rows: list[dict[str, Any]] = []
+    for rank, cid in enumerate(ids, start=1):
+        chunk = chunk_map.get(cid)
+        rows.append(
+            {
+                "rank": rank,
+                "chunk_id": cid,
+                "rel_path": getattr(chunk, "rel_path", None),
+                "section": getattr(chunk, "section_header", None),
+                "source": (source_map or {}).get(cid),
+                "cited": cid in cited,
+            }
+        )
+    return rows
 
 
 def _dedupe_preserve_order(values: list[str]) -> list[str]:
@@ -217,6 +872,18 @@ def _dedupe_preserve_order(values: list[str]) -> list[str]:
         seen.add(value)
         ordered.append(value)
     return ordered
+
+
+def _compose_evidence_frame_pins(
+    *,
+    current_query_ids: list[str],
+    working_memory_ids: list[str] | None = None,
+    related_past_ids: list[str] | None = None,
+) -> list[str]:
+    """Order evidence frame pins so current-query support cannot be crowded out."""
+    return _dedupe_preserve_order(
+        current_query_ids + (working_memory_ids or []) + (related_past_ids or [])
+    )
 
 
 def _split_sibling_chunk_ids(chunk_id: str) -> list[str]:
@@ -998,6 +1665,17 @@ def _clear_photon_session_state(photon_inference: Any, session_id: str) -> None:
     photon_session.reset_working_memory()
 
 
+def _photon_session_has_pruning_state(photon_inference: Any, session_id: str) -> bool:
+    """Return whether PHOTON has a usable coarse state for pruning."""
+    sessions = getattr(photon_inference, "_sessions", None)
+    if not isinstance(sessions, dict):
+        return False
+    photon_session = sessions.get(session_id)
+    current_state = getattr(photon_session, "current_state", None)
+    level_states = getattr(current_state, "level_states", None)
+    return bool(level_states)
+
+
 def build_pipeline(cfg: Config) -> RepoRAGPipeline | PhotonRAGPipeline:
     """Factory: create the right pipeline based on cfg.model.provider.
 
@@ -1048,6 +1726,7 @@ class PhotonRAGPipeline:
         # documented in design §3 (write at end of Turn N, pop at start of
         # Turn N+1) is preserved.
         self._relevant_past_turn_cache: dict[str, TurnState] = {}
+        self._topic_segment_cache: dict[str, _TopicSegmentState] = {}
 
     def _clear_photon_session_artifacts(self, session_id: str) -> None:
         """Centralised reset for PHOTON state + Issue #103 sidecar cache.
@@ -1066,6 +1745,94 @@ class PhotonRAGPipeline:
         """
         self._relevant_past_turn_cache.pop(session_id, None)
         _clear_photon_session_state(self.photon_inference, session_id)
+
+    def _segment_state_for_session(
+        self,
+        session_id: str,
+        session: SessionState,
+    ) -> _TopicSegmentState:
+        state = self._topic_segment_cache.get(session_id)
+        if state is None:
+            state = _TopicSegmentState()
+            self._topic_segment_cache[session_id] = state
+        turn_segments = state.turn_segments or {}
+        for turn in session.turns:
+            turn_segments.setdefault(turn.turn_id, state.current_segment_id)
+        state.turn_segments = turn_segments
+        return state
+
+    def _photon_carryover_matches_for_question(
+        self,
+        *,
+        session_id: str,
+        question: str,
+        max_turns: int,
+        min_similarity: float,
+    ) -> list[_PhotonCarryoverMatch]:
+        """Compare a transient question state with PHOTON turn history.
+
+        This intentionally uses ``hierarchical_prefill`` rather than
+        ``session_forward`` so carryover classification can consult PHOTON
+        semantics without mutating the session or appending a turn.
+        """
+        max_turns = _nonnegative_int(max_turns)
+        if max_turns <= 0:
+            return []
+        min_similarity = max(0.0, min(1.0, float(min_similarity)))
+        sessions = getattr(self.photon_inference, "_sessions", None)
+        if not isinstance(sessions, dict):
+            return []
+        photon_session = sessions.get(session_id)
+        turn_history = getattr(photon_session, "turn_history", None)
+        if not turn_history:
+            return []
+
+        try:
+            evidence_tokens = tokenize_evidence_pack(
+                question,
+                self.tokenizer,
+                self.photon_cfg,
+            )
+            if getattr(evidence_tokens, "size", 0) <= 0:
+                return []
+            _logits, current_state = self.photon_inference.hierarchical_prefill(
+                evidence_tokens.reshape(1, -1)
+            )
+            current_levels = getattr(current_state, "level_states", None)
+            if not current_levels:
+                return []
+
+            from photon_mlx.session import cosine_distance
+
+            current_top = current_levels[-1]
+            scored: list[_PhotonCarryoverMatch] = []
+            for past_turn in list(turn_history)[-max_turns:]:
+                past_state = getattr(past_turn, "hierarchical_state", None)
+                past_levels = getattr(past_state, "level_states", None)
+                if not past_levels:
+                    continue
+                try:
+                    score = 1.0 - cosine_distance(current_top, past_levels[-1])
+                except (RuntimeError, TypeError, ValueError):
+                    continue
+                if not math.isfinite(score) or score < min_similarity:
+                    continue
+                try:
+                    turn_id = int(getattr(past_turn, "turn_id"))
+                except (TypeError, ValueError):
+                    continue
+                scored.append(_PhotonCarryoverMatch(turn_id=turn_id, score=score))
+        except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
+            _logger.warning(
+                "PHOTON carryover matching failed; using lexical carryover "
+                "decision (fail-closed, reason=%s)",
+                type(exc).__name__,
+            )
+            return []
+
+        scored.sort(key=lambda item: (item.score, item.turn_id), reverse=True)
+        selected = scored[:max_turns]
+        return sorted(selected, key=lambda item: item.turn_id)
 
     @staticmethod
     def _extract_pinned_chunk_ids(
@@ -1121,10 +1888,24 @@ class PhotonRAGPipeline:
         matched_turns: list[TurnState],
     ) -> list[str]:
         """Map PHOTON-matched turn ids to prior user questions in turn order."""
+        return [
+            question
+            for _turn_id, question in PhotonRAGPipeline._extract_related_question_pairs(
+                session,
+                matched_turns,
+            )
+        ]
+
+    @staticmethod
+    def _extract_related_question_pairs(
+        session: SessionState | None,
+        matched_turns: list[TurnState],
+    ) -> list[tuple[int, str]]:
+        """Map PHOTON-matched turn ids to ``(turn_id, question)`` in order."""
         if session is None or not session.turns or not matched_turns:
             return []
 
-        questions: list[str] = []
+        questions: list[tuple[int, str]] = []
         seen_turn_ids: set[int] = set()
         for matched in sorted(matched_turns, key=lambda turn: turn.turn_id):
             if matched.turn_id in seen_turn_ids:
@@ -1144,7 +1925,7 @@ class PhotonRAGPipeline:
             if not question:
                 question = getattr(matched, "question_text", "")
             if question.strip():
-                questions.append(question.strip())
+                questions.append((int(matched.turn_id), question.strip()))
         return questions
 
     # ---------------------------------------------------------------
@@ -1329,15 +2110,201 @@ class PhotonRAGPipeline:
 
         photon_session_id = session_id or "default"
 
+        is_follow_up = len(session.turns) > 0
+        segment_state = self._segment_state_for_session(photon_session_id, session)
+        inference_cfg = cfg.get("inference")
+        context_carryover_enabled = (
+            bool(getattr(inference_cfg, "context_carryover_enabled", True))
+            if inference_cfg is not None
+            else True
+        )
+        context_rewrite_enabled = (
+            bool(getattr(inference_cfg, "context_rewrite_enabled", True))
+            if inference_cfg is not None
+            else True
+        )
+        rewrite_history_max = (
+            _nonnegative_int(
+                getattr(
+                    inference_cfg,
+                    "context_rewrite_history_max",
+                    _REWRITE_HISTORY_MAX,
+                ),
+                default=_REWRITE_HISTORY_MAX,
+            )
+            if inference_cfg is not None
+            else _REWRITE_HISTORY_MAX
+        )
+        photon_carryover_enabled = (
+            bool(getattr(inference_cfg, "photon_carryover_enabled", True))
+            if inference_cfg is not None
+            else True
+        )
+        photon_carryover_max_turns = (
+            _nonnegative_int(
+                getattr(
+                    inference_cfg,
+                    "photon_carryover_max_turns",
+                    _PHOTON_CARRYOVER_MAX_TURNS,
+                ),
+                default=_PHOTON_CARRYOVER_MAX_TURNS,
+            )
+            if inference_cfg is not None
+            else _PHOTON_CARRYOVER_MAX_TURNS
+        )
+        photon_carryover_min_similarity = (
+            float(
+                getattr(
+                    inference_cfg,
+                    "photon_carryover_min_similarity",
+                    _PHOTON_CARRYOVER_MIN_SIMILARITY,
+                )
+            )
+            if inference_cfg is not None
+            else _PHOTON_CARRYOVER_MIN_SIMILARITY
+        )
+        initial_carryover = _resolve_context_carryover(
+            question,
+            session,
+            enabled=context_carryover_enabled,
+            rewrite_enabled=context_rewrite_enabled,
+            rewrite_history_max=rewrite_history_max,
+        )
+        explicit_topic_switch = _has_explicit_topic_switch_signal(
+            question,
+            _recent_questions(session, max(1, rewrite_history_max)),
+        )
+        if initial_carryover.mode == "weak" and explicit_topic_switch:
+            initial_carryover = _CarryoverDecision(
+                mode="weak",
+                query=question,
+                similarity=initial_carryover.similarity,
+                marker=initial_carryover.marker,
+                reason=f"{initial_carryover.reason}+explicit_topic_switch",
+            )
+        photon_carryover_matches: list[_PhotonCarryoverMatch] = []
+        if (
+            is_follow_up
+            and photon_carryover_enabled
+            and initial_carryover.mode == "weak"
+            and not explicit_topic_switch
+        ):
+            effective_min_similarity = photon_carryover_min_similarity
+            if not initial_carryover.marker:
+                effective_min_similarity = min(1.0, effective_min_similarity + 0.1)
+            photon_carryover_matches = self._photon_carryover_matches_for_question(
+                session_id=photon_session_id,
+                question=question,
+                max_turns=photon_carryover_max_turns,
+                min_similarity=effective_min_similarity,
+            )
+            initial_carryover = _boost_carryover_with_photon_matches(
+                initial_carryover,
+                question,
+                session,
+                matches=photon_carryover_matches,
+                rewrite_enabled=context_rewrite_enabled,
+                rewrite_history_max=rewrite_history_max,
+            )
+        current_segment_id = segment_state.current_segment_id
+        segment_memory = _SegmentMemoryDecision(False, 0.0, "not_considered", question)
+        if is_follow_up and initial_carryover.mode == "weak" and not explicit_topic_switch:
+            previous_segment_questions = _recent_questions_in_segment(
+                session,
+                segment_state,
+                current_segment_id,
+                max(1, rewrite_history_max),
+            )
+            if not previous_segment_questions:
+                previous_segment_questions = _recent_questions(
+                    session,
+                    max(1, rewrite_history_max),
+                )
+            segment_memory = _resolve_segment_memory(
+                question,
+                previous_segment_questions,
+                rewrite_enabled=context_rewrite_enabled,
+                rewrite_history_max=rewrite_history_max,
+            )
+            if segment_memory.applied:
+                initial_carryover = _CarryoverDecision(
+                    mode="mixed",
+                    query=segment_memory.query,
+                    similarity=max(initial_carryover.similarity, segment_memory.score),
+                    marker=initial_carryover.marker or _has_follow_up_marker(question),
+                    reason=f"{initial_carryover.reason}+{segment_memory.reason}",
+                )
+        if is_follow_up and initial_carryover.mode == "weak":
+            current_segment_id += 1
+            segment_state.current_segment_id = current_segment_id
+        segment_questions = _recent_questions_in_segment(
+            session,
+            segment_state,
+            current_segment_id,
+            max(1, rewrite_history_max),
+        )
+        carryover = _resolve_context_carryover(
+            question,
+            session,
+            enabled=context_carryover_enabled,
+            rewrite_enabled=context_rewrite_enabled,
+            rewrite_history_max=rewrite_history_max,
+            rewrite_questions=segment_questions,
+        )
+        carryover = _boost_carryover_with_photon_matches(
+            carryover,
+            question,
+            session,
+            matches=photon_carryover_matches,
+            rewrite_enabled=context_rewrite_enabled,
+            rewrite_history_max=rewrite_history_max,
+        )
+        if (
+            is_follow_up
+            and carryover.mode == "weak"
+            and not explicit_topic_switch
+            and not segment_memory.applied
+        ):
+            memory_questions = segment_questions or _recent_questions(
+                session,
+                max(1, rewrite_history_max),
+            )
+            segment_memory = _resolve_segment_memory(
+                question,
+                memory_questions,
+                rewrite_enabled=context_rewrite_enabled,
+                rewrite_history_max=rewrite_history_max,
+            )
+        if segment_memory.applied and carryover.mode == "weak":
+            carryover = _CarryoverDecision(
+                mode="mixed",
+                query=segment_memory.query,
+                similarity=max(carryover.similarity, segment_memory.score),
+                marker=carryover.marker or _has_follow_up_marker(question),
+                reason=f"{carryover.reason}+{segment_memory.reason}",
+            )
+        if is_follow_up and initial_carryover.mode == "weak":
+            carryover = _CarryoverDecision(
+                mode="weak",
+                query=question,
+                similarity=initial_carryover.similarity,
+                marker=initial_carryover.marker,
+                reason=initial_carryover.reason,
+            )
+        retrieval_query = carryover.query
+        if is_follow_up and carryover.mode == "weak":
+            # A fresh independent question should not reuse a stale PHOTON
+            # hierarchy from an earlier topic. The current turn will prefill a
+            # new state after evidence is built.
+            self._clear_photon_session_artifacts(photon_session_id)
+
         # --- Query expansion ---
         qe_cfg = cfg.retrieval.query_expansion
         if qe_cfg.get("enabled", False):
-            _queries = expand_query(question, mapping=qe_cfg.get("domain_map"))
+            _queries = expand_query(retrieval_query, mapping=qe_cfg.get("domain_map"))
             expansion_terms: str | None = _queries[1] if len(_queries) > 1 else None
         else:
             expansion_terms = None
-
-        is_follow_up = len(session.turns) > 0
 
         # --- Two-pass search configuration (Issue #56) ---
         two_pass_enabled, pass1_top_k, pass2_top_k = _resolve_two_pass_search_cfg(
@@ -1354,7 +2321,7 @@ class PhotonRAGPipeline:
         # --- Retrieval ---
         with prof.phase("retrieval"):
             raw = hybrid_search(
-                query=question,
+                query=retrieval_query,
                 lexical_index=bl.lexical,
                 embedding_index=bl.embedding,
                 lexical_top_k=cfg.retrieval.lexical_top_k,
@@ -1458,6 +2425,33 @@ class PhotonRAGPipeline:
             if inference_cfg is not None
             else _RELATED_PAST_EVIDENCE_TOP_K
         )
+        past_context_decay = (
+            float(getattr(inference_cfg, "past_context_decay", _PAST_CONTEXT_DECAY))
+            if inference_cfg is not None
+            else _PAST_CONTEXT_DECAY
+        )
+        past_context_min_decay = (
+            float(
+                getattr(
+                    inference_cfg,
+                    "past_context_min_decay",
+                    _PAST_CONTEXT_MIN_DECAY,
+                )
+            )
+            if inference_cfg is not None
+            else _PAST_CONTEXT_MIN_DECAY
+        )
+        admission_min_current_score = (
+            float(
+                getattr(
+                    inference_cfg,
+                    "admission_min_current_score",
+                    _ADMISSION_MIN_CURRENT_SCORE,
+                )
+            )
+            if inference_cfg is not None
+            else _ADMISSION_MIN_CURRENT_SCORE
+        )
         effective_max_chunks = cfg.evidence_pack.max_chunks
         do_pass1 = two_pass_enabled and not is_follow_up
         do_pass2plus = pruning_enabled and is_follow_up
@@ -1471,10 +2465,30 @@ class PhotonRAGPipeline:
         )
         photon_pruned_ids: list[str] = []
         photon_score_map: dict[str, float] = {}
+        photon_current_score_map: dict[str, float] = {}
+        photon_session_score_map: dict[str, float] = {}
+        photon_pruning_applied = bool(do_pass1 or do_pass2plus)
+        photon_scoring_mode: str | None = None
+        dual_score_pruning_applied = False
+        current_query_frame_ids: list[str] = []
         if do_pass1 or do_pass2plus:
             chunks_for_scoring = bl.store.get_many(expanded_ids)
             chunk_texts = [c.content for c in chunks_for_scoring]
             chunk_ids_for_scoring = [c.chunk_id for c in chunks_for_scoring]
+            if do_pass1:
+                pruning_question: str | None = question
+                photon_scoring_mode = "turn1_question"
+            elif carryover.mode == "weak":
+                pruning_question = retrieval_query
+                photon_scoring_mode = "topic_switch_current_query"
+            elif _photon_session_has_pruning_state(
+                self.photon_inference, photon_session_id
+            ):
+                pruning_question = None
+                photon_scoring_mode = "session_state"
+            else:
+                pruning_question = retrieval_query
+                photon_scoring_mode = "question_fallback_no_state"
 
             if split_pruning_enabled:
                 scoring_max_chunks = photon_top_m
@@ -1486,17 +2500,55 @@ class PhotonRAGPipeline:
                             chunk_ids=chunk_ids_for_scoring,
                             session_id=photon_session_id,
                             max_chunks=photon_top_m,
-                            question=None,
+                            question=pruning_question,
                         )
+                    selection_scores = _last_prune_score_map(
+                        self.photon_inference,
+                        photon_session_id,
+                    )
+                    if pruning_question is None:
+                        photon_session_score_map = dict(selection_scores)
+                        photon_current_score_map = _score_current_question_candidates(
+                            self.photon_inference,
+                            chunk_texts=chunk_texts,
+                            chunk_ids=chunk_ids_for_scoring,
+                            question=retrieval_query,
+                        )
+                    else:
+                        photon_current_score_map = dict(selection_scores)
                 ranked_chunk_ids = [
                     str(getattr(result, "chunk_id", "")) for result in raw
                 ]
-                selected_indices = _merge_protected_and_photon_indices(
-                    ranked_chunk_ids=ranked_chunk_ids,
-                    chunk_ids_for_scoring=chunk_ids_for_scoring,
-                    photon_indices=selected_indices,
-                    protected_top_n=protected_top_n,
+                protected_indices = _unique_candidate_indices_by_rank(
+                    ranked_chunk_ids,
+                    chunk_ids_for_scoring,
+                    protected_top_n,
                 )
+                current_query_frame_ids = [
+                    chunk_ids_for_scoring[idx]
+                    for idx in protected_indices
+                    if 0 <= idx < len(chunk_ids_for_scoring)
+                ]
+                retrieval_scores = _normalised_score_map(list(raw_snapshot) + list(raw))
+                if photon_top_m > 0:
+                    selected_indices = _dual_score_candidate_indices(
+                        candidate_indices=list(range(len(chunk_ids_for_scoring))),
+                        protected_indices=protected_indices,
+                        chunk_ids_for_scoring=chunk_ids_for_scoring,
+                        retrieval_scores=retrieval_scores,
+                        current_scores=photon_current_score_map,
+                        session_scores=photon_session_score_map,
+                        carryover_mode=carryover.mode,
+                        max_extra=photon_top_m,
+                    )
+                    dual_score_pruning_applied = True
+                else:
+                    selected_indices = _merge_protected_and_photon_indices(
+                        ranked_chunk_ids=ranked_chunk_ids,
+                        chunk_ids_for_scoring=chunk_ids_for_scoring,
+                        photon_indices=[],
+                        protected_top_n=protected_top_n,
+                    )
             else:
                 scoring_max_chunks = pass2_top_k if do_pass1 else pruned_max_chunks
                 with prof.phase("pass1_scoring" if do_pass1 else "evidence_pruning"):
@@ -1505,24 +2557,40 @@ class PhotonRAGPipeline:
                         chunk_ids=chunk_ids_for_scoring,
                         session_id=photon_session_id,
                         max_chunks=scoring_max_chunks,
-                        question=question if do_pass1 else None,
+                        question=pruning_question,
                     )
+                selection_scores = _last_prune_score_map(
+                    self.photon_inference,
+                    photon_session_id,
+                )
+                if pruning_question is None:
+                    photon_session_score_map = dict(selection_scores)
+                    photon_current_score_map = _score_current_question_candidates(
+                        self.photon_inference,
+                        chunk_texts=chunk_texts,
+                        chunk_ids=chunk_ids_for_scoring,
+                        question=retrieval_query,
+                    )
+                else:
+                    photon_current_score_map = dict(selection_scores)
             selected_set = {chunk_ids_for_scoring[i] for i in selected_indices}
             photon_pruned_ids = [
                 cid for cid in chunk_ids_for_scoring if cid not in selected_set
             ]
-            last_scores = getattr(
-                self.photon_inference, "_last_prune_scores_by_session", {}
+            photon_score_map = _last_prune_score_map(
+                self.photon_inference,
+                photon_session_id,
             )
-            if isinstance(last_scores, dict):
-                maybe_scores = last_scores.get(photon_session_id, {})
-                if isinstance(maybe_scores, dict):
-                    photon_score_map = {
-                        str(cid): float(score)
-                        for cid, score in maybe_scores.items()
-                        if isinstance(score, (int, float))
-                    }
-            expanded_ids = [chunk_ids_for_scoring[i] for i in selected_indices]
+            selected_ids = [chunk_ids_for_scoring[i] for i in selected_indices]
+            if do_pass2plus and not current_query_frame_ids:
+                fallback_current_limit = protected_top_n or min(4, len(selected_ids))
+                ranked_chunk_ids = [
+                    str(getattr(result, "chunk_id", "")) for result in raw
+                ]
+                current_query_frame_ids = _dedupe_preserve_order(
+                    [cid for cid in ranked_chunk_ids if cid in set(selected_ids)]
+                )[:fallback_current_limit]
+            expanded_ids = selected_ids
             effective_max_chunks = (
                 len(expanded_ids) if split_pruning_enabled else scoring_max_chunks
             )
@@ -1538,14 +2606,21 @@ class PhotonRAGPipeline:
             and working_memory_cfg.past_turn_pinning_enabled
         )
         additional_pinned_ids: list[str] | None = None
-        if pinning_enabled and is_follow_up:
+        if pinning_enabled and is_follow_up and carryover.mode != "weak":
             cached_turn = self._relevant_past_turn_cache.pop(photon_session_id, None)
-            if cached_turn is not None:
+            cached_segment = (
+                (segment_state.turn_segments or {}).get(int(cached_turn.turn_id))
+                if cached_turn is not None
+                else None
+            )
+            if cached_turn is not None and cached_segment == current_segment_id:
                 additional_pinned_ids = self._extract_pinned_chunk_ids(
                     session,
                     cached_turn,
                     working_memory_cfg.max_pinned_chunks,
                 )
+        elif pinning_enabled and is_follow_up:
+            self._relevant_past_turn_cache.pop(photon_session_id, None)
 
         # Build skeleton debug rows (Issue #176): expanded_refs holds source
         # tags; photon_pruned and working_memory rows are appended after.
@@ -1560,6 +2635,11 @@ class PhotonRAGPipeline:
                     ExpandedChunkRef(chunk_id=cid, source="working_memory")
                 )
 
+        frame_pinned_ids = _compose_evidence_frame_pins(
+            current_query_ids=current_query_frame_ids,
+            working_memory_ids=additional_pinned_ids,
+        )
+
         # --- Evidence pack ---
         with prof.phase("evidence_pack"):
             pack = build_evidence_pack(
@@ -1568,7 +2648,7 @@ class PhotonRAGPipeline:
                 session=session,
                 max_chunks=effective_max_chunks,
                 max_tokens=cfg.evidence_pack.max_tokens,
-                additional_pinned_ids=additional_pinned_ids,
+                additional_pinned_ids=frame_pinned_ids or None,
             )
 
         # --- PHOTON prefill on question + evidence (new coarse state) ---
@@ -1586,6 +2666,7 @@ class PhotonRAGPipeline:
         confidence = 1.0
         tokenization_failed = False
         related_past_questions: list[str] = []
+        related_past_question_pairs: list[tuple[int, str]] = []
         try:
             evidence_tokens = tokenize_evidence_pack(
                 photon_input_text,
@@ -1627,7 +2708,11 @@ class PhotonRAGPipeline:
             )
             confidence = compute_confidence(logits)
             drift_dict = drift.as_dict() if drift else None
-            if is_follow_up and working_memory_cfg is not None:
+            if (
+                is_follow_up
+                and working_memory_cfg is not None
+                and carryover.mode != "weak"
+            ):
                 photon_session = self.photon_inference._sessions.get(photon_session_id)
                 finder = (
                     getattr(photon_session, "find_relevant_past_turns", None)
@@ -1648,25 +2733,54 @@ class PhotonRAGPipeline:
                         )
                         matched_turns = []
                     if isinstance(matched_turns, list):
-                        related_past_questions = self._extract_related_questions(
+                        related_past_question_pairs = self._extract_related_question_pairs(
                             session,
                             matched_turns,
                         )
+                        current_turn_id = len(session.turns) + 1
+                        related_past_question_pairs = [
+                            (turn_id, related_question)
+                            for turn_id, related_question in related_past_question_pairs
+                            if (segment_state.turn_segments or {}).get(turn_id)
+                            == current_segment_id
+                            and _turn_decay(
+                                current_turn_id,
+                                turn_id,
+                                past_context_decay,
+                            )
+                            >= past_context_min_decay
+                        ]
+                        related_past_questions = [
+                            question for _turn_id, question in related_past_question_pairs
+                        ]
 
         related_past_evidence_ids: list[str] = []
-        if is_follow_up and related_past_questions and related_evidence_top_k > 0:
+        if is_follow_up and related_past_question_pairs and related_evidence_top_k > 0:
             with prof.phase("retrieval"):
-                for related_question in related_past_questions:
+                current_turn_id = len(session.turns) + 1
+                for turn_id, related_question in related_past_question_pairs:
+                    decay_weight = _turn_decay(
+                        current_turn_id,
+                        turn_id,
+                        past_context_decay,
+                    )
+                    effective_related_top_k = max(
+                        1,
+                        min(
+                            related_evidence_top_k,
+                            round(related_evidence_top_k * decay_weight),
+                        ),
+                    )
                     related_raw = hybrid_search(
                         query=related_question,
                         lexical_index=bl.lexical,
                         embedding_index=bl.embedding,
                         lexical_top_k=cfg.retrieval.lexical_top_k,
                         embedding_top_k=cfg.retrieval.embedding_top_k,
-                        fused_top_k=related_evidence_top_k,
+                        fused_top_k=effective_related_top_k,
                         lexical_weight=cfg.retrieval.weights.lexical,
                         embedding_weight=cfg.retrieval.weights.embedding,
-                        expanded_queries=[question],
+                        expanded_queries=[retrieval_query],
                         repo_id=repo_id,
                     )
                     related_past_evidence_ids.extend(
@@ -1690,8 +2804,10 @@ class PhotonRAGPipeline:
                 if ref.chunk_id not in related_existing:
                     all_refs_for_debug.append(ref)
                     related_existing.add(ref.chunk_id)
-            combined_pinned_ids = _dedupe_preserve_order(
-                (additional_pinned_ids or []) + related_past_pack_ids
+            combined_pinned_ids = _compose_evidence_frame_pins(
+                current_query_ids=current_query_frame_ids,
+                working_memory_ids=additional_pinned_ids,
+                related_past_ids=related_past_pack_ids,
             )
             with prof.phase("evidence_pack"):
                 pack = build_evidence_pack(
@@ -1773,6 +2889,16 @@ class PhotonRAGPipeline:
                     else:
                         self._relevant_past_turn_cache.pop(photon_session_id, None)
 
+        retrieval_support_scores = _normalised_score_map(list(raw_snapshot) + list(raw))
+        support_score = _support_score_for_pack(
+            question=question,
+            pack_chunks=list(pack.chunks),
+            retrieval_scores=retrieval_support_scores,
+            current_scores=photon_current_score_map,
+            session_scores=photon_session_score_map,
+        )
+        support_guard_active = support_score < _SUPPORT_GUARD_THRESHOLD
+
         # --- Generation (Issue #62 Phase 1: opt-in PHOTON single-path) ---
         # DR-62-001 / DR4-003: strict bool validation for the opt-in flag.
         raw_photon_gen_enabled = (
@@ -1804,13 +2930,28 @@ class PhotonRAGPipeline:
 
         with prof.phase("generation"):
             evidence_text = pack.format_for_prompt()
+            evidence_text = (
+                _support_check_note(
+                    support_score,
+                    guard_active=support_guard_active,
+                )
+                + "\n\n"
+                + evidence_text
+            )
             is_first_turn = len(session.turns) == 0
             if is_first_turn:
                 evidence_text = f"{_EVIDENCE_HEADER}\n\n{evidence_text}"
+            generation_history = _generation_history_text(
+                session,
+                segment_state,
+                segment_id=current_segment_id,
+                carryover_mode=carryover.mode,
+                max_turns=4,
+            )
             messages = build_messages(
                 question=question,
                 evidence_text=evidence_text,
-                history_text=session.history_text(max_turns=4),
+                history_text=generation_history,
                 related_questions=related_past_questions,
                 include_few_shot=is_first_turn,
             )
@@ -1849,7 +2990,14 @@ class PhotonRAGPipeline:
 
         # --- Citation ---
         with prof.phase("citation"):
+            answer = normalise_citation_markers(answer)
             citation = resolve_citations(answer, pack)
+            answer, citation, claim_guard = apply_claim_support_guard(
+                question=question,
+                answer=answer,
+                pack=pack,
+                citation=citation,
+            )
             answering_cfg = getattr(cfg, "answering", None)
             if answering_cfg is not None:
                 postprocess_enabled = answering_cfg.get(
@@ -1865,6 +3013,26 @@ class PhotonRAGPipeline:
             answer, citation, citation_postprocessed = apply_citation_postprocess(
                 answer, pack, citation, enabled=postprocess_enabled
             )
+            citation_budget = apply_citation_budget_rerank(
+                question=question,
+                answer=answer,
+                pack=pack,
+                citation=citation,
+                context_text="\n".join(
+                    part
+                    for part in (
+                        retrieval_query,
+                        generation_history,
+                        "\n".join(related_past_questions),
+                    )
+                    if part.strip()
+                ),
+                retrieval_scores=retrieval_support_scores,
+                current_scores=photon_current_score_map,
+                session_scores=photon_session_score_map,
+            )
+            answer = citation_budget.answer
+            citation = citation_budget.citation
 
         # Finalise debug rows: used/citation_index now determinable (Issue #176)
         pack_chunk_ids = [c.chunk_id for c in pack.chunks]
@@ -1877,18 +3045,56 @@ class PhotonRAGPipeline:
             expanded_refs=all_refs_for_debug,
             store=bl.store,
             photon_scores=photon_score_map,
+            photon_current_scores=photon_current_score_map,
+            photon_session_scores=photon_session_score_map,
         )
         debug_rows = finalise_retrieval_debug(
             rows=debug_rows,
             pack_chunk_ids=pack_chunk_ids,
             cited_chunk_ids=citation.cited_chunk_ids,
         )
+        audit_source_map = {ref.chunk_id: ref.source for ref in all_refs_for_debug}
+        retrieval_stage_audit = {
+            "question": question,
+            "retrieval_query": retrieval_query,
+            "context_carryover_mode": carryover.mode,
+            "context_carryover_reason": carryover.reason,
+            "raw_retrieval": _retrieval_result_audit_rows(
+                raw_snapshot,
+                store=bl.store,
+            ),
+            "post_rerank_or_search": _retrieval_result_audit_rows(
+                list(raw),
+                store=bl.store,
+            ),
+            "reranker_rejected": _retrieval_result_audit_rows(
+                rejected_debug,
+                store=bl.store,
+                limit=10,
+            ),
+            "expanded": _chunk_id_audit_rows(
+                [ref.chunk_id for ref in expanded_refs],
+                store=bl.store,
+                source_map=audit_source_map,
+            ),
+            "final_pack": _chunk_id_audit_rows(
+                pack_chunk_ids,
+                store=bl.store,
+                source_map=audit_source_map,
+                cited_chunk_ids=citation.cited_chunk_ids,
+            ),
+            "cited_chunk_ids": list(citation.cited_chunk_ids),
+        }
 
         latency, memory = prof.finish()
 
         # --- Session update ---
         session_cited_ids = [] if citation_postprocessed else citation.cited_chunk_ids
         turn = session.add_turn(question, answer, session_cited_ids)
+        if segment_state.turn_segments is None:
+            segment_state.turn_segments = {}
+        segment_state.turn_segments[turn.turn_id] = current_segment_id
+        segment_state.current_segment_id = current_segment_id
         bl.sessions.save(session)
 
         # --- Log ---
@@ -1917,6 +3123,38 @@ class PhotonRAGPipeline:
                 ),
                 "evidence_pruning_applied": (pruning_enabled and is_follow_up),
                 "photon_tokenization_failed": tokenization_failed,
+                "photon_pruning_applied": photon_pruning_applied,
+                "photon_scoring_applied": bool(photon_score_map),
+                "photon_scored_count": len(photon_score_map),
+                "photon_scoring_mode": photon_scoring_mode,
+                "context_carryover_mode": carryover.mode,
+                "context_carryover_reason": carryover.reason,
+                "context_carryover_similarity": carryover.similarity,
+                "rewritten_query": retrieval_query if retrieval_query != question else None,
+                "topic_segment_id": current_segment_id,
+                "segment_memory_applied": segment_memory.applied,
+                "segment_memory_score": segment_memory.score,
+                "dual_score_pruning_applied": dual_score_pruning_applied,
+                "support_score": support_score,
+                "support_guard_active": support_guard_active,
+                "claim_support_guard_applied": claim_guard.applied,
+                "claim_support_guard_reason": claim_guard.reason,
+                "claim_support_guard_terms": claim_guard.unsupported_terms or [],
+                "citation_budget_reranked": citation_budget.changed,
+                "citation_budget_removed_indices": citation_budget.removed_indices,
+                "citation_budget_replaced_indices": citation_budget.replaced_indices,
+                "citation_eligibility_scores": [
+                    vars(score) for score in citation_budget.scores
+                ],
+                "retrieval_stage_audit": retrieval_stage_audit,
+                "photon_carryover_applied": bool(photon_carryover_matches),
+                "photon_carryover_turn_ids": [
+                    match.turn_id for match in photon_carryover_matches
+                ],
+                "photon_carryover_scores": [
+                    match.score for match in photon_carryover_matches
+                ],
+                "admission_min_current_score": admission_min_current_score,
                 # Issue #62 Phase 1: generation-level observability.
                 # ``generator_used`` ∈ {"photon", "qwen"} and
                 # ``generator_fallback_reason`` is a closed enum (§7.2):
@@ -1945,6 +3183,28 @@ class PhotonRAGPipeline:
             generator_used=generator_used,
             generator_fallback_reason=generator_fallback_reason,
             retrieval_debug=debug_rows,
+            photon_pruning_applied=photon_pruning_applied,
+            photon_scoring_applied=bool(photon_score_map),
+            photon_scored_count=len(photon_score_map),
+            photon_scoring_mode=photon_scoring_mode,
+            context_carryover_mode=carryover.mode,
+            context_carryover_reason=carryover.reason,
+            context_carryover_similarity=carryover.similarity,
+            rewritten_query=retrieval_query if retrieval_query != question else None,
+            topic_segment_id=current_segment_id,
+            segment_memory_applied=segment_memory.applied,
+            segment_memory_score=segment_memory.score,
+            dual_score_pruning_applied=dual_score_pruning_applied,
+            support_score=support_score,
+            support_guard_active=support_guard_active,
+            retrieval_stage_audit=retrieval_stage_audit,
+            claim_support_guard_applied=claim_guard.applied,
+            claim_support_guard_reason=claim_guard.reason,
+            claim_support_guard_terms=claim_guard.unsupported_terms or [],
+            citation_budget_reranked=citation_budget.changed,
+            citation_budget_removed_indices=citation_budget.removed_indices,
+            citation_budget_replaced_indices=citation_budget.replaced_indices,
+            citation_eligibility_scores=[vars(score) for score in citation_budget.scores],
             refusal_score=r_score,
             refusal_matches=r_matches,
         )

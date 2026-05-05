@@ -9,7 +9,14 @@ from __future__ import annotations
 
 import uuid
 
-from .citation import CitationResult, compute_refusal_score, resolve_citations
+from .citation import (
+    CitationResult,
+    apply_claim_support_guard,
+    compute_refusal_score,
+    normalise_citation_markers,
+    resolve_citations,
+)
+from .citation_eligibility import apply_citation_budget_rerank
 from .config import Config
 
 # CB2-001 (codex-fix): ``QueryResult`` moved to the MLX-free
@@ -241,7 +248,14 @@ class RepoRAGPipeline:
 
         # --- Citation ---
         with prof.phase("citation"):
+            answer = normalise_citation_markers(answer)
             citation = resolve_citations(answer, pack)
+            answer, citation, claim_guard = apply_claim_support_guard(
+                question=question,
+                answer=answer,
+                pack=pack,
+                citation=citation,
+            )
             # post-processing: auto-attach [C:1] to no-citation answers.
             answering_cfg = getattr(cfg, "answering", None)
             if answering_cfg is not None:
@@ -258,6 +272,16 @@ class RepoRAGPipeline:
             answer, citation, citation_postprocessed = apply_citation_postprocess(
                 answer, pack, citation, enabled=postprocess_enabled
             )
+            citation_budget = apply_citation_budget_rerank(
+                question=question,
+                answer=answer,
+                pack=pack,
+                citation=citation,
+                context_text=session.history_text(max_turns=4),
+                retrieval_scores={r.chunk_id: r.score for r in raw},
+            )
+            answer = citation_budget.answer
+            citation = citation_budget.citation
 
         # Finalise debug rows: set used/citation_index now that pack + citations are known
         pack_chunk_ids = [c.chunk_id for c in pack.chunks]
@@ -293,6 +317,15 @@ class RepoRAGPipeline:
                 "wrong_citation_indices": citation.wrong_citation_indices,
                 "no_citation": citation.no_citation,
                 "citation_postprocessed": citation_postprocessed,
+                "claim_support_guard_applied": claim_guard.applied,
+                "claim_support_guard_reason": claim_guard.reason,
+                "claim_support_guard_terms": claim_guard.unsupported_terms or [],
+                "citation_budget_reranked": citation_budget.changed,
+                "citation_budget_removed_indices": citation_budget.removed_indices,
+                "citation_budget_replaced_indices": citation_budget.replaced_indices,
+                "citation_eligibility_scores": [
+                    vars(score) for score in citation_budget.scores
+                ],
                 "latency": latency.as_dict(),
                 "memory": memory.as_dict(),
                 "fallback_flag": False,
@@ -318,6 +351,13 @@ class RepoRAGPipeline:
             generator_used="qwen",
             generator_fallback_reason=None,
             retrieval_debug=debug_rows,
+            claim_support_guard_applied=claim_guard.applied,
+            claim_support_guard_reason=claim_guard.reason,
+            claim_support_guard_terms=claim_guard.unsupported_terms or [],
+            citation_budget_reranked=citation_budget.changed,
+            citation_budget_removed_indices=citation_budget.removed_indices,
+            citation_budget_replaced_indices=citation_budget.replaced_indices,
+            citation_eligibility_scores=[vars(score) for score in citation_budget.scores],
             refusal_score=r_score,
             refusal_matches=r_matches,
         )

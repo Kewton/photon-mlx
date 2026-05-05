@@ -12,6 +12,7 @@ import pytest
 
 from baseline_reporag.retrieval.reranker import (
     _NOISE_PATTERNS,
+    _format_passage_for_rerank,
     CrossEncoderReranker,
 )
 
@@ -27,6 +28,19 @@ def _make_reranker(noise_patterns) -> CrossEncoderReranker:
 def _chunk_id(path: str) -> str:
     """Construct a chunk_id in the 'repo::path' format used by ChunkStore."""
     return f"fastapi::{path}"
+
+
+class _Chunk:
+    def __init__(
+        self,
+        *,
+        rel_path: str = "",
+        section_header: str = "",
+        content: str = "",
+    ) -> None:
+        self.rel_path = rel_path
+        self.section_header = section_header
+        self.content = content
 
 
 # --------------------------------------------------------------------------- #
@@ -91,6 +105,36 @@ def test_case_10_full_builtin_pass_through_snapshot():
         assert r_explicit._is_noise(cid) == r_default._is_noise(cid), (
             f"Snapshot mismatch on {cid}"
         )
+
+
+def test_format_passage_for_rerank_includes_metadata_before_content():
+    passage = _format_passage_for_rerank(
+        _Chunk(
+            rel_path="docs/safety-net-guarantee-1.md",
+            section_header="必要書類",
+            content="認定書、登記簿謄本、決算書類を提出します。",
+        )
+    )
+
+    assert "Document path: docs/safety-net-guarantee-1.md" in passage
+    assert "Section: 必要書類" in passage
+    assert passage.index("Document path:") < passage.index("Content:")
+
+
+def test_format_passage_for_rerank_truncates_content_not_metadata():
+    passage = _format_passage_for_rerank(
+        _Chunk(
+            rel_path="docs/form.md",
+            section_header="Overview",
+            content="x" * 700,
+        ),
+        max_chars=12,
+    )
+
+    assert "Document path: docs/form.md" in passage
+    assert "Section: Overview" in passage
+    assert "x" * 12 in passage
+    assert "x" * 13 not in passage
 
 
 if __name__ == "__main__":

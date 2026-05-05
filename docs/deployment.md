@@ -133,7 +133,7 @@ The main configuration file is `configs/baseline.yaml`.
 | `retrieval.rerank_top_k` | Rerank cutoff | 12 | Number of chunks after reranking |
 | `evidence_pack.max_chunks` | Max evidence chunks | 16 | Reduce to save memory |
 | `evidence_pack.max_tokens` | Max evidence tokens | 16000 | Reduce to save memory |
-| `generation.max_new_tokens` | Generation length | 768 | Max tokens per answer |
+| `generation.max_new_tokens` | Generation length | 2048 | Max tokens per answer |
 | `generation.temperature` | Temperature | 0.2 | Lower = more deterministic |
 | `serving.host` | Server host | `127.0.0.1` | Bind address |
 | `serving.port` | Server port | `8080` | HTTP port |
@@ -245,6 +245,22 @@ python -m scripts.run_baseline_eval --config configs/baseline.yaml --max-questio
 ```
 
 Results are saved to the `reports/` directory.
+
+For the multi-turn scenario-2 regression suite, run the scenario logs for
+baseline and PHOTON, then score them with:
+
+```bash
+python scripts/score_scenario2_comparison.py \
+  --baseline-log logs/scenario2_eval/<baseline-run>.jsonl \
+  --photon-log logs/scenario2_eval/<photon-run>.jsonl \
+  --output-json reports/scenario2_baseline_vs_photon.json \
+  --output-csv reports/scenario2_baseline_vs_photon.csv \
+  --output-md reports/scenario2_baseline_vs_photon.md
+```
+
+The scorer is deterministic and intended for regression comparison. It checks
+answer expectations, required/forbidden cited documents, citation count, wrong
+citations, and cautious answers for unsupported inclusion claims.
 
 ### Logs
 
